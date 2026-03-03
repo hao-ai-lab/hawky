@@ -1,0 +1,6 @@
+[install]
+peer = false
+
+[run]
+# Silence the bun update check
+silent = false
