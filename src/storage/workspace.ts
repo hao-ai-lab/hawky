@@ -1,0 +1,347 @@
+// =============================================================================
+// Workspace Manager
+//
+// Manages the PA workspace at ~/.hawky/workspace/. Handles:
+// - First-run initialization (copy templates, create directories)
+// - Reading/writing workspace files (SOUL.md, USER.md, etc.)
+// - Daily log management (memory/YYYY-MM-DD.md)
+//
+// Templates live in src/templates/ and are copied on first run.
+// Existing files are NEVER overwritten (idempotent init).
+// =============================================================================
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+/** Default workspace path. Can be overridden for testing. */
+let WORKSPACE_DIR = join(homedir(), ".hawky", "workspace");
+
+/** All workspace template files (order matters for bootstrap injection). */
+export const WORKSPACE_FILES = [
+  "AGENTS.md",
+  "SOUL.md",
+  "USER.md",
+  "IDENTITY.md",
+  "MEMORY.md",
+  "TOOLS.md",
+  "HEARTBEAT.md",
+  "BOOTSTRAP.md",
+] as const;
+
+/**
+ * Additional template files created in workspace but NOT injected into
+ * the system prompt. These are loaded on-demand (e.g., when /setup runs).
+ */
+export const EXTRA_TEMPLATE_FILES = ["SETUP.md"] as const;
+
+export type WorkspaceFileName = (typeof WORKSPACE_FILES)[number];
+
+// -----------------------------------------------------------------------------
+// Configuration
+// -----------------------------------------------------------------------------
+
+/** Override the workspace directory (for testing). */
+export function setWorkspaceDir(dir: string): void {
+  WORKSPACE_DIR = dir;
+}
+
+/** Get the current workspace directory. */
+export function getWorkspaceDir(): string {
+  return WORKSPACE_DIR;
+}
+
+// -----------------------------------------------------------------------------
+// Template resolution
+// -----------------------------------------------------------------------------
+
+/** Get the path to the templates directory (src/templates/). */
+function getTemplatesDir(): string {
+  // Navigate from src/storage/ up to src/templates/
+  return join(__dirname, "..", "templates");
+}
+
+/** Read a template file's content. Returns null if template doesn't exist. */
+function readTemplate(filename: string): string | null {
+  const templatePath = join(getTemplatesDir(), filename);
+  if (!existsSync(templatePath)) return null;
+  return readFileSync(templatePath, "utf-8");
+}
+
+// -----------------------------------------------------------------------------
+// WorkspaceManager
+// -----------------------------------------------------------------------------
+
+export class WorkspaceManager {
+  private readonly dir: string;
+
+  constructor(workspaceDir?: string) {
+    this.dir = workspaceDir ?? WORKSPACE_DIR;
+  }
+
+  /** Get the workspace directory path. */
+  getWorkspacePath(): string {
+    return this.dir;
+  }
+
+  /** Get the memory directory path (for daily logs). */
+  getMemoryDir(): string {
+    return join(this.dir, "memory");
+  }
+
+  /**
+   * Initialize the workspace. Copies templates for missing files.
+   * Creates the workspace and memory directories if needed.
+   * Idempotent: never overwrites existing files.
+   *
+   * @returns List of files that were created (empty if workspace already fully initialized)
+   */
+  init(): string[] {
+    const created: string[] = [];
+
+    // Detect if this is a fresh workspace (never initialized before)
+    const isFirstInit = !existsSync(this.dir);
+
+    // Create workspace directory
+    if (isFirstInit) {
+      mkdirSync(this.dir, { recursive: true });
+    }
+
+    // Create memory/ subdirectory
+    const memoryDir = this.getMemoryDir();
+    if (!existsSync(memoryDir)) {
+      mkdirSync(memoryDir, { recursive: true });
+    }
+
+    // Copy templates for missing files (bootstrap-injected files)
+    for (const filename of WORKSPACE_FILES) {
+      const targetPath = join(this.dir, filename);
+      if (existsSync(targetPath)) continue; // Never overwrite
+
+      // BOOTSTRAP.md is only created on first init. Once the user completes
+      // onboarding and the agent deletes it, it should NOT come back.
+      if (filename === "BOOTSTRAP.md" && !isFirstInit) continue;
+
+      const content = readTemplate(filename);
+      if (content !== null) {
+        writeFileSync(targetPath, content, "utf-8");
+        created.push(filename);
+      }
+    }
+
+    // Copy extra template files (not injected into system prompt)
+    for (const filename of EXTRA_TEMPLATE_FILES) {
+      const targetPath = join(this.dir, filename);
+      if (existsSync(targetPath)) continue;
+
+      const content = readTemplate(filename);
+      if (content !== null) {
+        writeFileSync(targetPath, content, "utf-8");
+        created.push(filename);
+      }
+    }
+
+    return created;
+  }
+
+  /**
+   * Read a workspace file by name.
+   * @param filename - File name (e.g., "SOUL.md") or relative path (e.g., "memory/2026-03-14.md")
+   * @returns File content, or null if the file doesn't exist
+   */
+  readFile(filename: string): string | null {
+    const filePath = join(this.dir, filename);
+    if (!existsSync(filePath)) return null;
+    return readFileSync(filePath, "utf-8");
+  }
+
+  /**
+   * Write a workspace file (creates parent directories if needed).
+   * @param filename - File name or relative path
+   * @param content - File content
+   */
+  writeFile(filename: string, content: string): void {
+    const filePath = join(this.dir, filename);
+    const parentDir = dirname(filePath);
+    if (!existsSync(parentDir)) {
+      mkdirSync(parentDir, { recursive: true });
+    }
+    writeFileSync(filePath, content, "utf-8");
+  }
+
+  /**
+   * Append a timestamped entry to today's daily log.
+   * Creates the file and memory/ directory if needed.
+   * @param content - Text to append
+   * @param date - Date for the log file (defaults to today)
+   */
+  appendToDaily(content: string, date?: Date): void {
+    const d = date ?? new Date();
+    const dateStr = formatDate(d);
+    const filename = `memory/${dateStr}.md`;
+    const filePath = join(this.dir, filename);
+
+    // Ensure memory/ directory exists
+    const memoryDir = this.getMemoryDir();
+    if (!existsSync(memoryDir)) {
+      mkdirSync(memoryDir, { recursive: true });
+    }
+
+    // Format: [HH:MM] content
+    const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const entry = `\n[${time}] ${content}\n`;
+
+    if (!existsSync(filePath)) {
+      // Create with date header
+      writeFileSync(filePath, `# ${dateStr}\n${entry}`, "utf-8");
+    } else {
+      appendFileSync(filePath, entry, "utf-8");
+    }
+  }
+
+  /**
+   * Check if a workspace file exists.
+   * @param filename - File name or relative path
+   */
+  exists(filename: string): boolean {
+    return existsSync(join(this.dir, filename));
+  }
+
+  /**
+   * Delete a workspace file.
+   * @param filename - File name or relative path
+   * @returns true if file was deleted, false if it didn't exist
+   */
+  deleteFile(filename: string): boolean {
+    const filePath = join(this.dir, filename);
+    if (!existsSync(filePath)) return false;
+    unlinkSync(filePath);
+    return true;
+  }
+
+  /**
+   * List daily log files in the memory/ directory.
+   * @returns Sorted array of filenames (e.g., ["2026-03-12.md", "2026-03-13.md", "2026-03-14.md"])
+   */
+  listDailyLogs(): string[] {
+    const memoryDir = this.getMemoryDir();
+    if (!existsSync(memoryDir)) return [];
+
+    const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/;
+    return readdirSync(memoryDir)
+      .filter((f) => datePattern.test(f))
+      .sort();
+  }
+
+  /**
+   * Load all bootstrap files for system prompt injection.
+   * Returns files in the order defined by WORKSPACE_FILES.
+   * Skips files that don't exist. Applies truncation.
+   *
+   * @param maxCharsPerFile - Max characters per file (default 20000)
+   * @param maxCharsTotal - Max total characters across all files (default 150000)
+   * @param mainSession - If false, excludes MEMORY.md (security)
+   */
+  loadBootstrapFiles(options?: {
+    maxCharsPerFile?: number;
+    maxCharsTotal?: number;
+    mainSession?: boolean;
+  }): BootstrapFile[] {
+    const maxPerFile = options?.maxCharsPerFile ?? 20_000;
+    const maxTotal = options?.maxCharsTotal ?? 150_000;
+    const mainSession = options?.mainSession ?? true;
+
+    const files: BootstrapFile[] = [];
+    let totalChars = 0;
+
+    for (const filename of WORKSPACE_FILES) {
+      // Skip MEMORY.md in non-main sessions (security)
+      if (!mainSession && filename === "MEMORY.md") continue;
+
+      const content = this.readFile(filename);
+      if (content === null || content.trim().length === 0) continue;
+
+      // Per-file truncation
+      const truncated = truncateBootstrapContent(content, filename, maxPerFile);
+
+      // Check total budget
+      if (totalChars + truncated.content.length > maxTotal) {
+        // Skip remaining files if budget exceeded
+        break;
+      }
+
+      totalChars += truncated.content.length;
+      files.push({
+        filename,
+        content: truncated.content,
+        truncated: truncated.wasTruncated,
+      });
+    }
+
+    return files;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Bootstrap file types
+// -----------------------------------------------------------------------------
+
+export interface BootstrapFile {
+  filename: string;
+  content: string;
+  truncated: boolean;
+}
+
+// -----------------------------------------------------------------------------
+// Truncation (a proven design pattern: 70% head + 20% tail)
+// -----------------------------------------------------------------------------
+
+interface TruncateResult {
+  content: string;
+  wasTruncated: boolean;
+}
+
+function truncateBootstrapContent(
+  content: string,
+  filename: string,
+  maxChars: number,
+): TruncateResult {
+  const trimmed = content.trimEnd();
+  if (trimmed.length <= maxChars) {
+    return { content: trimmed, wasTruncated: false };
+  }
+
+  const headChars = Math.floor(maxChars * 0.7);
+  const tailChars = Math.floor(maxChars * 0.2);
+  const head = trimmed.slice(0, headChars);
+  const tail = trimmed.slice(-tailChars);
+
+  const marker = `\n\n[...truncated ${filename}: kept ${headChars}+${tailChars} chars of ${trimmed.length}...]\n\n`;
+  return {
+    content: head + marker + tail,
+    wasTruncated: true,
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/** Format a Date as YYYY-MM-DD. */
+function formatDate(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** Exported for testing. */
+export { formatDate, truncateBootstrapContent };
