@@ -1,0 +1,239 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Prevent overscroll bounce on iOS and lock horizontal pan — stray wide
+     content must not allow the whole page to be dragged left/right. */
+  html, body {
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: touch;
+    overflow-x: hidden;
+  }
+
+  /* Safe area padding for iPhone notch/home indicator (viewport-fit=cover
+     is set in index.html). Bottom inset is handled inside InputBar /
+     InstallBanner — adding it here too would duplicate the padding on
+     Face-ID iPhones and create an extra blank strip. */
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* Base text color for warm palette */
+  body {
+    @apply text-stone-800;
+  }
+  .dark body {
+    @apply text-stone-200;
+  }
+
+  /* No smooth scrolling — instant scroll positioning for channel switches */
+
+  /* Focus ring for accessibility */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-accent;
+  }
+
+  /* Tactile feedback on all buttons for touch devices */
+  button {
+    @apply active:scale-[0.97] transition-transform duration-75;
+  }
+}
+
+/* Markdown content styling — Claude.ai-aligned typography.
+   Claude.ai uses Tiempos Text at ~16px with ~1.6 line-height.
+   We use ui-serif (New York on macOS) as the closest free match. */
+.markdown-content {
+  font-size: 1rem;       /* 16px — matches Claude.ai */
+  line-height: 1.6;
+  letter-spacing: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.markdown-content p {
+  margin-bottom: 0.9em;
+}
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  letter-spacing: -0.02em;
+}
+.markdown-content h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin-top: 1.3em;
+  margin-bottom: 0.4em;
+  letter-spacing: -0.015em;
+}
+.markdown-content h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-top: 1.1em;
+  margin-bottom: 0.3em;
+}
+
+.markdown-content ul {
+  @apply list-disc pl-5;
+  margin-bottom: 0.9em;
+}
+.markdown-content ol {
+  @apply list-decimal pl-5;
+  margin-bottom: 0.9em;
+}
+.markdown-content li {
+  margin-bottom: 0.35em;
+  line-height: 1.6;
+}
+.markdown-content li > p {
+  margin-bottom: 0.35em;
+}
+
+.markdown-content blockquote {
+  @apply border-l-2 border-stone-300 dark:border-stone-600 pl-4 italic text-stone-500 dark:text-stone-400;
+  margin-bottom: 0.9em;
+}
+
+/* Markdown links — Claude.ai terracotta. Applied here (not just in the
+   <Markdown> component's anchor override) so other renderers that embed
+   ReactMarkdown directly inside a .markdown-content container (e.g.
+   MemoryFileView) keep the same interactive link styling. */
+.markdown-content a {
+  color: #ae5630;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.dark .markdown-content a {
+  color: #d4956b;
+}
+
+.markdown-content hr {
+  @apply border-stone-200 dark:border-stone-700 my-5;
+}
+
+/* highlight.js: make background transparent (our container provides it) */
+.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+/* Dark mode: override highlight.js token colors for readability */
+.dark .hljs-keyword { color: #ff7b72; }
+.dark .hljs-string { color: #a5d6ff; }
+.dark .hljs-number { color: #79c0ff; }
+.dark .hljs-built_in { color: #ffa657; }
+.dark .hljs-comment { color: #8b949e; }
+.dark .hljs-function { color: #d2a8ff; }
+.dark .hljs-title { color: #d2a8ff; }
+.dark .hljs-params { color: #c9d1d9; }
+.dark .hljs-attr { color: #79c0ff; }
+.dark .hljs-literal { color: #79c0ff; }
+.dark .hljs-type { color: #ffa657; }
+.dark .hljs-meta { color: #79c0ff; }
+.dark .hljs { color: #c9d1d9; }
+
+/* KaTeX display math — prevent horizontal overflow on wide equations */
+.markdown-content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Tables — Claude.ai style: sans-serif, no outer border, subtle row dividers */
+.markdown-content table {
+  width: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.2em;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.markdown-content thead {
+  border-bottom: 1.5px solid rgba(0,0,0,0.12);
+}
+.dark .markdown-content thead {
+  border-bottom-color: rgba(255,255,255,0.12);
+}
+.markdown-content th {
+  padding: 0.6rem 0.9rem;
+  font-weight: 600;
+  text-align: left;
+}
+.markdown-content td {
+  padding: 0.6rem 0.9rem;
+  border-top: 1px solid rgba(0,0,0,0.05);
+  vertical-align: top;
+}
+.dark .markdown-content td {
+  border-top-color: rgba(255,255,255,0.05);
+}
+
+/* Tree-branch glyphs for ToolStep children. Each row draws its own
+   T-junction (middle items) or L-corner (last item) via pseudo-elements,
+   so parallel tool calls read as a tree rather than a single continuous
+   rail — matching the Claude Code tool-group visual. */
+.tree-branch {
+  position: relative;
+  padding-left: 1rem;
+}
+.tree-branch::before,
+.tree-branch::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+/* Vertical segment — runs full height for middle children so the rail
+   stays continuous through the `space-y-2` gap to the next sibling. */
+.tree-branch::before {
+  left: 0;
+  top: -0.5rem;
+  bottom: 0;
+  border-left: 1px solid theme("colors.stone.200");
+}
+.dark .tree-branch::before {
+  border-left-color: theme("colors.stone.700");
+}
+/* Last child: rail stops at the elbow where the horizontal stub meets it.
+   Must line up with the ::after's top, accounting for the -0.5rem top
+   offset on the vertical — that's how we avoid a broken L-corner with
+   the vertical ending above the horizontal. */
+.tree-branch:last-child::before {
+  bottom: auto;
+  height: 1.05rem; /* = -0.5rem (vertical top) + 0.55rem (horizontal top) */
+}
+/* Horizontal stub — anchored to the midline of the NAME ROW (the first
+   line of the ToolLine, which carries the tool name + input preview).
+   ~0.55rem (8.8px) lands at the visual middle of the lowercase
+   text glyph (the "ash" in "bash date") rather than at the baseline
+   below it. Iterated from screenshots — earlier values (1rem, 1.2rem)
+   sat at or below the baseline; pushing it up to 0.55rem centers it
+   on the text x-height.
+   Pointing at the WHOLE card (top: 50%) doesn't work — for tools with a
+   body the midline lands inside the output box, well below the name. */
+.tree-branch::after {
+  left: 0;
+  top: 0.55rem;
+  width: 0.75rem;
+  border-top: 1px solid theme("colors.stone.200");
+}
+.dark .tree-branch::after {
+  border-top-color: theme("colors.stone.700");
+}
+
+.markdown-content strong {
+  @apply font-semibold;
+}
+.markdown-content em {
+  @apply italic;
+}
+.markdown-content del {
+  @apply line-through;
+}
