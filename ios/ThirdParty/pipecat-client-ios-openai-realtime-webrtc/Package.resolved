@@ -1,0 +1,25 @@
+{
+  "object": {
+    "pins": [
+      {
+        "package": "PipecatClientIOS",
+        "repositoryURL": "https://github.com/pipecat-ai/pipecat-client-ios.git",
+        "state": {
+          "branch": null,
+          "revision": "ca46a74d41f55452469251aa42f07360ce0427a8",
+          "version": "0.3.4"
+        }
+      },
+      {
+        "package": "WebRTC",
+        "repositoryURL": "https://github.com/stasel/WebRTC",
+        "state": {
+          "branch": null,
+          "revision": "5b2eb61cace7d62726b29a38b768b07d6bc55c45",
+          "version": "134.0.0"
+        }
+      }
+    ]
+  },
+  "version": 1
+}
