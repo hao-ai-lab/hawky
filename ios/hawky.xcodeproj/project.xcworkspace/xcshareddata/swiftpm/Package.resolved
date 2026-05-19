@@ -1,0 +1,97 @@
+{
+  "object": {
+    "pins": [
+      {
+        "package": "MetaWearablesDAT",
+        "repositoryURL": "https://github.com/facebook/meta-wearables-dat-ios",
+        "state": {
+          "branch": null,
+          "revision": "b67454b6f081373f757476ecb3b4973bf33bc326",
+          "version": "0.4.0"
+        }
+      },
+      {
+        "package": "NetworkImage",
+        "repositoryURL": "https://github.com/gonzalezreal/NetworkImage",
+        "state": {
+          "branch": null,
+          "revision": "2849f5323265386e200484b0d0f896e73c3411b9",
+          "version": "6.0.1"
+        }
+      },
+      {
+        "package": "PipecatClientIOS",
+        "repositoryURL": "https://github.com/pipecat-ai/pipecat-client-ios.git",
+        "state": {
+          "branch": null,
+          "revision": "f92b5e68e56a8311f7d8ead68a7a5674843cbc40",
+          "version": "0.3.6"
+        }
+      },
+      {
+        "package": "cmark-gfm",
+        "repositoryURL": "https://github.com/swiftlang/swift-cmark",
+        "state": {
+          "branch": null,
+          "revision": "924936d0427cb25a61169739a7660230bffa6ea6",
+          "version": "0.8.0"
+        }
+      },
+      {
+        "package": "swift-custom-dump",
+        "repositoryURL": "https://github.com/pointfreeco/swift-custom-dump",
+        "state": {
+          "branch": null,
+          "revision": "06c57924455064182d6b217f06ebc05d00cb2990",
+          "version": "1.5.0"
+        }
+      },
+      {
+        "package": "swift-markdown-ui",
+        "repositoryURL": "https://github.com/gonzalezreal/swift-markdown-ui",
+        "state": {
+          "branch": null,
+          "revision": "5f613358148239d0292c0cef674a3c2314737f9e",
+          "version": "2.4.1"
+        }
+      },
+      {
+        "package": "swift-snapshot-testing",
+        "repositoryURL": "https://github.com/pointfreeco/swift-snapshot-testing",
+        "state": {
+          "branch": null,
+          "revision": "ad5e3190cc63dc288f28546f9c6827efc1e9d495",
+          "version": "1.19.2"
+        }
+      },
+      {
+        "package": "swift-syntax",
+        "repositoryURL": "https://github.com/swiftlang/swift-syntax",
+        "state": {
+          "branch": null,
+          "revision": "2b59c0c741e9184ab057fd22950b491076d42e91",
+          "version": "603.0.0"
+        }
+      },
+      {
+        "package": "WebRTC",
+        "repositoryURL": "https://github.com/stasel/WebRTC",
+        "state": {
+          "branch": null,
+          "revision": "5b2eb61cace7d62726b29a38b768b07d6bc55c45",
+          "version": "134.0.0"
+        }
+      },
+      {
+        "package": "xctest-dynamic-overlay",
+        "repositoryURL": "https://github.com/pointfreeco/xctest-dynamic-overlay",
+        "state": {
+          "branch": null,
+          "revision": "dfd70507def84cb5fb821278448a262c6ff2bbad",
+          "version": "1.9.0"
+        }
+      }
+    ]
+  },
+  "version": 1
+}
