@@ -1,0 +1,10 @@
+{
+  "type": "res",
+  "id": "11111111-2222-3333-4444-555555555555",
+  "ok": true,
+  "payload": {
+    "connId": "conn-abc-123",
+    "serverVersion": "hawky/0.9.0",
+    "methods": ["chat.send", "chat.cancel", "session.resolve", "session.history", "session.list"]
+  }
+}
