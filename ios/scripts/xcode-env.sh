@@ -194,6 +194,27 @@ ios_set_xcode_container_args() {
   fi
 }
 
+ios_is_simulator_destination() {
+  case "$1" in
+    *Simulator*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ios_xcode_has_build_setting() {
+  local key="$1"
+  shift
+
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "$key="* ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 ios_bundle_id() {
   if [[ -n "${IOS_BUNDLE_ID:-}" ]]; then
     printf '%s\n' "$IOS_BUNDLE_ID"

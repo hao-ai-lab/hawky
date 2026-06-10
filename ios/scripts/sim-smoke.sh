@@ -93,7 +93,7 @@ mkdir -p "$BUILD_DIR"   # build.log redirect below needs the dir to exist first
 echo "[sim-smoke] building..."
 if ! xcodebuild "${IOS_XCODE_CONTAINER_ARGS[@]}" -scheme "$IOS_SCHEME" \
     -destination "platform=iOS Simulator,id=$UDID" -configuration Debug \
-    -derivedDataPath "$BUILD_DIR" build >"$BUILD_DIR/build.log" 2>&1; then
+    -derivedDataPath "$BUILD_DIR" build CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES >"$BUILD_DIR/build.log" 2>&1; then
   tail -30 "$BUILD_DIR/build.log" >&2
   fail "build"
 fi

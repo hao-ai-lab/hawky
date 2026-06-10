@@ -19,6 +19,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/xcode-env.sh"
 
+# rich's personal-device signing defaults. Override-able: the main resolver still
+# honours env vars / --bundle / --team, these only set the fallback so a plain
+# `bun run ios:install-device` signs with the personal team out of the box.
+: "${IOS_BUNDLE_ID:=com.starry7420.hawky}"
+: "${IOS_DEVELOPMENT_TEAM:=6QRJPV7DXU}"
+
 REPO_ROOT="${IOS_ROOT}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="/tmp/ios-install-${TIMESTAMP}.log"

@@ -41,4 +41,8 @@ if [[ -n "$ONLY_TESTING" ]]; then
   done
 fi
 
+if ios_is_simulator_destination "$IOS_DESTINATION" && ! ios_xcode_has_build_setting CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION "$@"; then
+  args+=("CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION=YES")
+fi
+
 xcodebuild "${args[@]}" "$@"
