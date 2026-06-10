@@ -1,0 +1,35 @@
+{"text": "we're out of coffee", "shouldMint": true, "category": "groceries", "note": "classic depletion assertion"}
+{"text": "we need more milk", "shouldMint": true, "category": "groceries", "note": "explicit quantity need"}
+{"text": "we're running low on paper towels", "shouldMint": true, "category": "household", "note": "running low phrasing"}
+{"text": "we need to buy bread", "shouldMint": true, "category": "groceries", "note": "explicit buy intent"}
+{"text": "we don't have any eggs", "shouldMint": true, "category": "groceries", "note": "negation of possession"}
+{"text": "getting low on shampoo", "shouldMint": true, "category": "household", "note": "getting low phrasing, no subject"}
+{"text": "we're out of laundry detergent", "shouldMint": true, "category": "household", "note": "household consumable depletion"}
+{"text": "we need some orange juice", "shouldMint": true, "category": "groceries", "note": "need + some quantifier"}
+{"text": "we need to get more dish soap", "shouldMint": true, "category": "household", "note": "need to get phrasing"}
+{"text": "we're low on toothpaste", "shouldMint": true, "category": "household", "note": "low on phrasing"}
+{"text": "we don't have more toilet paper", "shouldMint": true, "category": "household", "note": "don't have more phrasing"}
+{"text": "we need pasta for dinner", "shouldMint": true, "category": "groceries", "note": "need for meal planning"}
+{"text": "we're out of trash bags", "shouldMint": true, "category": "household", "note": "household supply depletion"}
+{"text": "we need batteries for the remote", "shouldMint": true, "category": "errand", "note": "household item need"}
+{"text": "we're running low on coffee filters", "shouldMint": true, "category": "groceries", "note": "consumable running low"}
+{"text": "do we need coffee?", "shouldMint": false, "category": "question", "note": "question mark triggers negative filter"}
+{"text": "are we out of milk?", "shouldMint": false, "category": "question", "note": "question about depletion, not assertion"}
+{"text": "what should we buy at the store?", "shouldMint": false, "category": "question", "note": "open question, not a stated need"}
+{"text": "do we have enough bread?", "shouldMint": false, "category": "question", "note": "question about sufficiency"}
+{"text": "if we run out of coffee we should buy some", "shouldMint": false, "category": "hypothetical", "note": "if-we hypothetical trigger"}
+{"text": "if we need milk I'll grab it", "shouldMint": false, "category": "hypothetical", "note": "conditional if-we construct"}
+{"text": "if you need anything let me know", "shouldMint": false, "category": "hypothetical", "note": "conditional if-you construct"}
+{"text": "we bought coffee yesterday", "shouldMint": false, "category": "already-satisfied", "note": "past-tense purchase satisfies the need"}
+{"text": "we already got milk from the store", "shouldMint": false, "category": "already-satisfied", "note": "got = past satisfaction"}
+{"text": "I picked up bread earlier today", "shouldMint": false, "category": "already-satisfied", "note": "picked up = already satisfied"}
+{"text": "I ordered more batteries online", "shouldMint": false, "category": "already-satisfied", "note": "ordered = in-flight satisfaction"}
+{"text": "she needs coffee every morning", "shouldMint": false, "category": "third-party", "note": "she-subject triggers third-party filter"}
+{"text": "he wants more milk for the kids", "shouldMint": false, "category": "third-party", "note": "he-subject triggers third-party filter"}
+{"text": "they need bread for the party", "shouldMint": false, "category": "third-party", "note": "they-subject triggers third-party filter"}
+{"text": "I love this coffee, it's amazing", "shouldMint": false, "category": "chit-chat", "note": "opinion/sentiment, no depletion signal"}
+{"text": "that was a great dinner last night", "shouldMint": false, "category": "chit-chat", "note": "social chit-chat, no stated need"}
+{"text": "coffee is so good in the morning", "shouldMint": false, "category": "opinion", "note": "preference statement, not a need"}
+{"text": "the weather is really nice today", "shouldMint": false, "category": "chit-chat", "note": "off-topic small talk"}
+{"text": "remind me to call the dentist tomorrow", "shouldMint": false, "category": "needs-model-recognizer", "note": "needs model recognizer: no keyword match for buy-item pattern"}
+{"text": "we should schedule a plumber visit", "shouldMint": false, "category": "needs-model-recognizer", "note": "needs model recognizer: service request, no item-depletion keyword"}
