@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "screens": [
+    {
+      "id": "live",
+      "title": "Live",
+      "catalog": "primary",
+      "url": "hawky://live",
+      "expectedIdentifier": "screen.live"
+    },
+    {
+      "id": "chat",
+      "title": "Chat",
+      "catalog": "primary",
+      "url": "hawky://chat/ios:main",
+      "expectedIdentifier": "screen.chat"
+    },
+    {
+      "id": "chat.sessions",
+      "title": "Chat Sessions",
+      "expectedIdentifier": "chatCarousel.sessions"
+    },
+    {
+      "id": "chat.context",
+      "title": "Chat Context",
+      "expectedIdentifier": "chatCarousel.context"
+    },
+    {
+      "id": "probes",
+      "title": "Probes",
+      "catalog": "primary",
+      "url": "hawky://probes",
+      "expectedIdentifier": "screen.test"
+    },
+    {
+      "id": "pipecat",
+      "title": "PipeCat",
+      "catalog": "primary",
+      "url": "hawky://pipecat",
+      "expectedIdentifier": "pipecat.status"
+    },
+    {
+      "id": "settings",
+      "title": "Settings",
+      "expectedIdentifier": "screen.settings"
+    },
+    {
+      "id": "settings.connection",
+      "title": "Settings Connection",
+      "catalog": "primary",
+      "url": "hawky://settings/connection",
+      "expectedIdentifier": "settings.gatewayURL"
+    },
+    {
+      "id": "settings.agent",
+      "title": "Settings Agent",
+      "expectedIdentifier": "settings.agent.provider"
+    },
+    {
+      "id": "settings.live",
+      "title": "Settings Live",
+      "expectedIdentifier": "live.provider"
+    },
+    {
+      "id": "settings.prompt",
+      "title": "Settings Prompt",
+      "catalog": "primary",
+      "url": "hawky://settings/prompt",
+      "expectedIdentifier": "live.prompt"
+    },
+    {
+      "id": "settings.appearance",
+      "title": "Settings Appearance",
+      "expectedIdentifier": "settings.appearance.introEnabled"
+    },
+    {
+      "id": "settings.notifications",
+      "title": "Settings Notifications",
+      "expectedIdentifier": "settings.ntfy.enabled"
+    },
+    {
+      "id": "settings.notification-sessions",
+      "title": "Settings Notification Sessions",
+      "catalog": "primary",
+      "url": "hawky://settings/notification-sessions",
+      "expectedIdentifier": "settings.ntfy.sessions.subpage"
+    },
+    {
+      "id": "settings.layout",
+      "title": "Settings App Layout",
+      "catalog": "secondary",
+      "url": "hawky://settings/app-layout",
+      "expectedIdentifier": "settings.tabs.fixed.settings",
+      "maxSwipes": 2
+    },
+    {
+      "id": "settings.about",
+      "title": "Settings About",
+      "expectedIdentifier": "About"
+    },
+    {
+      "id": "onboarding",
+      "title": "Onboarding",
+      "expectedIdentifier": "screen.onboarding"
+    },
+    {
+      "id": "first-run-intro",
+      "title": "First-run Intro",
+      "expectedIdentifier": "screen.firstRunIntro"
+    },
+    {
+      "id": "first-run-intro.live-mode",
+      "title": "First-run Intro Live Mode",
+      "expectedIdentifier": "firstRunIntro.card.liveMode"
+    },
+    {
+      "id": "first-run-intro.setup",
+      "title": "First-run Intro Setup",
+      "expectedIdentifier": "firstRunIntro.card.setup"
+    },
+    {
+      "id": "first-run-intro.begin",
+      "title": "First-run Intro Set Up",
+      "expectedIdentifier": "firstRunIntro.card.begin"
+    },
+    {
+      "id": "onboarding.connection",
+      "title": "Onboarding Connection",
+      "expectedIdentifier": "onboarding.connection.mode"
+    },
+    {
+      "id": "onboarding.live-provider",
+      "title": "Onboarding Live Provider",
+      "expectedIdentifier": "Live Provider"
+    },
+    {
+      "id": "onboarding.glasses",
+      "title": "Onboarding Glasses",
+      "expectedIdentifier": "Ray-Ban Meta"
+    },
+    {
+      "id": "onboarding.complete",
+      "title": "Onboarding Complete",
+      "expectedIdentifier": "Setup complete"
+    },
+    {
+      "id": "live.more",
+      "title": "Live More",
+      "expectedIdentifier": "live.moreSheet.settings"
+    },
+    {
+      "id": "live.settings",
+      "title": "Live Settings",
+      "expectedIdentifier": "live.provider"
+    },
+    {
+      "id": "live.sessions",
+      "title": "Live Sessions",
+      "catalog": "secondary",
+      "url": "hawky://live/sessions",
+      "expectedIdentifier": "live.sessions.list"
+    },
+    {
+      "id": "live.recordings",
+      "title": "Live Recordings",
+      "catalog": "primary",
+      "url": "hawky://recordings",
+      "expectedIdentifier": "screen.recordingsHistory"
+    },
+    {
+      "id": "live.summary",
+      "title": "Live Summary",
+      "catalog": "primary",
+      "url": "hawky://live/summary",
+      "expectedIdentifier": "live.summary.generate"
+    },
+    {
+      "id": "live.glasses",
+      "title": "Live Glasses",
+      "catalog": "primary",
+      "url": "hawky://live/glasses",
+      "expectedIdentifier": "glasses.status"
+    },
+    {
+      "id": "live.status",
+      "title": "Live Status",
+      "catalog": "secondary",
+      "url": "hawky://live/status",
+      "expectedIdentifier": "live.status.sheet"
+    },
+    {
+      "id": "live2",
+      "title": "Live2",
+      "catalog": "secondary",
+      "url": "hawky://live2",
+      "expectedIdentifier": "live2.status"
+    },
+    {
+      "id": "live2.settings",
+      "title": "Live2 Settings",
+      "expectedIdentifier": "live2.settings.modelPreset"
+    },
+    {
+      "id": "live2.recordings",
+      "title": "Live2 Recordings",
+      "expectedIdentifier": "live2.recordings.current"
+    },
+    {
+      "id": "pipecat-recording",
+      "title": "Pipecat2",
+      "catalog": "secondary",
+      "url": "hawky://pipecat2",
+      "expectedIdentifier": "pipecatRecording.status"
+    },
+    {
+      "id": "gptr",
+      "title": "GPTRDemo",
+      "catalog": "secondary",
+      "url": "hawky://gptr",
+      "expectedIdentifier": "gptr.status"
+    }
+  ]
+}
