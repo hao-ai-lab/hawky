@@ -1,0 +1,142 @@
+/* Inter — the clean, editorial typeface used by the Thinking Machines blog. */
+@import url("https://rsms.me/inter/inter.css");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  /* Themeable surfaces (dark defaults). The .light class overrides these. */
+  --bg: #0e1110;
+  --paper: #18191a;
+  --text: #ece9e4;
+  --glass-bg: rgba(40, 40, 42, 0.46);
+  --glass-border: rgba(255, 255, 255, 0.2);
+  /* Height of the mobile bottom tab bar (MobileBar). Live's floating controls
+     sit above it; other screens pad their content past it (pb-24). */
+  --tabbar-h: 3.25rem;
+  /* Bottom offset for Live's floating control cluster on mobile = tab bar +
+     the device home-indicator safe area. */
+  --live-controls-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+}
+
+/* Light theme — clean editorial palette (Thinking Machines feel). */
+.light {
+  color-scheme: light;
+  --bg: #fbfaf8;
+  --paper: #f1efea;
+  --text: #1c1b19;
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(0, 0, 0, 0.1);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  /* Inter, with InterVariable when available. */
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01"; /* refined letterforms (Inter) */
+  letter-spacing: -0.011em;              /* subtle editorial tightening */
+  line-height: 1.55;                     /* generous, blog-like rhythm */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+  overflow-x: hidden;
+}
+
+@supports (font-variation-settings: normal) {
+  body { font-family: "InterVariable", "Inter", system-ui, sans-serif; }
+}
+
+/* Editorial headings: tighter tracking, balanced wrapping. */
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+/* iOS-style frosted glass surface used by floating chrome + cards. */
+@layer components {
+  .glass {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+  }
+  .glass-amber {
+    background: rgba(224, 163, 75, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+  }
+  /* Press feedback matching the iOS spring (scale 0.985 + slight dim). */
+  .pressable {
+    transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.16s ease;
+  }
+  .pressable:active {
+    transform: scale(0.96);
+    filter: brightness(0.95);
+  }
+}
+
+/* Safe-area helpers for notch / home indicator (PWA full screen). */
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* -------------------------------------------------------------------------
+ * Light-theme remaps. The app uses white-on-dark utilities throughout
+ * (text-white/*, border-white/*, bg-white/*); under .light we remap those to
+ * dark-on-light equivalents so the whole UI flips without touching every file.
+ * The Live camera stage stays dark (it has its own bg-black).
+ * ------------------------------------------------------------------------- */
+.light {
+  /* Text: white opacities → near-black opacities */
+  --tw-text-opacity: 1;
+}
+.light .text-white { color: rgb(28 27 25) !important; }
+.light .text-white\/90 { color: rgb(28 27 25 / 0.9) !important; }
+.light .text-white\/80 { color: rgb(28 27 25 / 0.8) !important; }
+.light .text-white\/70 { color: rgb(28 27 25 / 0.7) !important; }
+.light .text-white\/60 { color: rgb(28 27 25 / 0.6) !important; }
+.light .text-white\/55 { color: rgb(28 27 25 / 0.6) !important; }
+.light .text-white\/50 { color: rgb(28 27 25 / 0.55) !important; }
+.light .text-white\/45 { color: rgb(28 27 25 / 0.5) !important; }
+.light .text-white\/40 { color: rgb(28 27 25 / 0.45) !important; }
+.light .text-white\/35 { color: rgb(28 27 25 / 0.4) !important; }
+.light .text-white\/30 { color: rgb(28 27 25 / 0.35) !important; }
+
+/* Borders: white → black opacities */
+.light .border-white\/10 { border-color: rgb(0 0 0 / 0.1) !important; }
+.light .border-white\/8 { border-color: rgb(0 0 0 / 0.08) !important; }
+.light .border-white\/15 { border-color: rgb(0 0 0 / 0.12) !important; }
+.light .border-white\/20 { border-color: rgb(0 0 0 / 0.14) !important; }
+.light .divide-white\/8 > :not([hidden]) ~ :not([hidden]) { border-color: rgb(0 0 0 / 0.08) !important; }
+
+/* Subtle fills: white tints → black tints */
+.light .bg-white\/5 { background-color: rgb(0 0 0 / 0.04) !important; }
+.light .bg-white\/10 { background-color: rgb(0 0 0 / 0.06) !important; }
+.light .bg-white\/15 { background-color: rgb(0 0 0 / 0.08) !important; }
+.light .bg-white\/20 { background-color: rgb(0 0 0 / 0.1) !important; }
+.light .bg-black\/30 { background-color: rgb(0 0 0 / 0.05) !important; }
+.light .hover\:bg-white\/5:hover { background-color: rgb(0 0 0 / 0.04) !important; }
+.light .hover\:bg-white\/10:hover { background-color: rgb(0 0 0 / 0.06) !important; }
+
+/* The "selected toggle = white" controls invert to dark in light mode. */
+.light .bg-white { background-color: #1c1b19 !important; }
+.light .bg-white.text-black { color: #fbfaf8 !important; }
+.light .bg-paper\/40 { background-color: rgb(0 0 0 / 0.03) !important; }
+.light .bg-paper\/50 { background-color: rgb(0 0 0 / 0.03) !important; }
+.light .bg-paper\/60 { background-color: rgb(0 0 0 / 0.03) !important; }
+.light .bg-paper\/95 { background-color: rgba(255, 255, 255, 0.95) !important; }
