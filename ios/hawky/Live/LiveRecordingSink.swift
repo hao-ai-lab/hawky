@@ -26,6 +26,7 @@ final class LiveRecordingSink {
     private var sink: WavFileSink?
     private var recordingID = ""
     private var startNs: UInt64 = 0
+    private var writtenAudioFrames: Int64 = 0
     private var active = false
     private var hasVideo = false
     private var deferredUploadTransport: GatewayTransport?
@@ -34,6 +35,21 @@ final class LiveRecordingSink {
     private(set) var lastDeferredUploadStarted = false
 
     var isRecording: Bool { active }
+    var currentAudioOffsetMs: Double? {
+        guard active, sampleRate > 0 else { return nil }
+        return Double(writtenAudioFrames) * 1_000 / sampleRate
+    }
+
+    var currentAudioArtifact: LiveVoiceprintAudioArtifactReference? {
+        guard active, let url = lastRecordingURL else { return nil }
+        let id = url.deletingPathExtension().lastPathComponent
+        guard !id.isEmpty else { return nil }
+        return LiveVoiceprintAudioArtifactReference(
+            audioArtifactID: id,
+            audioPath: url.path,
+            sampleRate: sampleRate
+        )
+    }
 
     func clearLastRecordingResult() {
         lastRecordingURL = nil
@@ -56,6 +72,7 @@ final class LiveRecordingSink {
         startNs = UInt64(DispatchTime.now().uptimeNanoseconds)
         self.hasVideo = hasVideo
         self.sampleRate = audioSampleRate
+        self.writtenAudioFrames = 0
         self.deferredUploadTransport = deferredUploadTransport
         self.lastDeferredUploadStarted = false
 
@@ -95,8 +112,10 @@ final class LiveRecordingSink {
             timestamp: CFAbsoluteTimeGetCurrent(),
             sampleRate: sampleRate
         )
+        let frameCount = chunk.data.count / MemoryLayout<Int16>.size
         do {
             try sink?.write(chunk: audio)
+            writtenAudioFrames += Int64(frameCount)
         } catch {
             print("[LiveRecordingSink] WAV write failed: \(error)")
         }

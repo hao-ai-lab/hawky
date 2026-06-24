@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "model": {
+    "provider": "external-json",
+    "modelId": "toy-inline-vectors",
+    "version": "0",
+    "notes": "Toy vectors only. Replace with SpeechBrain/WeSpeaker embeddings or WAV fixtures."
+  },
+  "thresholds": {
+    "ownerAccept": 0.82,
+    "ownerPossible": 0.72
+  },
+  "owner": {
+    "id": "owner",
+    "enrollment": [
+      {
+        "id": "owner_enroll_a",
+        "embedding": [1, 0, 0]
+      },
+      {
+        "id": "owner_enroll_b",
+        "embedding": [0.98, 0.04, 0]
+      }
+    ]
+  },
+  "samples": [
+    {
+      "id": "owner_same_route",
+      "expected": "owner",
+      "route": "iphone_mic",
+      "embedding": [0.99, 0.02, 0]
+    },
+    {
+      "id": "owner_borderline_route_shift",
+      "expected": "owner",
+      "route": "airpods",
+      "embedding": [0.78, 0.18, 0.04],
+      "notes": "Expected to pass with toy thresholds; use real route-shift fixtures before productizing."
+    },
+    {
+      "id": "non_owner_clear",
+      "expected": "non_owner",
+      "embedding": [0, 1, 0]
+    },
+    {
+      "id": "assistant_loopback",
+      "expected": "assistant_leakage",
+      "embedding": [-1, 0, 0],
+      "notes": "Loopback must fail closed and never train the owner template."
+    }
+  ]
+}

@@ -769,6 +769,71 @@ export interface HawkyConfig {
       token?: string;
     };
   };
+  /** Voiceprint identity configuration. Disabled unless explicitly enabled. */
+  voiceprint?: {
+    live_scoring?: {
+      enabled?: boolean;
+      sidecar?: {
+        command?: string;
+        args?: string[];
+        cwd?: string;
+        env?: Record<string, string>;
+        timeout_ms?: number;
+        max_stdout_bytes?: number;
+        max_stderr_bytes?: number;
+      };
+      owner_template?: {
+        file_path?: string;
+        key_path?: string;
+        key_ref?: string;
+        create_key_if_missing?: boolean;
+      };
+      allowed_audio_roots?: string[];
+      consent?: {
+        capture_allowed?: boolean;
+        biometric_allowed?: boolean;
+        memory_promotion_allowed?: boolean;
+        template_learning_allowed?: boolean;
+        export_allowed?: boolean;
+        reason?: string;
+      };
+      expected_model?: {
+        provider?: "external-json" | "signal-baseline" | "speechbrain" | "wespeaker" | "picovoice" | "custom";
+        model_id?: string;
+        modelId?: string;
+        version?: string;
+        notes?: string;
+      };
+      thresholds?: {
+        owner_accept?: number;
+        owner_possible?: number;
+        ownerAccept?: number;
+        ownerPossible?: number;
+      };
+      quality_thresholds?: {
+        min_duration_ms?: number;
+        target_duration_ms?: number;
+        min_rms?: number;
+        target_rms?: number;
+        min_peak?: number;
+        min_dynamic_range?: number;
+        max_clipping_ratio?: number;
+        clipping_amplitude?: number;
+        max_abs_dc_offset?: number;
+        minDurationMs?: number;
+        targetDurationMs?: number;
+        minRms?: number;
+        targetRms?: number;
+        minPeak?: number;
+        minDynamicRange?: number;
+        maxClippingRatio?: number;
+        clippingAmplitude?: number;
+        maxAbsDcOffset?: number;
+      };
+      target_sample_rate?: number;
+      timeout_ms?: number;
+    };
+  };
   /** Channel adapters for messaging app integration (Slack, iMessage, etc.). */
   channels?: {
     slack?: {
