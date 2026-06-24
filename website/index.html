@@ -1,0 +1,1801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- ===========================================================
+     PRODUCT NAME lives in ONE place: the CSS token --brand-name
+     and the JS const BRAND below. The <title> uses the literal
+     once for SEO. Swap those to rename. Never any other codename.
+     =========================================================== -->
+<title>Hawk — Ambient AI Agent</title>
+<meta name="description" content="Hawk is an ambient AI agent that sees what you see, remembers your day, and acts — live across Ray-Ban Meta glasses, your iPhone, and a long-lived backend brain.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;450;500;600&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- favicon = Hawk app icon -->
+<link rel="icon" type="image/png" href="assets/hawk-icon.png">
+
+<style>
+:root{
+  --brand-name: "Hawk";
+
+  /* surfaces */
+  --bg:        #0B0D10;
+  --bg-elev:   #14181D;
+  --bg-elev-2: #1C2229;
+  /* text */
+  --text:      #EDEFF2;
+  --muted:     #9AA4B0;
+  --faint:     #6B7682;
+  /* lines */
+  --line:      #262C34;
+  --line-2:    #353D47;
+  /* accents */
+  --accent:     #F5A524;
+  --accent-2:   #38BDF8;
+  --accent-ink: #1A1205;
+  --accent-soft:#3A2A0E;
+  /* status */
+  --good:  #4ADE80;
+  --warn:  #F5A524;
+  --info:  #38BDF8;
+  /* geometry */
+  --radius:    14px;
+  --radius-sm: 8px;
+  --radius-lg: 22px;
+  --maxw:      1200px;
+  --gutter:    24px;
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* type */
+  --font-display:"Space Grotesk", system-ui, sans-serif;
+  --font-body:"Inter", system-ui, -apple-system, sans-serif;
+  --font-mono:'Fira Code', ui-monospace, 'JetBrains Mono', monospace;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} }
+
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family:var(--font-body);
+  font-size:1.0625rem;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+}
+
+/* ambient background wash — amber-forward, no purple, no neon bloom */
+body::before{
+  content:"";
+  position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:
+    radial-gradient(900px 600px at 78% -8%, color-mix(in srgb,var(--accent) 9%, transparent), transparent 60%),
+    radial-gradient(720px 520px at 6% 12%, color-mix(in srgb,var(--accent-2) 6%, transparent), transparent 55%);
+}
+
+h1,h2,h3,h4{font-family:var(--font-display);letter-spacing:-0.02em;line-height:1.1;margin:0}
+p{margin:0}
+a{color:inherit;text-decoration:none}
+img,video,svg{max-width:100%;display:block}
+
+::selection{background:color-mix(in srgb,var(--accent) 32%, transparent);color:var(--text)}
+
+/* ---------- shared layout ---------- */
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 var(--gutter)}
+.section{padding-block:clamp(72px,10vw,128px)}
+.eyebrow{
+  font-family:var(--font-mono);font-size:0.75rem;letter-spacing:0.16em;
+  text-transform:uppercase;color:var(--accent);margin:0 0 14px;font-weight:500;
+  display:inline-flex;align-items:center;gap:10px;
+}
+.eyebrow::before{content:"";width:18px;height:1px;background:var(--accent)}
+.sec-head{max-width:760px;margin-bottom:clamp(36px,5vw,60px)}
+.sec-head h2{font-size:clamp(2rem,4vw,3rem);font-weight:700}
+.sec-head .lede{color:var(--muted);margin-top:16px;font-size:1.0625rem;max-width:640px}
+
+/* focus visibility everywhere */
+a:focus-visible,button:focus-visible,
+.nav__link:focus-visible,.chip:focus-visible{
+  outline:none;box-shadow:var(--ring);border-radius:var(--radius-sm);
+}
+
+/* ---------- buttons ---------- */
+.btn{
+  display:inline-flex;align-items:center;gap:9px;
+  font-family:var(--font-body);font-weight:500;font-size:0.95rem;
+  padding:12px 20px;border-radius:var(--radius-sm);
+  border:1px solid transparent;cursor:pointer;
+  transition:transform .18s ease, background .18s ease, border-color .18s ease, color .18s ease;
+}
+.btn svg{width:16px;height:16px}
+.btn--primary{background:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn--primary:hover{transform:translateY(-2px);background:#ffb53a}
+.btn--ghost{background:transparent;color:var(--text);border-color:var(--line-2)}
+.btn--ghost:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-2px)}
+@media (prefers-reduced-motion: reduce){.btn:hover{transform:none}}
+
+/* ---------- skip link ---------- */
+.skip{
+  position:absolute;left:14px;top:-60px;z-index:200;
+  background:var(--accent);color:var(--accent-ink);font-weight:600;
+  padding:10px 16px;border-radius:var(--radius-sm);transition:top .2s;
+}
+.skip:focus{top:14px}
+
+/* ---------- header / nav ---------- */
+.header{
+  position:sticky;top:0;z-index:100;
+  background:color-mix(in srgb,var(--bg) 78%, transparent);
+  backdrop-filter:saturate(160%) blur(14px);
+  -webkit-backdrop-filter:saturate(160%) blur(14px);
+  border-bottom:1px solid var(--line);
+}
+.nav{display:flex;align-items:center;gap:24px;height:66px}
+.nav__brand{display:inline-flex;align-items:center;gap:11px;color:var(--text);flex-shrink:0}
+.nav__brand-icon{width:30px;height:30px;border-radius:8px;display:block;box-shadow:0 0 0 1px var(--line-2)}
+.nav__brand-name{font-family:var(--font-display);font-weight:700;font-size:1.32rem;letter-spacing:-0.01em;line-height:1}
+.nav__links{display:flex;align-items:center;gap:4px;margin-left:auto}
+.nav__link{
+  position:relative;color:var(--muted);font-size:0.92rem;font-weight:450;
+  padding:8px 12px;border-radius:var(--radius-sm);transition:color .16s ease;
+}
+.nav__link::after{
+  content:"";position:absolute;left:12px;right:12px;bottom:4px;height:1.5px;
+  background:var(--accent);transform:scaleX(0);transform-origin:left;
+  transition:transform .2s ease;
+}
+.nav__link:hover{color:var(--text)}
+.nav__link:hover::after,.nav__link[aria-current="true"]::after{transform:scaleX(1)}
+.nav__link[aria-current="true"]{color:var(--text)}
+.nav__gh{display:inline-flex;align-items:center;gap:7px;color:var(--muted);
+  padding:8px 12px;border-radius:var(--radius-sm);transition:color .16s}
+.nav__gh:hover{color:var(--text)}
+.nav__gh svg{width:18px;height:18px}
+.nav__cta{margin-left:6px}
+.nav__toggle{
+  display:none;margin-left:auto;background:transparent;border:1px solid var(--line-2);
+  color:var(--text);border-radius:var(--radius-sm);width:42px;height:42px;cursor:pointer;
+  align-items:center;justify-content:center;
+}
+.nav__toggle svg{width:20px;height:20px}
+
+@media (max-width:860px){
+  .nav__links{
+    position:fixed;inset:66px 0 auto 0;flex-direction:column;align-items:stretch;
+    background:var(--bg);border-bottom:1px solid var(--line);gap:0;
+    padding:10px var(--gutter) 18px;margin-left:0;
+    transform:translateY(-12px);opacity:0;pointer-events:none;transition:opacity .18s, transform .18s;
+  }
+  .nav__links.open{transform:none;opacity:1;pointer-events:auto}
+  .nav__link,.nav__gh{padding:13px 8px;font-size:1rem;border-bottom:1px solid var(--line)}
+  .nav__link::after{display:none}
+  .nav__cta{margin:12px 8px 0}
+  .nav__cta .btn{width:100%;justify-content:center}
+  .nav__toggle{display:inline-flex}
+}
+
+/* ---------- hero ---------- */
+.hero{position:relative;overflow:hidden}
+.hero__grid{
+  display:grid;grid-template-columns:1.15fr 0.85fr;gap:clamp(32px,5vw,64px);
+  align-items:center;padding-block:clamp(56px,8vw,104px);
+}
+.hero__eyebrow{font-size:0.78rem}
+.hero h1{
+  font-size:clamp(2.6rem,6vw,4.5rem);font-weight:700;line-height:0.96;
+  margin:0 0 10px;letter-spacing:-0.03em;
+}
+.hero__tagline{
+  font-family:var(--font-display);font-weight:500;
+  font-size:clamp(1.25rem,2.5vw,1.7rem);line-height:1.22;letter-spacing:-0.02em;
+  margin:18px 0 0;max-width:30ch;
+}
+.hero__tagline .hl{color:var(--accent)}
+.hero__sub{color:var(--muted);margin-top:20px;max-width:46ch}
+.hero__ctas{display:flex;flex-wrap:wrap;gap:14px;margin-top:30px}
+.hero__chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:30px}
+.chip{
+  display:inline-flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.04em;
+  color:var(--muted);background:var(--bg-elev);border:1px solid var(--line);
+  padding:7px 12px;border-radius:999px;
+}
+.chip svg{width:13px;height:13px;color:var(--accent)}
+
+/* device mockup */
+.hero__device{position:relative;display:flex;justify-content:center;align-items:center;min-height:0}
+.hero__rings{
+  position:absolute;inset:-6% -10%;z-index:0;pointer-events:none;
+  display:grid;place-items:center;opacity:.85;
+}
+.hero__rings svg{width:118%;height:auto;max-width:none}
+.ring-rot{transform-origin:center;animation:spin 46s linear infinite}
+.ring-rot--rev{animation:spin 64s linear infinite reverse}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.ring-rot,.ring-rot--rev{animation:none}}
+
+.phone{
+  position:relative;z-index:1;width:min(290px,72vw);
+  border-radius:42px;padding:10px;
+  background:linear-gradient(160deg,#23282f,#0e1115);
+  border:1px solid var(--line-2);
+  box-shadow:0 40px 90px -30px rgba(0,0,0,.8), 0 0 0 1px rgba(0,0,0,.4),
+    inset 0 1px 0 rgba(255,255,255,.05);
+}
+.phone__screen{
+  position:relative;border-radius:33px;overflow:hidden;
+  background:#000;aspect-ratio:1206/2622;
+}
+.phone__screen img{width:100%;height:100%;object-fit:cover;display:block}
+.phone__notch{
+  position:absolute;top:11px;left:50%;transform:translateX(-50%);
+  width:92px;height:24px;background:#000;border-radius:14px;z-index:2;
+}
+.phone__live{
+  position:absolute;left:14px;top:42px;z-index:3;
+  display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.08em;
+  background:color-mix(in srgb,var(--bg) 64%,transparent);
+  border:1px solid color-mix(in srgb,var(--good) 40%,transparent);
+  color:var(--good);padding:4px 9px;border-radius:999px;backdrop-filter:blur(6px);
+}
+.phone__live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--good);
+  animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion: reduce){.phone__live::before{animation:none}}
+
+/* ---------- Hero launch intro animation (ported from the iOS HawkIntroView) ----------
+   PERF RULE: only transform + opacity are animated. The glow is a radial-gradient
+   element (scale/opacity), never a per-frame blur/filter/shadow. */
+.hero__logo{
+  position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;
+  gap:clamp(18px,3vw,30px);width:min(300px,72vw);
+}
+
+/* stage holds glow + icon + sweep + sparks, all centered on the icon */
+.hero__iconstage{
+  position:relative;display:grid;place-items:center;
+  width:min(216px,54vw);aspect-ratio:1;
+}
+
+/* warm radial glow that blooms in (BEAT 1) then breathes (HOLD) */
+.hero__glow{
+  position:absolute;z-index:0;width:180%;height:180%;border-radius:50%;
+  pointer-events:none;
+  background:radial-gradient(circle at 50% 50%,
+    rgba(255,212,117,.55) 0%,         /* gold #FFD475 */
+    rgba(245,168,69,.42) 26%,         /* amber #F5A845 */
+    rgba(255,133,62,.22) 48%,         /* ember #FF853E */
+    rgba(255,133,62,0) 72%);
+  opacity:0;transform:scale(.5);
+  animation:glowBloom .7s cubic-bezier(.2,.7,.3,1) forwards,
+            glowBreathe 5.6s ease-in-out 1.6s infinite;
+}
+@keyframes glowBloom{ from{opacity:0;transform:scale(.5)} to{opacity:.9;transform:scale(1)} }
+/* breathing only nudges scale around the settled state; opacity held high */
+@keyframes glowBreathe{ 0%,100%{opacity:.86;transform:scale(1)} 50%{opacity:.92;transform:scale(1.04)} }
+
+/* a brief secondary flare at the flourish (BEAT 2c) */
+.hero__flare{
+  position:absolute;z-index:0;width:150%;height:150%;border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle at 50% 50%,
+    rgba(255,242,219,.5) 0%, rgba(255,212,117,.28) 30%, rgba(255,212,117,0) 60%);
+  opacity:0;transform:scale(.7);
+  animation:flarePop .5s ease-out .55s forwards;
+}
+@keyframes flarePop{ 0%{opacity:0;transform:scale(.7)} 40%{opacity:.85;transform:scale(1.06)} 100%{opacity:0;transform:scale(1.18)} }
+
+/* the app tile — rounded-square look + soft shadow; pulls in (BEAT 1) */
+.hero__mark{
+  position:relative;z-index:2;width:100%;height:auto;display:block;border-radius:22%;
+  box-shadow:0 34px 80px -26px rgba(0,0,0,.85), 0 0 0 1px var(--line-2);
+  opacity:0;transform:translateY(26px) scale(.82);
+  animation:iconPull .7s cubic-bezier(.18,.74,.3,1.12) forwards;
+}
+@keyframes iconPull{ from{opacity:0;transform:translateY(26px) scale(.82)} to{opacity:1;transform:translateY(0) scale(1)} }
+
+/* specular light sweep — diagonal cream band, clipped to the icon's rounded square (BEAT 2a) */
+.hero__sweep{
+  position:absolute;z-index:3;inset:0;width:100%;height:100%;
+  border-radius:22%;overflow:hidden;pointer-events:none;
+  mix-blend-mode:plus-lighter;opacity:0;
+  animation:sweepShow .01s linear .55s forwards;
+}
+.hero__sweep::before{
+  content:"";position:absolute;top:-25%;left:-60%;width:50%;height:150%;
+  background:linear-gradient(105deg,
+    rgba(255,242,219,0) 0%, rgba(255,242,219,.85) 50%, rgba(255,242,219,0) 100%);
+  transform:translateX(-40%) rotate(8deg);
+  animation:sweepMove .62s cubic-bezier(.4,0,.2,1) .55s forwards;
+}
+@keyframes sweepShow{ to{opacity:1} }
+@keyframes sweepMove{ from{transform:translateX(-40%) rotate(8deg)} to{transform:translateX(360%) rotate(8deg)} }
+
+/* ember spark burst — 16 capsules shot radially from the icon edge (BEAT 2b).
+   Per-spark angle/distance/size/delay come from inline custom props set in JS. */
+.hero__sparks{position:absolute;z-index:1;inset:0;pointer-events:none}
+.hero__spark{
+  position:absolute;left:50%;top:50%;
+  width:var(--sw,7px);height:var(--sh,3px);border-radius:999px;
+  background:linear-gradient(90deg, var(--sc,#FFD475), rgba(255,133,62,0));
+  opacity:0;
+  transform:translate(-50%,-50%) rotate(var(--a,0deg)) translateX(0) scale(.6);
+  animation:sparkFly var(--sd,.6s) cubic-bezier(.22,.7,.25,1) var(--sdl,.56s) forwards;
+}
+@keyframes sparkFly{
+  0%{opacity:0;transform:translate(-50%,-50%) rotate(var(--a,0deg)) translateX(8px) scale(.5)}
+  18%{opacity:1}
+  100%{opacity:0;transform:translate(-50%,-50%) rotate(var(--a,0deg)) translateX(var(--dist,90px)) scale(1)}
+}
+
+/* "Hawk" wordmark rises in below the icon (BEAT 3) */
+.hero__logoname{
+  font-family:var(--font-display);font-weight:700;letter-spacing:-0.015em;
+  font-size:clamp(2.1rem,7vw,3.1rem);line-height:1;color:var(--text);
+  opacity:0;transform:translateY(10px);
+  animation:wordRise .55s cubic-bezier(.2,.7,.3,1) .78s forwards;
+}
+@keyframes wordRise{ to{opacity:1;transform:translateY(0)} }
+
+/* allow click-to-replay: re-running the sequence by toggling a class */
+.hero__iconstage{cursor:pointer}
+
+/* REDUCED MOTION: no sweep / sparks / breathing — just fade icon + wordmark to final state */
+@media (prefers-reduced-motion: reduce){
+  .hero__glow{animation:none;opacity:.88;transform:scale(1)}
+  .hero__flare,.hero__sweep,.hero__sweep::before,.hero__sparks{animation:none;display:none}
+  .hero__mark{animation:none;opacity:1;transform:none}
+  .hero__logoname{animation:none;opacity:1;transform:none}
+  .hero__iconstage{cursor:default}
+}
+
+@media (max-width:860px){
+  .hero__grid{grid-template-columns:1fr;text-align:left;padding-block:clamp(32px,7vw,56px) clamp(40px,8vw,72px)}
+  /* keep eyebrow + H1 + tagline + CTAs above the device so the phone visitor
+     first sees the product name and value prop, not another app's screenshot */
+  .hero__device{order:0;margin-top:24px}
+  .hero__logo{width:min(230px,60vw)}
+  .hero__iconstage{width:min(190px,56vw)}
+  .hero__tagline,.hero__sub{max-width:none}
+}
+
+/* ---------- get-started selector ---------- */
+.getband{border-block:1px solid var(--line);background:var(--bg-elev)}
+.getsel{padding-block:28px 34px;display:flex;flex-direction:column;gap:20px}
+.getsel__head{display:flex;flex-direction:column;gap:6px}
+.getsel__title{font-family:var(--font-display);font-size:clamp(1.3rem,3.4vw,1.55rem);
+  font-weight:600;line-height:1.2;letter-spacing:-0.01em}
+.getsel__matrix{display:flex;flex-direction:column;gap:12px}
+.getsel__row{display:grid;grid-template-columns:148px 1fr;align-items:center;gap:14px}
+.getsel__row[hidden]{display:none}
+.getsel__label{font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.1em;
+  text-transform:uppercase;color:var(--muted)}
+.getsel__opts{display:flex;flex-wrap:wrap;gap:8px}
+.opt{
+  font-family:var(--font-mono);font-size:0.82rem;line-height:1;
+  padding:9px 14px;border-radius:var(--radius-sm);
+  background:transparent;color:var(--text);border:1px solid var(--line-2);
+  cursor:pointer;transition:border-color .18s ease,color .18s ease,background .18s ease;
+}
+.opt:hover:not([disabled]):not(.is-on){border-color:var(--accent);color:var(--accent)}
+.opt.is-on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+.opt[disabled]{color:var(--faint);border-color:var(--line);
+  text-decoration:line-through;cursor:not-allowed}
+.getsel__out{
+  position:relative;background:#0c0f13;border:1px solid var(--line);
+  border-radius:var(--radius);padding:18px 20px;
+}
+.getsel__outlabel{display:block;font-family:var(--font-mono);font-size:0.72rem;
+  letter-spacing:0.08em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+.getsel__out pre{margin:0;overflow-x:auto}
+.getsel__out code{font-family:var(--font-mono);font-size:0.82rem;color:var(--text);
+  white-space:pre;line-height:1.7}
+.getsel__actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.getsel__actions .btn{font-size:0.86rem;padding:9px 16px}
+.getsel__note{flex-basis:100%;font-size:0.84rem;color:var(--muted);margin:0}
+/* the HTML hidden attr must win over .btn{display:inline-flex} and .getsel__actions{display:flex} */
+.getsel [hidden],.getsel__actions[hidden]{display:none !important}
+@media (max-width:640px){
+  .getsel__row{grid-template-columns:1fr;align-items:start;gap:8px}
+  .getsel__opts{gap:6px}
+}
+
+/* ---------- value pillars ---------- */
+.pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.pillar{
+  background:var(--bg-elev);border:1px solid var(--line);border-radius:var(--radius);
+  padding:28px;transition:border-color .2s ease, transform .2s ease;
+}
+.pillar:hover{border-color:var(--line-2);transform:translateY(-3px)}
+.pillar__icon{margin-bottom:18px;color:var(--accent)}
+.pillar__icon svg{width:34px;height:34px}
+.pillar h3{font-size:1.3rem;font-weight:600;margin-bottom:10px}
+.pillar p{color:var(--muted);font-size:1rem}
+.pillar__tag{
+  display:inline-block;margin-top:16px;font-family:var(--font-mono);
+  font-size:0.66rem;letter-spacing:0.08em;color:var(--faint);
+  border:1px solid var(--line);border-radius:var(--radius-sm);padding:3px 8px;
+}
+@media (max-width:860px){.pillars{grid-template-columns:1fr}}
+@media (prefers-reduced-motion: reduce){.pillar:hover{transform:none}}
+
+/* ---------- status badge ---------- */
+.badge{display:inline-flex;gap:6px;align-items:center;
+  font:500 0.7rem/1 var(--font-mono);letter-spacing:0.08em;
+  padding:4px 8px;border-radius:var(--radius-sm);border:1px solid;}
+.badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
+.badge--live{color:var(--good);background:color-mix(in srgb,var(--good) 14%,transparent);border-color:color-mix(in srgb,var(--good) 32%,transparent);}
+.badge--prog{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent);border-color:color-mix(in srgb,var(--warn) 32%,transparent);}
+.badge--prev{color:var(--info);background:color-mix(in srgb,var(--info) 14%,transparent);border-color:color-mix(in srgb,var(--info) 32%,transparent);}
+.badge--prog::before{animation:pulse 2s ease-in-out infinite}
+@media (prefers-reduced-motion: reduce){.badge--prog::before{animation:none}}
+
+/* ---------- demo grid ---------- */
+.demos{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.demo{
+  position:relative;background:var(--bg-elev);border:1px solid var(--line);
+  border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;
+  transition:border-color .2s ease, transform .2s ease;
+}
+.demo:hover{border-color:var(--line-2);transform:translateY(-3px)}
+.demo__media{
+  position:relative;aspect-ratio:4/3;background:var(--bg);
+  border-bottom:1px solid var(--line);overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+}
+.demo__media video{position:relative;z-index:0;width:100%;height:100%;object-fit:cover;
+  filter:saturate(.9) brightness(.82);transition:filter .25s ease}
+/* pull the bright poster into the dark tonal family of the other cells */
+.demo--coding .demo__media::before{
+  content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+  background:linear-gradient(180deg,
+    color-mix(in srgb,var(--bg) 30%,transparent) 0%,
+    transparent 28% 60%,
+    color-mix(in srgb,var(--bg) 62%,transparent) 100%);
+  transition:opacity .25s ease;
+}
+/* faint amber inner frame so it shares the aperture language */
+.demo--coding .demo__media{
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 22%,transparent);
+}
+/* restore full brightness on hover / while playing */
+.demo--coding:hover .demo__media video,
+.demo--coding.is-playing .demo__media video{filter:none}
+.demo--coding:hover .demo__media::before,
+.demo--coding.is-playing .demo__media::before{opacity:0}
+/* aperture scan frame over each cell */
+.demo__media::after{
+  content:"";position:absolute;inset:14px;z-index:2;pointer-events:none;border-radius:6px;
+  background:
+    linear-gradient(currentColor 0 0) left top, linear-gradient(currentColor 0 0) left top,
+    linear-gradient(currentColor 0 0) right top, linear-gradient(currentColor 0 0) right top,
+    linear-gradient(currentColor 0 0) left bottom, linear-gradient(currentColor 0 0) left bottom,
+    linear-gradient(currentColor 0 0) right bottom, linear-gradient(currentColor 0 0) right bottom;
+  background-repeat:no-repeat;
+  background-size:14px 1.5px, 1.5px 14px;
+  color:color-mix(in srgb,var(--accent) 55%,transparent);opacity:.7;
+}
+/* placeholder cell visuals */
+.demo__ph{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:12px;
+  background:
+    radial-gradient(420px 220px at 50% 36%, color-mix(in srgb,var(--accent) 7%,transparent), transparent 70%),
+    repeating-linear-gradient(115deg, transparent 0 22px, color-mix(in srgb,var(--line) 60%,transparent) 22px 23px);
+}
+.demo__glyph{
+  width:56px;height:56px;border-radius:50%;
+  border:1.5px solid color-mix(in srgb,var(--accent) 60%,transparent);
+  display:flex;align-items:center;justify-content:center;color:var(--accent);
+  background:color-mix(in srgb,var(--bg) 55%,transparent);
+  transition:transform .2s ease, background .2s ease;
+}
+.demo:hover .demo__glyph{transform:scale(1.08);background:var(--accent-soft)}
+.demo__glyph svg{width:20px;height:20px;margin-left:2px}
+.demo__phlabel{font-family:var(--font-mono);font-size:0.66rem;letter-spacing:0.12em;
+  text-transform:uppercase;color:var(--faint)}
+.demo__body{padding:18px 18px 20px;display:flex;flex-direction:column;gap:8px}
+.demo__top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.demo__body h3{font-size:1.15rem;font-weight:600}
+.demo__body p{color:var(--muted);font-size:0.92rem;line-height:1.55}
+/* coding video play/pause affordance */
+.demo__vctrl{
+  position:absolute;left:14px;bottom:14px;z-index:3;
+  width:42px;height:42px;border-radius:50%;cursor:pointer;
+  background:var(--bg-elev);
+  border:1px solid color-mix(in srgb,var(--accent) 60%,transparent);
+  color:var(--accent);display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 14px -4px rgba(0,0,0,.6);
+  transition:background .18s, transform .18s;
+}
+.demo__vctrl:hover{background:var(--accent);color:var(--accent-ink);transform:scale(1.05)}
+.demo__vctrl svg{width:18px;height:18px}
+.demo__vctrl .ico-pause{display:none}
+.demo__vctrl[aria-pressed="true"] .ico-play{display:none}
+.demo__vctrl[aria-pressed="true"] .ico-pause{display:block}
+@media (max-width:980px){.demos{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:620px){.demos{grid-template-columns:1fr}}
+@media (prefers-reduced-motion: reduce){.demo:hover{transform:none}}
+
+/* ---------- features ---------- */
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.feature{
+  background:var(--bg-elev);border:1px solid var(--line);border-radius:var(--radius);
+  padding:24px;transition:border-color .2s, transform .2s;
+}
+.feature:hover{border-color:var(--line-2);transform:translateY(-3px)}
+.feature__icon{
+  width:46px;height:46px;border-radius:11px;margin-bottom:16px;
+  background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);
+  display:flex;align-items:center;justify-content:center;color:var(--accent);
+}
+.feature__icon svg{width:22px;height:22px}
+.feature h3{font-size:1.12rem;font-weight:600;margin-bottom:9px}
+.feature p{color:var(--muted);font-size:0.94rem;line-height:1.55}
+/* resolve the 3-into-7 remainder: last card spans the full row as a wide summary card */
+.feature--wide{
+  grid-column:1/-1;display:flex;align-items:center;gap:24px;
+  background:
+    radial-gradient(560px 200px at 12% 50%, var(--accent-soft), transparent 70%),
+    var(--bg-elev);
+}
+.feature--wide .feature__icon{margin-bottom:0;flex:0 0 auto}
+.feature--wide .feature__copy{display:flex;flex-direction:column;gap:9px}
+@media (max-width:620px){.feature--wide{flex-direction:column;align-items:flex-start;text-align:left}}
+@media (max-width:980px){.features{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:620px){.features{grid-template-columns:1fr}}
+@media (prefers-reduced-motion: reduce){.feature:hover{transform:none}}
+
+/* ---------- architecture ---------- */
+.arch__intro{color:var(--muted);max-width:78ch;margin-bottom:34px}
+.arch__diagram{
+  background:
+    linear-gradient(160deg,var(--bg-elev-2) 0%, var(--bg-elev) 60%);
+  border:1px solid var(--line-2);border-radius:var(--radius);
+  padding:clamp(18px,3vw,34px);overflow-x:auto;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03), 0 24px 60px -36px rgba(0,0,0,.7);
+}
+.arch__diagram svg{min-width:760px;width:100%;height:auto}
+
+/* ---------- install ---------- */
+.install{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start}
+.track{
+  background:var(--bg-elev);border:1px solid var(--line);border-radius:var(--radius);
+  overflow:hidden;display:flex;flex-direction:column;
+}
+.track__head{padding:22px 22px 18px;border-bottom:1px solid var(--line)}
+.track__kicker{display:inline-flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:0.68rem;letter-spacing:0.1em;
+  text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+.track__kicker svg{width:14px;height:14px}
+.track__head h3{font-size:1.2rem;font-weight:600}
+.track__head p{color:var(--muted);font-size:0.9rem;margin-top:6px}
+.codeblock{position:relative;background:#0c0f13;flex:1;display:flex;flex-direction:column}
+.codeblock pre{margin:0;padding:20px;overflow-x:auto;flex:1}
+.codeblock code{font-family:var(--font-mono);font-size:0.82rem;line-height:1.85;
+  color:var(--text);white-space:pre}
+.codeblock .c-comment{color:var(--faint)}
+.codeblock .c-cmd{color:var(--accent-2)}
+.copybtn{
+  position:absolute;top:12px;right:12px;z-index:2;
+  display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+  font-family:var(--font-mono);font-size:0.7rem;letter-spacing:0.04em;
+  background:var(--bg-elev-2);border:1px solid var(--line-2);color:var(--muted);
+  padding:6px 10px;border-radius:var(--radius-sm);transition:color .15s, border-color .15s;
+}
+.copybtn:hover{color:var(--accent);border-color:var(--accent)}
+.copybtn svg{width:13px;height:13px}
+.copybtn.copied{color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,transparent)}
+.steps{list-style:none;margin:0;padding:20px;counter-reset:s;display:flex;flex-direction:column;gap:16px;flex:1}
+.steps li{counter-increment:s;display:flex;gap:14px;align-items:flex-start;color:var(--muted);font-size:0.96rem}
+.steps li::before{
+  content:counter(s);flex-shrink:0;width:26px;height:26px;border-radius:50%;
+  background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+  color:var(--accent);font-family:var(--font-mono);font-size:0.8rem;font-weight:500;
+  display:flex;align-items:center;justify-content:center;margin-top:1px;
+}
+.steps code{font-family:var(--font-mono);font-size:0.82rem;background:var(--bg);
+  border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--accent-2);
+  word-break:break-all}
+.install__note{margin-top:22px;color:var(--faint);font-size:0.86rem}
+.install__note code{font-family:var(--font-mono);color:var(--muted);font-size:0.82rem}
+@media (max-width:860px){.install{grid-template-columns:1fr}}
+
+/* ---------- roadmap ---------- */
+.roadmap{
+  list-style:none;margin:0;padding:0;
+  display:grid;grid-template-columns:repeat(2,1fr);gap:12px;
+}
+.road{
+  display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:start;
+  padding:16px 18px;background:var(--bg-elev);
+  border:1px solid var(--line);border-radius:var(--radius);
+  transition:border-color .18s ease, transform .18s ease;
+}
+.road:hover{border-color:var(--line-2);transform:translateY(-2px)}
+.road__num{font-family:var(--font-mono);color:var(--accent);font-size:0.8rem;
+  letter-spacing:0.06em;line-height:1.5}
+.road__main h3{font-size:1.02rem;font-weight:600;margin-bottom:4px;line-height:1.25}
+.road__main p{color:var(--muted);font-size:0.9rem;line-height:1.45;margin:0}
+@media (max-width:560px){.roadmap{grid-template-columns:1fr}}
+
+/* ---------- cite ---------- */
+.cite{display:grid;grid-template-columns:0.9fr 1.1fr;gap:24px;align-items:start}
+.cite__left p{color:var(--muted);margin-bottom:22px;max-width:46ch}
+.cite__gh{
+  display:inline-flex;align-items:center;gap:10px;
+  background:var(--bg-elev);border:1px solid var(--line-2);border-radius:var(--radius-sm);
+  padding:12px 16px;font-family:var(--font-mono);font-size:0.86rem;color:var(--text);
+  transition:border-color .18s, color .18s;
+}
+.cite__gh:hover{border-color:var(--accent);color:var(--accent)}
+.cite__gh svg{width:18px;height:18px}
+.bibtex{position:relative;background:#0c0f13;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.bibtex pre{margin:0;padding:22px;overflow-x:auto}
+.bibtex code{font-family:var(--font-mono);font-size:0.82rem;line-height:1.75;color:var(--text);white-space:pre}
+.bibtex .b-key{color:var(--accent)}
+.bibtex .b-field{color:var(--accent-2)}
+@media (max-width:760px){.cite{grid-template-columns:1fr}}
+
+/* ---------- footer ---------- */
+.footer{border-top:1px solid var(--line);background:var(--bg-elev)}
+.footer__inner{display:flex;flex-wrap:wrap;gap:28px;justify-content:space-between;
+  align-items:flex-start;padding-block:48px}
+.footer__brand svg{height:30px;width:auto;color:var(--text)}
+.footer__tag{color:var(--muted);margin-top:14px;max-width:34ch;font-size:0.95rem}
+.footer__nav{display:flex;flex-wrap:wrap;gap:18px}
+.footer__nav a{color:var(--muted);font-size:0.9rem;transition:color .15s}
+.footer__nav a:hover{color:var(--accent)}
+.footer__meta{width:100%;border-top:1px solid var(--line);padding-top:22px;
+  display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;
+  color:var(--faint);font-size:0.82rem}
+.footer__meta .copy{font-family:var(--font-mono)}
+
+/* ---------- reveal on scroll ---------- */
+.reveal{opacity:0;transform:translateY(18px);transition:opacity .6s ease, transform .6s ease}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion: reduce){
+  .reveal{opacity:1;transform:none;transition:none}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<!-- ============ HEADER / NAV ============ -->
+<header class="header">
+  <div class="wrap">
+    <nav class="nav" aria-label="Primary">
+      <a class="nav__brand" href="#top" aria-label="Hawk — home">
+        <img class="nav__brand-icon" src="assets/hawk-icon.png" alt="" width="30" height="30">
+        <span class="nav__brand-name">Hawk</span>
+      </a>
+
+      <div class="nav__links" id="navLinks">
+        <a class="nav__link" href="#demos">Demos</a>
+        <a class="nav__link" href="#features">Features</a>
+        <a class="nav__link" href="#architecture">Architecture</a>
+        <a class="nav__link" href="#install">Install</a>
+        <a class="nav__link" href="#roadmap">Roadmap</a>
+        <a class="nav__gh" href="https://github.com/hawk-agent/hawk" rel="noopener" aria-label="Hawk on GitHub">
+          <!-- PLACEHOLDER repo URL — swap on release -->
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11 11 0 0 1 6 0C16.9 5 17.9 5.3 17.9 5.3c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5Z"/></svg>
+          <span>GitHub</span>
+        </a>
+        <span class="nav__cta"><a class="btn btn--primary" href="#get">Get Hawk</a></span>
+      </div>
+
+      <button class="nav__toggle" id="navToggle" aria-expanded="false" aria-controls="navLinks" aria-label="Toggle navigation menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<span id="top"></span>
+
+<!-- ============ HERO ============ -->
+<section class="hero" aria-labelledby="hero-h1">
+  <div class="wrap">
+    <div class="hero__grid">
+      <div class="hero__copy">
+        <p class="eyebrow hero__eyebrow">Ambient AI Agent</p>
+        <h1 id="hero-h1">Hawk</h1>
+        <p class="hero__tagline">
+          An ambient AI agent that <span class="hl">sees what you see</span>, remembers your day, and acts — live across your glasses, your phone, and a powerful backend brain.
+        </p>
+        <p class="hero__sub">
+          Hawk wears your world: an iOS frontend on iPhone and Ray-Ban Meta glasses is the eyes and ears, while a long-lived backend agent does the thinking and the acting. One system, always circling — and six concrete flows it already runs.
+        </p>
+        <div class="hero__ctas">
+          <a class="btn btn--primary" href="#get">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Install Hawk
+          </a>
+          <a class="btn btn--ghost" href="#demos">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 4 13 8-13 8V4Z" stroke-linejoin="round"/></svg>
+            See the demos
+          </a>
+        </div>
+      </div>
+
+      <div class="hero__device">
+        <div class="hero__rings" aria-hidden="true">
+          <!-- Circling Ring motif behind device -->
+          <svg viewBox="0 0 520 520" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <g class="ring-rot">
+              <circle cx="260" cy="260" r="248" stroke="var(--line-2)" stroke-width="1" stroke-dasharray="3 10" opacity="0.55"/>
+            </g>
+            <g class="ring-rot--rev">
+              <circle cx="260" cy="260" r="208" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="2 14" opacity="0.4"/>
+            </g>
+            <circle cx="260" cy="260" r="168" stroke="var(--line)" stroke-width="1" opacity="0.5"/>
+            <circle cx="260" cy="12" r="3" fill="var(--accent)"/>
+            <circle cx="468" cy="260" r="2.4" fill="var(--accent-2)"/>
+          </svg>
+        </div>
+        <div class="hero__logo">
+          <div class="hero__iconstage" id="heroIntro" title="Replay intro">
+            <span class="hero__glow" aria-hidden="true"></span>
+            <span class="hero__flare" aria-hidden="true"></span>
+            <span class="hero__sparks" id="heroSparks" aria-hidden="true"></span>
+            <img class="hero__mark" src="assets/hawk-icon.png" alt="Hawk" width="216" height="216">
+            <span class="hero__sweep" aria-hidden="true"></span>
+          </div>
+          <span class="hero__logoname">Hawk</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ GET STARTED SELECTOR ============ -->
+<div class="getband" id="get" aria-label="Get started">
+  <div class="wrap">
+    <div class="getsel reveal">
+      <div class="getsel__head">
+        <p class="eyebrow">Get started</p>
+        <h2 class="getsel__title">Download &amp; try in 30 seconds</h2>
+      </div>
+
+      <div class="getsel__matrix">
+        <!-- Row 1: audience -->
+        <div class="getsel__row">
+          <span class="getsel__label" id="gl-aud">You are</span>
+          <div class="getsel__opts" role="radiogroup" aria-labelledby="gl-aud" aria-label="You are">
+            <button type="button" class="opt is-on" data-k="audience" data-v="human" aria-pressed="true">Human</button>
+            <button type="button" class="opt" data-k="audience" data-v="agent" aria-pressed="false">Agent</button>
+          </div>
+        </div>
+
+        <!-- Human rows -->
+        <div class="getsel__row" data-aud="human" id="row-surface">
+          <span class="getsel__label" id="gl-surface">Surface</span>
+          <div class="getsel__opts" role="radiogroup" aria-labelledby="gl-surface" aria-label="Surface">
+            <button type="button" class="opt is-on" data-k="surface" data-v="iphone" aria-pressed="true">iPhone app</button>
+            <button type="button" class="opt" data-k="surface" data-v="android" aria-pressed="false" disabled aria-disabled="true">Android · soon</button>
+            <button type="button" class="opt" data-k="surface" data-v="backend" aria-pressed="false">Backend · Mac/Linux</button>
+          </div>
+        </div>
+        <div class="getsel__row" data-aud="human" id="row-method">
+          <span class="getsel__label" id="gl-method">Install via</span>
+          <div class="getsel__opts" role="radiogroup" aria-labelledby="gl-method" aria-label="Install via">
+            <button type="button" class="opt is-on" data-k="method" data-v="testflight" aria-pressed="true">TestFlight</button>
+            <button type="button" class="opt" data-k="method" data-v="xcode" aria-pressed="false">Xcode</button>
+            <button type="button" class="opt" data-k="method" data-v="bun" aria-pressed="false">Bun</button>
+            <button type="button" class="opt" data-k="method" data-v="script" aria-pressed="false">One-line script</button>
+          </div>
+        </div>
+
+        <!-- Agent rows -->
+        <div class="getsel__row" data-aud="agent" id="row-agent" hidden>
+          <span class="getsel__label" id="gl-agent">Coding agent</span>
+          <div class="getsel__opts" role="radiogroup" aria-labelledby="gl-agent" aria-label="Coding agent">
+            <button type="button" class="opt is-on" data-k="agent" data-v="claude" aria-pressed="true">Claude Code</button>
+            <button type="button" class="opt" data-k="agent" data-v="codex" aria-pressed="false">Codex</button>
+            <button type="button" class="opt" data-k="agent" data-v="hermes" aria-pressed="false">Hermes</button>
+          </div>
+        </div>
+        <div class="getsel__row" data-aud="agent" id="row-goal" hidden>
+          <span class="getsel__label" id="gl-goal">Goal</span>
+          <div class="getsel__opts" role="radiogroup" aria-labelledby="gl-goal" aria-label="Goal">
+            <button type="button" class="opt is-on" data-k="goal" data-v="setup" aria-pressed="true">Set up Hawk</button>
+            <button type="button" class="opt" data-k="goal" data-v="addto" aria-pressed="false">Add to my app</button>
+            <button type="button" class="opt" data-k="goal" data-v="feature" aria-pressed="false">Build a feature</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="getsel__out" aria-live="polite">
+        <span class="getsel__outlabel" id="get-outlabel">Run this:</span>
+        <pre><code id="get-output"></code></pre>
+        <button class="copybtn" data-copy="#get-output" aria-label="Copy this command">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+          <span class="copybtn__txt">Copy</span>
+        </button>
+      </div>
+
+      <div class="getsel__actions" id="get-actions" hidden>
+        <button type="button" class="btn btn--ghost" id="get-copyprompt" data-open="copy">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+          Copy prompt
+        </button>
+        <button type="button" class="btn btn--ghost" id="get-open-claude" data-open="https://claude.com/claude-code">
+          Open in Claude Code
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button type="button" class="btn btn--ghost" id="get-open-codex" data-open="https://openai.com/codex">
+          Open in Codex
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <p class="getsel__note" id="get-note" hidden>Hermes has no app — copy the prompt and paste it into your Hermes session.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ VALUE PILLARS ============ -->
+<section class="section" id="pillars" aria-labelledby="pillars-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">One system, two halves</p>
+      <h2 id="pillars-h">Eyes on your world, a brain behind them</h2>
+      <p class="lede">Everything Hawk does comes back to three things — what it wears, what it runs, and what it can already do.</p>
+    </div>
+    <div class="pillars">
+      <article class="pillar reveal">
+        <div class="pillar__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <h3>Worn on your world</h3>
+        <p>The Hawk iOS app turns your iPhone and Ray-Ban Meta glasses into a first-person camera and microphone. Live conversation, visual memory, a multi-panel carousel, and a lock-screen widget — the eyes and ears you carry into the room.</p>
+        <span class="pillar__tag">iOS frontend</span>
+      </article>
+      <article class="pillar reveal">
+        <div class="pillar__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" stroke-linecap="round"/></svg>
+        </div>
+        <h3>A brain that never sleeps</h3>
+        <p>The Hawk gateway is a long-lived process running a powerful coding-agent core. Agent loop, sessions, hybrid memory, heartbeat, cron, MCP tools, and sub-agents — always on, always watching, ready to act.</p>
+        <span class="pillar__tag">Backend agent</span>
+      </article>
+      <article class="pillar reveal">
+        <div class="pillar__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h3>Six flows, one agent</h3>
+        <p>Not a promise deck — real flows. From whispering names across a noisy room to shipping a feature you asked for out loud, Hawk runs six concrete demos today, with more circling in.</p>
+        <span class="pillar__tag">Multiple demo flows</span>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CONCRETE DEMO (centerpiece) ============ -->
+<section class="section" id="demos" aria-labelledby="demos-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">Six flows, one agent</p>
+      <h2 id="demos-h">What Hawk actually does</h2>
+      <p class="lede">Six flows from the same agent — three live, two in progress, one in preview. The Coding cell is a real recording; the rest are wired to drop in their clips.</p>
+    </div>
+
+    <div class="demos">
+      <!-- Cell 1 — Cocktail Meeting -->
+      <article class="demo reveal" data-demo="cocktail">
+        <div class="demo__media">
+          <div class="demo__ph">
+            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
+            <span class="demo__phlabel">Demo clip soon</span>
+          </div>
+          <!-- clip hook: drop <video> here -->
+        </div>
+        <div class="demo__body">
+          <div class="demo__top"><h3>Cocktail Meeting</h3><span class="badge badge--live">Live</span></div>
+          <p>In a noisy party or meeting, Hawk listens, picks out who's talking, and quietly briefs you — names, context, and what to say next.</p>
+        </div>
+      </article>
+
+      <!-- Cell 2 — Safety -->
+      <article class="demo reveal" data-demo="safety">
+        <div class="demo__media">
+          <div class="demo__ph">
+            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
+            <span class="demo__phlabel">Demo clip soon</span>
+          </div>
+          <!-- clip hook: drop <video> here -->
+        </div>
+        <div class="demo__body">
+          <div class="demo__top"><h3>Safety</h3><span class="badge badge--live">Live</span></div>
+          <p>Hawk watches your surroundings and warns you about hazards in real time, before they reach you.</p>
+        </div>
+      </article>
+
+      <!-- Cell 3 — Reminder -->
+      <article class="demo reveal" data-demo="reminder">
+        <div class="demo__media">
+          <div class="demo__ph">
+            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
+            <span class="demo__phlabel">Demo clip soon</span>
+          </div>
+          <!-- clip hook: drop <video> here -->
+        </div>
+        <div class="demo__body">
+          <div class="demo__top"><h3>Reminder</h3><span class="badge badge--prog">In progress</span></div>
+          <p>Hawk notices the commitments you make in conversation and surfaces the right reminder at the right moment.</p>
+        </div>
+      </article>
+
+      <!-- Cell 4 — Silent -->
+      <article class="demo reveal" data-demo="silent">
+        <div class="demo__media">
+          <div class="demo__ph">
+            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
+            <span class="demo__phlabel">Demo clip soon</span>
+          </div>
+          <!-- clip hook: drop <video> here -->
+        </div>
+        <div class="demo__body">
+          <div class="demo__top"><h3>Silent</h3><span class="badge badge--prog">In progress</span></div>
+          <p>A hands-free, no-audio mode. Hawk reads the scene and assists without speaking — a glance at your glasses display or lock screen is all it takes.</p>
+        </div>
+      </article>
+
+      <!-- Cell 5 — Coding (REAL VIDEO) -->
+      <article class="demo demo--coding reveal" data-demo="coding">
+        <div class="demo__media">
+          <video id="codingVideo" poster="assets/demo-coding.png" src="assets/demo-coding.mp4" muted loop playsinline preload="metadata" aria-label="Screen recording of Hawk's backend agent writing and shipping a feature from a spoken request.">
+            Screen recording of Hawk's backend agent writing and shipping a feature from a spoken request.
+          </video>
+          <button class="demo__vctrl" id="codingCtrl" aria-pressed="false" aria-label="Play the Coding demo video">
+            <svg class="ico-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m6 4 14 8-14 8V4Z"/></svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          </button>
+        </div>
+        <div class="demo__body">
+          <div class="demo__top"><h3>Coding</h3><span class="badge badge--live">Live</span></div>
+          <p>Ask Hawk out loud to build a feature. The backend agent writes and ships the code while you keep moving.</p>
+        </div>
+      </article>
+
+      <!-- Cell 6 — Visual Memory -->
+      <article class="demo reveal" data-demo="visual-memory">
+        <div class="demo__media">
+          <div class="demo__ph">
+            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
+            <span class="demo__phlabel">Demo clip soon</span>
+          </div>
+          <!-- clip hook: drop <video> here -->
+        </div>
+        <div class="demo__body">
+          <div class="demo__top"><h3>Visual Memory</h3><span class="badge badge--prev">Preview</span></div>
+          <p>"What did I do yesterday?" "What did I just do?" Hawk answers from a searchable visual record of your day — down to "how many times did my dog appear in the last 10 minutes?"</p>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section class="section" id="features" aria-labelledby="features-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">Capabilities</p>
+      <h2 id="features-h">Everything under one agent</h2>
+      <p class="lede">Perception, memory, and action — the pieces that let Hawk see, remember, and strike.</p>
+    </div>
+    <div class="features">
+      <article class="feature reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3-5 6-5 4 2 4 2 1-2 4-2 6 5 6 5" /><circle cx="7" cy="12" r="3"/><circle cx="17" cy="12" r="3"/></svg></div>
+        <h3>Glass support</h3>
+        <p>Ray-Ban Meta glasses become a live input to the agent — first-person camera and microphone, streaming what you see and hear. Hawk's vision is whatever yours is pointed at, hands free.</p>
+      </article>
+      <article class="feature reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/><path d="m20 20-3-3" stroke-linecap="round"/></svg></div>
+        <h3>Visual Memory</h3>
+        <p>Hawk keeps a searchable record of what you saw and did. Ask in plain language or query the video directly — "what did I just do," "where did I leave it," "how often did that appear" — and get an answer from your own day.</p>
+      </article>
+      <article class="feature reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19V5l8 5 8-5v14" stroke-linejoin="round"/><circle cx="12" cy="13" r="2.5"/></svg></div>
+        <h3>Memory distillation</h3>
+        <p>The realtime conversation is dumped to a session log, then a single Haiku call consolidates that session log into a daily log. At the start of each realtime session, Hawk's prompt is rebuilt from soul, identity, global memory, and daily memory — so it always wakes up knowing who it is and what just happened.</p>
+      </article>
+      <article class="feature reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h16M4 12h10M4 16h6" stroke-linecap="round"/><circle cx="18" cy="15" r="3"/></svg></div>
+        <h3>Interactivity</h3>
+        <p>Four live modes for whatever the moment needs — meeting and cocktail briefings, real-time safety, in-the-moment reminders, and a silent, no-audio mode. Hawk shifts how it helps without you breaking stride.</p>
+      </article>
+      <article class="feature reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m13 2-9 12h7l-2 8 9-12h-7l2-8Z" stroke-linejoin="round"/></svg></div>
+        <h3>Agentic</h3>
+        <p>Speak a request and the backend agent goes and does it — writing and shipping a real feature while you carry on. Hawk isn't a chat window; it's an agent with hands.</p>
+      </article>
+      <article class="feature reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h10M4 12h16M4 18h7" stroke-linecap="round"/><circle cx="19" cy="6" r="2"/><circle cx="15" cy="18" r="2"/></svg></div>
+        <h3>Multi-stream</h3>
+        <p>Phone mic, glasses camera, and more — Hawk ingests multiple concurrent input streams at once and routes them to the agent. Many eyes, many ears, one decision loop.</p>
+      </article>
+      <article class="feature feature--wide reveal">
+        <div class="feature__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="4"/><path d="M5 21c0-4 3-6 7-6s7 2 7 6" stroke-linecap="round"/></svg></div>
+        <div class="feature__copy">
+          <h3>Personality</h3>
+          <p>A prompt-defined soul plus an identity give Hawk a consistent character across every session. It doesn't reset between conversations — it stays itself.</p>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ARCHITECTURE ============ -->
+<section class="section" id="architecture" aria-labelledby="arch-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">Architecture</p>
+      <h2 id="arch-h">Thin clients, one relentless brain</h2>
+    </div>
+    <p class="arch__intro reveal">
+      Your glasses and phone stream everything you see and hear to the Hawk gateway as multiple concurrent streams over a single WebSocket, tunneled through Tailscale. There the agent loop, memory, and background services do the thinking — pluggable across Hermes, Codex, and Claude Code.
+    </p>
+    <div class="arch__diagram reveal">
+      <!-- architecture diagram pasted inline; themes via :root CSS vars -->
+      <svg viewBox="0 0 1100 620" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg"
+           fill="none" role="img" aria-labelledby="hawk-arch-title hawk-arch-desc"
+           font-family="inherit" color="var(--text)" stroke="var(--line-2)">
+        <title id="hawk-arch-title">Hawk system architecture</title>
+        <desc id="hawk-arch-desc">Architecture diagram — Ray-Ban Meta glasses and the Hawk iPhone app stream multi-stream audio and video over WebSocket through Tailscale into the Hawk gateway, which runs the agent loop, hybrid memory, heartbeat, cron, MCP, sub-agents, and push, then drives pluggable runtimes (Hermes, Codex, Claude Code) and ultimately Claude and other LLMs; a web PWA and terminal UI connect to the same gateway.</desc>
+
+        <style>
+          /* light-muted label tone — readable on the near-black panel */
+          /* node cards a notch lighter than the elevated panel, strokes at higher contrast */
+          svg { --label: #AEB7C2; --bg-elev-2: #232A33; --line-2: #44505C; }
+          .lane-label { font-family: inherit; font-size: 12.5px; letter-spacing: .16em;
+            fill: var(--accent); text-transform: uppercase; font-weight: 700; }
+          .node-title { font-family: inherit; font-size: 15px; font-weight: 600; fill: var(--text); }
+          .node-sub   { font-family: inherit; font-size: 11.5px; fill: var(--label); }
+          .chip-txt   { font-family: inherit; font-size: 11.5px; fill: var(--label); }
+          .flow-label { font-family: inherit; font-size: 11.5px; fill: var(--label); }
+          .grp-label  { font-family: inherit; font-size: 11px; letter-spacing: .08em;
+            fill: var(--label); font-weight: 700; }
+          .strike { stroke: var(--accent); stroke-width: 1.6; }
+          text { color: var(--text); }
+        </style>
+
+        <defs>
+          <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M0.5 1 L8 4.5 L0.5 8" stroke="var(--accent)" stroke-width="1.6" fill="none"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+          <marker id="arw2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M0.5 1 L8 4.5 L0.5 8" stroke="var(--accent-2)" stroke-width="1.6" fill="none"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+        </defs>
+
+        <!-- ============ LANE HEADERS ============ -->
+        <text class="lane-label" x="118" y="34" text-anchor="middle">Capture</text>
+        <text class="lane-label" x="356" y="34" text-anchor="middle">Transport</text>
+        <text class="lane-label" x="610" y="34" text-anchor="middle">Gateway</text>
+        <text class="lane-label" x="872" y="34" text-anchor="middle">Runtimes</text>
+        <text class="lane-label" x="1018" y="34" text-anchor="middle">Models</text>
+
+        <!-- ============ GROUP: iOS FRONTEND ============ -->
+        <rect x="24" y="52" width="200" height="356" rx="18" fill="var(--bg-elev)"
+              stroke="var(--accent-2)" stroke-width="1.5" stroke-opacity="0.55"/>
+        <text class="grp-label" x="124" y="76" text-anchor="middle" fill="var(--accent-2)">iOS FRONTEND</text>
+
+        <!-- Glasses node -->
+        <g>
+          <rect x="44" y="96" width="160" height="92" rx="14" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--line-2, var(--line))" stroke-width="1.25"/>
+          <circle cx="74" cy="124" r="11" stroke="currentColor" stroke-width="1.4"/>
+          <circle cx="74" cy="124" r="3" fill="var(--accent)" stroke="none"/>
+          <path d="M88 116 L92 113" class="strike" stroke="var(--accent-2)"/>
+          <text class="node-title" x="98" y="121">Ray-Ban Meta</text>
+          <text class="node-title" x="98" y="138">glasses</text>
+          <text class="node-sub" x="64" y="166">camera · mics · speaker</text>
+          <text class="node-sub" x="64" y="180">live POV capture</text>
+        </g>
+
+        <!-- iPhone node -->
+        <g>
+          <rect x="44" y="206" width="160" height="92" rx="14" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--line-2, var(--line))" stroke-width="1.25"/>
+          <rect x="62" y="222" width="22" height="40" rx="5" stroke="currentColor" stroke-width="1.4"/>
+          <circle cx="73" cy="256" r="1.6" fill="var(--accent)" stroke="none"/>
+          <text class="node-title" x="98" y="231">iPhone —</text>
+          <text class="node-title" x="98" y="248">Hawk app</text>
+          <text class="node-sub" x="64" y="276">multi-panel live view</text>
+          <text class="node-sub" x="64" y="290">lock-screen widget</text>
+        </g>
+
+        <!-- frontend payload chip -->
+        <g>
+          <rect x="44" y="320" width="160" height="68" rx="12" fill="var(--accent-soft)"
+                stroke="var(--accent)" stroke-width="1" stroke-opacity="0.5"/>
+          <text class="chip-txt" x="124" y="344" text-anchor="middle" fill="var(--accent)" font-weight="600">multi-stream</text>
+          <text class="chip-txt" x="124" y="362" text-anchor="middle">audio · video</text>
+          <text class="chip-txt" x="124" y="378" text-anchor="middle">concurrent inputs</text>
+        </g>
+
+        <!-- ============ TRANSPORT ============ -->
+        <line x1="224" y1="230" x2="296" y2="230" class="strike" marker-end="url(#arw2)"/>
+        <text class="flow-label" x="260" y="220" text-anchor="middle">audio/video</text>
+
+        <g>
+          <rect x="296" y="150" width="120" height="160" rx="14" fill="var(--bg-elev)"
+                stroke="var(--accent-2)" stroke-width="1.4" stroke-opacity="0.7"/>
+          <path d="M316 196 q9 -16 18 0 t18 0 t18 0" stroke="var(--accent-2)" stroke-width="1.5" fill="none"/>
+          <text class="node-title" x="356" y="232" text-anchor="middle">WebSocket</text>
+          <text class="node-sub"   x="356" y="252" text-anchor="middle" fill="var(--accent-2)">over Tailscale</text>
+          <text class="node-sub"   x="356" y="276" text-anchor="middle">encrypted</text>
+          <text class="node-sub"   x="356" y="290" text-anchor="middle">mesh tunnel</text>
+        </g>
+
+        <!-- flow: transport -> gateway -->
+        <line x1="416" y1="230" x2="488" y2="230" class="strike" marker-end="url(#arw)"/>
+        <text class="flow-label" x="452" y="220" text-anchor="middle">WS stream</text>
+
+        <!-- ============ GROUP: BACKEND AGENT (GATEWAY) ============ -->
+        <rect x="488" y="52" width="244" height="356" rx="18" fill="var(--bg-elev)"
+              stroke="var(--accent)" stroke-width="1.6" stroke-opacity="0.7"/>
+        <text class="grp-label" x="610" y="76" text-anchor="middle" fill="var(--accent)">BACKEND AGENT</text>
+
+        <!-- gateway core node -->
+        <g>
+          <rect x="506" y="88" width="208" height="156" rx="14" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--accent)" stroke-width="1.25"/>
+          <circle cx="530" cy="112" r="9" stroke="var(--accent)" stroke-width="1.4"/>
+          <circle cx="530" cy="112" r="2.6" fill="var(--accent)" stroke="none"/>
+          <text class="node-title" x="548" y="109">Hawk Gateway</text>
+          <text class="node-sub"   x="548" y="124">long-lived backend brain</text>
+
+          <g class="node-sub">
+            <text x="524" y="150">· agent loop</text>
+            <text x="524" y="168">· sessions</text>
+            <text x="524" y="186">· hybrid memory</text>
+            <text x="538" y="200" fill="var(--accent-2)">BM25 + vector · FTS5</text>
+            <text x="524" y="220">· heartbeat</text>
+            <text x="630" y="150">· cron</text>
+            <text x="630" y="168">· MCP</text>
+            <text x="630" y="186">· sub-agents</text>
+            <text x="630" y="220">· push</text>
+          </g>
+        </g>
+
+        <!-- thin clients on the gateway -->
+        <g>
+          <rect x="506" y="256" width="100" height="64" rx="12" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--line-2, var(--line))" stroke-width="1.1"/>
+          <text class="node-sub" x="556" y="278" text-anchor="middle" font-weight="600" fill="currentColor">Thin clients</text>
+          <text class="node-sub" x="556" y="296" text-anchor="middle">web PWA</text>
+          <text class="node-sub" x="556" y="310" text-anchor="middle">terminal UI</text>
+        </g>
+        <line x1="556" y1="256" x2="556" y2="244" stroke="var(--line-2, var(--line))" stroke-width="1.2"/>
+
+        <!-- background services callout -->
+        <g>
+          <rect x="616" y="256" width="98" height="64" rx="12" fill="var(--accent-soft)"
+                stroke="var(--accent)" stroke-width="1" stroke-opacity="0.4"/>
+          <text class="node-sub" x="665" y="276" text-anchor="middle" font-weight="600" fill="var(--accent)">Background</text>
+          <text class="node-sub" x="665" y="290" text-anchor="middle">memory consol.</text>
+          <text class="node-sub" x="665" y="303" text-anchor="middle">heartbeat</text>
+          <text class="node-sub" x="665" y="316" text-anchor="middle">cron</text>
+        </g>
+
+        <!-- push back to phone (return path) -->
+        <path d="M506 348 L356 348 L356 312" stroke="var(--accent)" stroke-width="1.3"
+              stroke-dasharray="4 4" fill="none" marker-end="url(#arw)"/>
+        <text class="flow-label" x="430" y="364" text-anchor="middle">push notifications → iPhone</text>
+
+        <!-- ============ RUNTIMES ============ -->
+        <line x1="732" y1="166" x2="800" y2="166" class="strike" marker-end="url(#arw)"/>
+        <text class="flow-label" x="766" y="156" text-anchor="middle">dispatch</text>
+
+        <text class="grp-label" x="872" y="92" text-anchor="middle">PLUGGABLE RUNTIMES</text>
+        <g>
+          <rect x="800" y="104" width="144" height="44" rx="22" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--accent)" stroke-width="1.25"/>
+          <circle cx="824" cy="126" r="4" fill="var(--accent)" stroke="none"/>
+          <text class="node-title" x="838" y="131" font-size="14">Hermes</text>
+
+          <rect x="800" y="158" width="144" height="44" rx="22" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--accent)" stroke-width="1.25"/>
+          <circle cx="824" cy="180" r="4" fill="var(--accent)" stroke="none"/>
+          <text class="node-title" x="838" y="185" font-size="14">Codex</text>
+
+          <rect x="800" y="212" width="144" height="44" rx="22" fill="var(--bg-elev-2, var(--bg-elev))"
+                stroke="var(--accent)" stroke-width="1.25"/>
+          <circle cx="824" cy="234" r="4" fill="var(--accent)" stroke="none"/>
+          <text class="node-title" x="838" y="239" font-size="14">Claude Code</text>
+        </g>
+        <text class="node-sub" x="872" y="276" text-anchor="middle">interchangeable adapters</text>
+
+        <!-- ============ MODELS ============ -->
+        <line x1="944" y1="126" x2="980" y2="126" class="strike" marker-end="url(#arw)"/>
+        <line x1="944" y1="180" x2="980" y2="180" class="strike" marker-end="url(#arw)"/>
+        <line x1="944" y1="234" x2="980" y2="180" class="strike" marker-end="url(#arw)"/>
+
+        <g>
+          <rect x="980" y="120" width="96" height="120" rx="14" fill="var(--bg-elev)"
+                stroke="var(--accent)" stroke-width="1.4"/>
+          <circle cx="1028" cy="156" r="13" stroke="var(--accent)" stroke-width="1.5"/>
+          <circle cx="1028" cy="156" r="4" fill="var(--accent)" stroke="none"/>
+          <path d="M1040 147 L1045 143" class="strike" stroke="var(--accent-2)"/>
+          <text class="node-title" x="1028" y="194" text-anchor="middle" font-size="14">Claude</text>
+          <text class="node-sub"   x="1028" y="212" text-anchor="middle">/ LLMs</text>
+          <text class="node-sub"   x="1028" y="228" text-anchor="middle">reasoning core</text>
+        </g>
+
+        <!-- ============ FOOTER FLOW STRIP ============ -->
+        <line x1="40" y1="440" x2="1076" y2="440" stroke="var(--line-2)" stroke-width="1"/>
+        <text class="flow-label" x="40" y="466" fill="var(--label)">
+          <tspan fill="var(--accent-2)" font-weight="600">Capture</tspan> the wearer's world
+          → <tspan fill="var(--accent-2)" font-weight="600">stream</tspan> over an encrypted WebSocket/Tailscale link
+          → the <tspan fill="var(--accent)" font-weight="600">gateway</tspan> runs the agent loop against hybrid memory
+          → a pluggable <tspan fill="var(--accent)" font-weight="600">runtime</tspan> drives the
+          <tspan fill="var(--accent)" font-weight="600">LLM</tspan>, then acts and pushes back.
+        </text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INSTALL ============ -->
+<section class="section" id="install" aria-labelledby="install-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">Install</p>
+      <h2 id="install-h">Two tracks: the brain, and you</h2>
+      <p class="lede">Stand up the backend in one line, then point the iOS app at it. URLs and names below are placeholders — keep them tidy and swap when you ship.</p>
+    </div>
+
+    <div class="install">
+      <!-- Track A — Agent (backend) -->
+      <article class="track reveal">
+        <div class="track__head">
+          <span class="track__kicker">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M8 9l3 2-3 2M13 13h3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Agent · backend
+          </span>
+          <h3>Agent — backend (Mac / server)</h3>
+          <p>The long-lived brain. Requires Bun ≥ 1.3.</p>
+        </div>
+        <div class="codeblock">
+          <button class="copybtn" data-copy="#install-agent" aria-label="Copy backend install commands">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+            <span class="copybtn__txt">Copy</span>
+          </button>
+          <pre><code id="install-agent"><span class="c-comment"># install</span>
+<span class="c-cmd">bun install -g hawk</span>            <span class="c-comment"># requires Bun >= 1.3</span>
+<span class="c-comment"># or one-line:</span>
+<span class="c-cmd">curl -fsSL https://hawk.sh/install.sh | bash</span>
+
+<span class="c-comment"># run</span>
+<span class="c-cmd">hawk gateway</span>                   <span class="c-comment"># start the long-lived backend</span>
+<span class="c-cmd">hawk</span>                           <span class="c-comment"># open the terminal client</span></code></pre>
+        </div>
+      </article>
+
+      <!-- Track B — Human (iOS) -->
+      <article class="track reveal">
+        <div class="track__head">
+          <span class="track__kicker">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2" stroke-linecap="round"/></svg>
+            Human · iOS frontend
+          </span>
+          <h3>Human — iOS frontend</h3>
+          <p>The eyes and ears you carry.</p>
+        </div>
+        <ol class="steps">
+          <li>Install the Hawk iOS app on your iPhone.</li>
+          <li>Point it at your gateway: <code>ws://&lt;your-tailscale-ip&gt;:4242</code></li>
+          <li>Pair your Ray-Ban Meta glasses in the Glasses tab.</li>
+        </ol>
+      </article>
+    </div>
+    <p class="install__note">Placeholder URLs and names (<code>hawk.sh</code>, <code>ws://&lt;your-tailscale-ip&gt;:4242</code>) — swap for your own when you deploy.</p>
+  </div>
+</section>
+
+<!-- ============ ROADMAP ============ -->
+<section class="section" id="roadmap" aria-labelledby="roadmap-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">Roadmap</p>
+      <h2 id="roadmap-h">Always circling forward</h2>
+      <p class="lede">Where Hawk's vision and reach widen next.</p>
+    </div>
+    <ul class="roadmap reveal">
+      <li class="road">
+        <span class="road__num">01</span>
+        <div class="road__main">
+          <h3>Benchmark + agent gym</h3>
+          <p>Realtime-agent benchmark plus an auto-testing gym with synthetic tests.</p>
+        </div>
+      </li>
+      <li class="road">
+        <span class="road__num">02</span>
+        <div class="road__main">
+          <h3>Recursive self-improvement</h3>
+          <p>Agent builds agent: prompt optimization, sharper tooling, live dev.</p>
+        </div>
+      </li>
+      <li class="road">
+        <span class="road__num">03</span>
+        <div class="road__main">
+          <h3>CarPlay</h3>
+          <p>Hawk in the car — briefing and acting from the dashboard.</p>
+        </div>
+      </li>
+      <li class="road">
+        <span class="road__num">04</span>
+        <div class="road__main">
+          <h3>Latency-adaptive sampling</h3>
+          <p>Sample perception at a rate tuned to live latency.</p>
+        </div>
+      </li>
+      <li class="road">
+        <span class="road__num">05</span>
+        <div class="road__main">
+          <h3>Device support</h3>
+          <p>Android, Apple Watch, and more glasses beyond Ray-Ban Meta.</p>
+        </div>
+      </li>
+      <li class="road">
+        <span class="road__num">06</span>
+        <div class="road__main">
+          <h3>Perception pipeline</h3>
+          <p>Face recognition and speaker diarization to map audio to who's talking.</p>
+        </div>
+      </li>
+      <li class="road">
+        <span class="road__num">07</span>
+        <div class="road__main">
+          <h3>Personality &amp; memory</h3>
+          <p>Tunable soul/identity and shareable memory presets.</p>
+        </div>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ CITE / SOURCE ============ -->
+<section class="section" id="cite" aria-labelledby="cite-h">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <p class="eyebrow">Cite / Source</p>
+      <h2 id="cite-h">Use it, cite it, read the source</h2>
+    </div>
+    <div class="cite">
+      <div class="cite__left reveal">
+        <p>Hawk is open at the link below. If it helps your work, cite it — the BibTeX is ready to copy.</p>
+        <!-- PLACEHOLDER repo URL — swap on release -->
+        <a class="cite__gh" href="https://github.com/hawk-agent/hawk" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11 11 0 0 1 6 0C16.9 5 17.9 5.3 17.9 5.3c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5Z"/></svg>
+          github.com/hawk-agent/hawk
+        </a>
+      </div>
+      <div class="bibtex reveal">
+        <button class="copybtn" data-copy="#bibtex" aria-label="Copy BibTeX citation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+          <span class="copybtn__txt">Copy</span>
+        </button>
+        <pre><code id="bibtex"><span class="b-key">@software{hawk_ambient_agent,</span>
+  <span class="b-field">title</span>  = {Hawk: An Ambient AI Agent},
+  <span class="b-field">author</span> = {The Hawk Team},
+  <span class="b-field">year</span>   = {2026},
+  <span class="b-field">url</span>    = {https://github.com/hawk-agent/hawk},
+  <span class="b-field">note</span>   = {Placeholder URL — see project page}
+}</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer__inner">
+      <div class="footer__brand">
+        <svg height="30" viewBox="0 0 180 44" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="footLockupTitle">
+          <title id="footLockupTitle">Hawk</title>
+          <g transform="translate(6 6)">
+            <circle cx="16" cy="16" r="11.3" stroke="currentColor" stroke-width="1.6" opacity="0.92"/>
+            <g stroke="currentColor" stroke-width="1.6" stroke-linecap="square" opacity="0.5">
+              <path d="M3 9V3h6"/><path d="M23 3h6v6"/><path d="M29 23v6h-6"/><path d="M9 29H3v-6"/>
+            </g>
+            <circle cx="16" cy="16" r="6.4" stroke="currentColor" stroke-width="1.3" opacity="0.4"/>
+            <path d="M9.7 14.2 16 10.4l6.3 3.8" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="16" cy="17.2" r="3.05" fill="var(--accent)"/>
+            <circle cx="17.45" cy="15.95" r="1.05" fill="var(--accent-2)"/>
+          </g>
+          <g fill="currentColor">
+            <path d="M50 13h3.6v6.7h7V13h3.6v18h-3.6v-7.9h-7V31H50z"/>
+            <path d="M74.8 31.4c-3.5 0-6-2.2-6-5.4 0-3.2 2.4-5.2 6.4-5.2 1.3 0 2.5.3 3.4.7v-.4c0-1.7-1.1-2.6-3-2.6-1.4 0-2.7.4-3.8 1.1l-1.3-2.6c1.6-1 3.4-1.5 5.5-1.5 4 0 6.1 2 6.1 5.8V31h-3.5v-1.5c-1 1.2-2.5 1.9-4.1 1.9zm.9-2.7c1.7 0 2.9-1.1 2.9-2.7v-.7c-.8-.4-1.7-.6-2.7-.6-1.8 0-2.9.9-2.9 2.3 0 1.4 1 2.4 2.7 2.4z"/>
+            <path d="M86.3 17.2h3.7l2.4 9.1 2.6-9.1h3.1l2.6 9.1 2.4-9.1h3.6L104.6 31h-3.5l-2.7-9.1L95.6 31h-3.5z"/>
+            <path d="M111.7 13h3.6v10.6l4.6-6.4h4.2l-5.2 6.9 5.8 6.9h-4.3l-3.9-4.8-1.2 1.5V31h-3.6z"/>
+          </g>
+        </svg>
+        <p class="footer__tag">Eyes on your world. Hawk sees, remembers, and acts.</p>
+      </div>
+      <nav class="footer__nav" aria-label="Footer">
+        <a href="#demos">Demos</a>
+        <a href="#features">Features</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#install">Install</a>
+        <a href="#roadmap">Roadmap</a>
+      </nav>
+    </div>
+    <div class="footer__meta">
+      <span class="copy">© 2026 Hawk</span>
+      <span>"Hawk" is a working name and may change; product names and URLs on this page are placeholders.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* =========================================================
+   PRODUCT NAME — single JS source of truth. Rename here.
+   ========================================================= */
+const BRAND = "Hawk";
+
+(function () {
+  "use strict";
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---- mobile nav toggle ---- */
+  const toggle = document.getElementById("navToggle");
+  const links = document.getElementById("navLinks");
+  if (toggle && links) {
+    toggle.addEventListener("click", function () {
+      const open = links.classList.toggle("open");
+      toggle.setAttribute("aria-expanded", String(open));
+    });
+    links.querySelectorAll("a").forEach(function (a) {
+      a.addEventListener("click", function () {
+        links.classList.remove("open");
+        toggle.setAttribute("aria-expanded", "false");
+      });
+    });
+  }
+
+  /* ---- hero launch intro: generate ember sparks + click-to-replay ---- */
+  (function () {
+    const stage = document.getElementById("heroIntro");
+    const sparks = document.getElementById("heroSparks");
+    if (!stage || !sparks) return;
+
+    // warm palette from the Swift source (gold/amber/ember/cream)
+    const COLORS = ["#FFD475", "#F5A845", "#FF853E", "#FFF2DB"];
+    const N = 16;
+
+    // deterministic pseudo-random so the burst is organic but stable per index
+    function rnd(i, salt) {
+      const x = Math.sin((i + 1) * 12.9898 + salt * 78.233) * 43758.5453;
+      return x - Math.floor(x); // 0..1
+    }
+
+    function buildSparks() {
+      if (reduceMotion) return; // no sparks under reduced motion
+      sparks.innerHTML = "";
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < N; i++) {
+        const s = document.createElement("span");
+        s.className = "hero__spark";
+        // spread angles around the circle with jitter so it reads organic
+        const angle = (360 / N) * i + (rnd(i, 1) - 0.5) * 26;
+        const dist = 70 + rnd(i, 2) * 78;          // 70..148px
+        const w = 6 + rnd(i, 3) * 9;               // capsule length
+        const h = 2 + rnd(i, 4) * 2.4;             // capsule thickness
+        const dur = 0.5 + rnd(i, 5) * 0.4;         // 0.5..0.9s
+        const delay = 0.55 + rnd(i, 6) * 0.12;     // staggered around the flourish
+        const color = COLORS[i % COLORS.length];
+        s.style.setProperty("--a", angle.toFixed(1) + "deg");
+        s.style.setProperty("--dist", dist.toFixed(0) + "px");
+        s.style.setProperty("--sw", w.toFixed(1) + "px");
+        s.style.setProperty("--sh", h.toFixed(1) + "px");
+        s.style.setProperty("--sd", dur.toFixed(2) + "s");
+        s.style.setProperty("--sdl", delay.toFixed(2) + "s");
+        s.style.setProperty("--sc", color);
+        frag.appendChild(s);
+      }
+      sparks.appendChild(frag);
+    }
+
+    buildSparks();
+
+    // click-to-replay: re-trigger the whole sequence by reflowing the stage
+    if (!reduceMotion) {
+      stage.addEventListener("click", function () {
+        const animated = stage.querySelectorAll(
+          ".hero__glow,.hero__flare,.hero__mark,.hero__sweep,.hero__logoname,.hero__spark"
+        );
+        // also restart the wordmark, which lives outside the stage
+        const word = stage.parentNode.querySelector(".hero__logoname");
+        const all = Array.prototype.slice.call(animated);
+        if (word) all.push(word);
+        all.forEach(function (el) {
+          el.style.animation = "none";
+          void el.offsetWidth; // force reflow so the animation restarts
+          el.style.animation = "";
+        });
+        buildSparks();
+      });
+    }
+  })();
+
+  /* ---- copy-to-clipboard ---- */
+  function plainText(el) {
+    // strip soft markup, keep raw command text
+    return el.textContent.replace(/ /g, " ");
+  }
+  document.querySelectorAll(".copybtn[data-copy]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      const target = document.querySelector(btn.getAttribute("data-copy"));
+      if (!target) return;
+      const text = plainText(target);
+      const done = function () {
+        const label = btn.querySelector(".copybtn__txt");
+        const prev = label ? label.textContent : "";
+        if (label) label.textContent = "Copied";
+        btn.classList.add("copied");
+        setTimeout(function () {
+          if (label) label.textContent = prev || "Copy";
+          btn.classList.remove("copied");
+        }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text, done); });
+      } else {
+        fallbackCopy(text, done);
+      }
+    });
+  });
+  function fallbackCopy(text, done) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "absolute";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  /* ---- coding video play/pause ---- */
+  const video = document.getElementById("codingVideo");
+  const ctrl = document.getElementById("codingCtrl");
+  if (video && ctrl) {
+    const cell = ctrl.closest(".demo");
+    const setState = function (playing) {
+      ctrl.setAttribute("aria-pressed", String(playing));
+      ctrl.setAttribute("aria-label", (playing ? "Pause" : "Play") + " the Coding demo video");
+      if (cell) cell.classList.toggle("is-playing", playing);
+    };
+    const toggleVideo = function () {
+      if (video.paused) {
+        const p = video.play();
+        if (p && p.catch) p.catch(function () {});
+        setState(true);
+      } else {
+        video.pause();
+        setState(false);
+      }
+    };
+    ctrl.addEventListener("click", toggleVideo);
+    video.addEventListener("click", toggleVideo);
+    video.addEventListener("play", function () { setState(true); });
+    video.addEventListener("pause", function () { setState(false); });
+  }
+
+  /* ---- active-nav highlight via scroll-spy ---- */
+  const navLinks = Array.prototype.slice.call(document.querySelectorAll(".nav__link[href^='#']"));
+  const sectionMap = navLinks
+    .map(function (l) {
+      const id = l.getAttribute("href").slice(1);
+      const sec = document.getElementById(id);
+      return sec ? { link: l, sec: sec } : null;
+    })
+    .filter(Boolean);
+  if (sectionMap.length && "IntersectionObserver" in window) {
+    const spy = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          sectionMap.forEach(function (m) {
+            m.link.removeAttribute("aria-current");
+          });
+          const match = sectionMap.find(function (m) { return m.sec === e.target; });
+          if (match) match.link.setAttribute("aria-current", "true");
+        }
+      });
+    }, { rootMargin: "-45% 0px -50% 0px", threshold: 0 });
+    sectionMap.forEach(function (m) { spy.observe(m.sec); });
+  }
+
+  /* ---- reveal-on-scroll (no-op under reduced motion) ---- */
+  const revealEls = document.querySelectorAll(".reveal");
+  if (reduceMotion || !("IntersectionObserver" in window)) {
+    revealEls.forEach(function (el) { el.classList.add("in"); });
+  } else {
+    const io = new IntersectionObserver(function (entries, obs) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          e.target.classList.add("in");
+          obs.unobserve(e.target);
+        }
+      });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+    revealEls.forEach(function (el) { io.observe(el); });
+  }
+
+  /* ---- get-started selector ---- */
+  const getsel = document.querySelector(".getsel");
+  if (getsel) {
+    const state = { audience: "human", surface: "iphone", method: "testflight", agent: "claude", goal: "setup" };
+    const out = document.getElementById("get-output");
+    const outLabel = document.getElementById("get-outlabel");
+    const actions = document.getElementById("get-actions");
+    const note = document.getElementById("get-note");
+    const btnCopy = document.getElementById("get-copyprompt");
+    const btnClaude = document.getElementById("get-open-claude");
+    const btnCodex = document.getElementById("get-open-codex");
+
+    const agentName = { claude: "Claude Code", codex: "Codex", hermes: "Hermes" };
+
+    // surface -> which methods are valid + the default method for that surface
+    const methodsFor = {
+      iphone: { enabled: ["testflight", "xcode"], def: "testflight" },
+      backend: { enabled: ["bun", "script"], def: "script" }
+    };
+
+    const humanText = {
+      "iphone|testflight":
+"# On your iPhone\n" +
+"1. Open the TestFlight invite and install Hawk\n" +
+"2. Hawk → Settings → Gateway:  ws://<your-gateway>:4242\n" +
+"3. Glasses tab → pair your Ray-Ban Meta glasses",
+      "iphone|xcode":
+"git clone https://github.com/hawk-agent/hawk\n" +
+"cd hawk/ios && xcodegen generate\n" +
+"open hawk.xcodeproj          # set Team + bundle id, then ⌘R to your iPhone\n" +
+"# then Settings → Gateway → ws://<your-gateway>:4242, pair glasses",
+      "backend|bun":
+"bun install -g hawk          # requires Bun >= 1.3\n" +
+"hawk gateway                 # start the long-lived backend",
+      "backend|script":
+"curl -fsSL https://hawk.sh/install.sh | bash\n" +
+"hawk gateway"
+    };
+
+    function agentPrompt() {
+      const R = agentName[state.agent];
+      if (state.goal === "setup") {
+        return (
+"Set up Hawk — an ambient AI agent (iOS frontend + backend gateway) — on this machine.\n" +
+"1. Clone https://github.com/hawk-agent/hawk and install deps with Bun (>= 1.3).\n" +
+"2. Start the backend:  hawk gateway   — confirm GET /health returns ok.\n" +
+"3. Build & install the iOS app on the paired iPhone, point it at the gateway\n" +
+"   (ws://<tailscale-ip>:4242), and verify it connects.\n" +
+"Report the gateway URL and the app's launch status.");
+      }
+      if (state.goal === "addto") {
+        return (
+"Add Hawk's realtime ambient agent to my existing app.\n" +
+"- Stream my app's audio/video to the Hawk gateway over WebSocket.\n" +
+"- Use the " + R + " runtime adapter.\n" +
+"- Add a \"Live\" tab that shows the agent session; keep my current UI.\n" +
+"Verify end-to-end with a smoke test and report what changed.");
+      }
+      return (
+"Using Hawk's backend agent via " + R + ", build and ship this feature for me:\n" +
+"<describe what you want>.\n" +
+"Run it through the gateway, add tests, and report the result.");
+    }
+
+    function pressGroup(key) {
+      getsel.querySelectorAll('.opt[data-k="' + key + '"]').forEach(function (b) {
+        const on = b.getAttribute("data-v") === state[key];
+        b.classList.toggle("is-on", on);
+        b.setAttribute("aria-pressed", String(on));
+      });
+    }
+
+    function applyMethodAvailability() {
+      const allowed = methodsFor[state.surface].enabled;
+      getsel.querySelectorAll('.opt[data-k="method"]').forEach(function (b) {
+        const ok = allowed.indexOf(b.getAttribute("data-v")) !== -1;
+        if (ok) {
+          b.disabled = false;
+          b.removeAttribute("aria-disabled");
+        } else {
+          b.disabled = true;
+          b.setAttribute("aria-disabled", "true");
+        }
+      });
+    }
+
+    function setRowsVisibility() {
+      getsel.querySelectorAll('.getsel__row[data-aud]').forEach(function (row) {
+        row.hidden = row.getAttribute("data-aud") !== state.audience;
+      });
+    }
+
+    function render() {
+      if (state.audience === "human") {
+        applyMethodAvailability();
+        outLabel.textContent = "Run this:";
+        out.textContent = humanText[state.surface + "|" + state.method] || "";
+        actions.hidden = true;
+      } else {
+        outLabel.textContent = "Paste this prompt:";
+        out.textContent = agentPrompt();
+        actions.hidden = false;
+        const isHermes = state.agent === "hermes";
+        note.hidden = !isHermes;
+        // primary emphasis
+        btnCopy.classList.toggle("btn--primary", isHermes);
+        btnCopy.classList.toggle("btn--ghost", !isHermes);
+        btnClaude.classList.toggle("btn--primary", state.agent === "claude");
+        btnClaude.classList.toggle("btn--ghost", state.agent !== "claude");
+        btnCodex.classList.toggle("btn--primary", state.agent === "codex");
+        btnCodex.classList.toggle("btn--ghost", state.agent !== "codex");
+        // hide the open-in buttons for Hermes (no app)
+        btnClaude.hidden = isHermes;
+        btnCodex.hidden = isHermes;
+      }
+      ["audience", "surface", "method", "agent", "goal"].forEach(pressGroup);
+    }
+
+    getsel.querySelectorAll(".opt[data-k]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        if (b.disabled) return;
+        const key = b.getAttribute("data-k");
+        const val = b.getAttribute("data-v");
+        if (state[key] === val) return;
+        state[key] = val;
+        if (key === "audience") {
+          if (val === "human") { state.surface = "iphone"; state.method = "testflight"; }
+          else { state.agent = "claude"; state.goal = "setup"; }
+          setRowsVisibility();
+        } else if (key === "surface") {
+          state.method = methodsFor[val].def;
+        }
+        render();
+      });
+    });
+
+    // open-in / copy-prompt actions
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).catch(function () { fallbackCopy(text, function () {}); });
+      }
+      fallbackCopy(text, function () {});
+      return Promise.resolve();
+    }
+    [btnCopy, btnClaude, btnCodex].forEach(function (b) {
+      b.addEventListener("click", function () {
+        const dest = b.getAttribute("data-open");
+        const text = out.textContent;
+        copyText(text);
+        if (dest && dest !== "copy") window.open(dest, "_blank", "noopener");
+      });
+    });
+
+    setRowsVisibility();
+    render();
+  }
+})();
+</script>
+</body>
+</html>
