@@ -74,6 +74,131 @@ struct LiveIntentionCreateResult {
     var ask: String?
 }
 
+struct LiveVoiceprintAudioArtifactReference: Equatable {
+    var audioArtifactID: String
+    var audioPath: String
+    var sampleRate: Double?
+}
+
+struct LiveVoiceprintRealtimeEvent: Equatable {
+    var type: String
+    var itemID: String?
+    var speechWindowID: String?
+    var audioStartMs: Double?
+    var audioEndMs: Double?
+    var transcript: String?
+    var audioArtifactID: String?
+    var audioPath: String?
+    var sampleRate: Double?
+    var route: String?
+
+    var eventObject: [String: JSONValue] {
+        var event: [String: JSONValue] = ["type": .string(type)]
+        if let itemID, !itemID.isEmpty { event["item_id"] = .string(itemID) }
+        if let speechWindowID, !speechWindowID.isEmpty { event["speech_window_id"] = .string(speechWindowID) }
+        if let audioStartMs { event["audio_start_ms"] = .number(audioStartMs) }
+        if let audioEndMs { event["audio_end_ms"] = .number(audioEndMs) }
+        if let transcript { event["transcript"] = .string(transcript) }
+        if let audioArtifactID, !audioArtifactID.isEmpty { event["audio_artifact_id"] = .string(audioArtifactID) }
+        if let audioPath, !audioPath.isEmpty { event["audio_path"] = .string(audioPath) }
+        if let sampleRate { event["sample_rate"] = .number(sampleRate) }
+        if let route, !route.isEmpty { event["route"] = .string(route) }
+        return event
+    }
+
+    static func params(
+        sessionKey: String,
+        event: LiveVoiceprintRealtimeEvent,
+        includeMissingAudio: Bool = false
+    ) -> [String: JSONValue] {
+        var params: [String: JSONValue] = [
+            "sessionKey": .string(sessionKey),
+            "event": .object(event.eventObject),
+        ]
+        if includeMissingAudio {
+            params["includeMissingAudio"] = .bool(true)
+        }
+        return params
+    }
+}
+
+struct LiveVoiceprintFinalizedTurn: Equatable {
+    var sessionKey: String
+    var transcriptItemID: String
+    var role: String
+    var text: String?
+    var startMs: Double
+    var endMs: Double
+    var audioArtifactID: String?
+    var audioPath: String?
+    var route: String?
+    var speechWindowID: String
+
+    init?(object: [String: JSONValue]) {
+        guard
+            case let .some(.string(sessionKey)) = object["sessionKey"],
+            case let .some(.string(transcriptItemID)) = object["transcriptItemId"],
+            case let .some(.string(role)) = object["role"],
+            case let .some(.number(startMs)) = object["startMs"],
+            case let .some(.number(endMs)) = object["endMs"],
+            case let .some(.string(speechWindowID)) = object["speechWindowId"]
+        else {
+            return nil
+        }
+        self.sessionKey = sessionKey
+        self.transcriptItemID = transcriptItemID
+        self.role = role
+        self.text = Self.optionalString(object["text"])
+        self.startMs = startMs
+        self.endMs = endMs
+        self.audioArtifactID = Self.optionalString(object["audioArtifactId"])
+        self.audioPath = Self.optionalString(object["audioPath"])
+        self.route = Self.optionalString(object["route"])
+        self.speechWindowID = speechWindowID
+    }
+
+    private static func optionalString(_ value: JSONValue?) -> String? {
+        guard case let .some(.string(text)) = value else { return nil }
+        return text
+    }
+}
+
+struct LiveVoiceprintRealtimeResult: Equatable {
+    var ok: Bool
+    var sessionKey: String
+    var finalizedTurns: [LiveVoiceprintFinalizedTurn]
+    var pendingSpeechWindows: Int
+    var pendingTranscripts: Int
+
+    init?(payload: JSONValue?) {
+        guard
+            case let .some(.object(root)) = payload,
+            case let .some(.bool(ok)) = root["ok"],
+            case let .some(.string(sessionKey)) = root["sessionKey"]
+        else {
+            return nil
+        }
+        self.ok = ok
+        self.sessionKey = sessionKey
+        self.finalizedTurns = Self.turns(from: root["finalizedTurns"])
+        self.pendingSpeechWindows = Self.int(from: root["pendingSpeechWindows"]) ?? 0
+        self.pendingTranscripts = Self.int(from: root["pendingTranscripts"]) ?? 0
+    }
+
+    private static func turns(from value: JSONValue?) -> [LiveVoiceprintFinalizedTurn] {
+        guard case let .some(.array(items)) = value else { return [] }
+        return items.compactMap { item in
+            guard case let .object(object) = item else { return nil }
+            return LiveVoiceprintFinalizedTurn(object: object)
+        }
+    }
+
+    private static func int(from value: JSONValue?) -> Int? {
+        guard case let .some(.number(number)) = value else { return nil }
+        return Int(number)
+    }
+}
+
 enum LiveGatewayBridgeStreamEvent: Equatable {
     /// The feed websocket handshake just completed (initial connect or a reconnect).
     /// Emitted by `stream()` so the consumer can clear the offline state when the
@@ -741,6 +866,48 @@ actor LiveGatewayBridge {
         let payload = await invokeMethod("memory.distill", params: params, sessionKey: sessionKey)
         guard case let .object(root)? = payload else { return nil }
         return LiveMemoryDistillResult(object: root)
+    }
+
+    func sendVoiceprintRealtimeEvent(
+        _ event: LiveVoiceprintRealtimeEvent,
+        sessionKey: String,
+        mode: String,
+        includeMissingAudio: Bool = false,
+        timeoutSeconds: TimeInterval = 10
+    ) async -> LiveVoiceprintRealtimeResult? {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.realtime_event",
+            params: LiveVoiceprintRealtimeEvent.params(
+                sessionKey: sessionKey,
+                event: event,
+                includeMissingAudio: includeMissingAudio
+            ),
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintRealtimeResult(payload: payload)
+    }
+
+    func resetVoiceprintRealtime(
+        sessionKey: String,
+        mode: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async -> Bool {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.realtime_reset",
+            params: ["sessionKey": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        guard
+            case let .object(root)? = payload,
+            case let .some(.bool(ok)) = root["ok"]
+        else {
+            return false
+        }
+        return ok
     }
 
     /// Invoke an arbitrary gateway method over a short-lived connection and return

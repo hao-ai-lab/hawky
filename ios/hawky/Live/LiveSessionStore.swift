@@ -304,6 +304,13 @@ final class LiveSessionStore {
     @ObservationIgnored private var lastScrollTickAt: Date?
     private var currentUserAudioEntryID: UUID?
     private var transcriptEntryByItemID: [String: UUID] = [:]
+    private var voiceprintRealtimeTask: Task<Void, Never>?
+    private var voiceprintRealtimeTasks: [UUID: Task<Void, Never>] = [:]
+    private var voiceprintRealtimeGeneration = 0
+    private var voiceprintTranscriptItemIDsSent = Set<String>()
+    private var voiceprintOpenSpeechWindowID: String?
+    private var voiceprintClosedSpeechWindowIDs: [String] = []
+    private var voiceprintSpeechWindowCounter = 0
     // Maps a Realtime output item_id → the assistant bubble it streams into, so
     // re-delivered transcripts for the same item update one bubble instead of
     // appending a duplicate.
@@ -1659,6 +1666,8 @@ final class LiveSessionStore {
             providerLabel: effectiveConfig.provider.label
         )
         let nextProvider = LiveSessionProviderFactory.makeProvider(for: effectiveConfig, gatewayBridge: gatewayBridge)
+        resetVoiceprintRealtimeQueue()
+        enqueueVoiceprintRealtimeResetIfNeeded(config: effectiveConfig)
         if nextProvider.seedsHistoryOnConnect {
             effectiveConfig.historyReplayTurns = historyReplayTurns
             journalRaw(
@@ -1913,6 +1922,7 @@ final class LiveSessionStore {
         // per-session recognizer/cooldowns do not).
         teardownCocktailParty()
         teardownSafety()
+        resetVoiceprintRealtimeQueue()
         guard phase.isActive || provider != nil else {
             phase = .idle
             bridgeStatus = .idle
@@ -3177,6 +3187,7 @@ final class LiveSessionStore {
             appendUserTranscriptDelta(itemID: itemID, delta: text, detail: detail, eventType: eventType)
         case .inputTranscriptComplete(let itemID, let text, let detail, let eventType):
             finishUserTranscript(itemID: itemID, transcript: text, detail: detail, eventType: eventType)
+            enqueueFallbackVoiceprintTranscriptCompleted(itemID: itemID, transcript: text)
         case .outputAudioDelta(let data):
             publishOutputAudioDiagnostics(receivedBytes: data.count)
             if liveConfig.responseModality == .audio {
@@ -3218,7 +3229,7 @@ final class LiveSessionStore {
             journalRaw(direction: direction, type: type, json: json)
             appendVerbose("\(direction.rawValue): \(type)", detail: json)
             if direction == .received {
-                handleRealtimeRawEvent(type)
+                handleRealtimeRawEvent(type, json: json)
                 updateConversationState(forRawType: type)
             }
             if config.diagnosticsLevel == .verbose {
@@ -3262,7 +3273,21 @@ final class LiveSessionStore {
         }
     }
 
-    private func handleRealtimeRawEvent(_ type: String) {
+    private func handleRealtimeRawEvent(_ type: String, json: String) {
+        if let event = prepareVoiceprintRealtimeEvent(rawType: type, rawJSON: json) {
+            enqueueVoiceprintRealtimeEvent(event)
+            if type == "conversation.item.input_audio_transcription.completed",
+               let itemID = event.itemID {
+                voiceprintTranscriptItemIDsSent.insert(itemID)
+            }
+            if type == "input_audio_buffer.speech_stopped" {
+                enqueueCurrentVoiceprintAudioArtifact(
+                    itemID: event.itemID,
+                    speechWindowID: event.speechWindowID
+                )
+            }
+        }
+
         switch type {
         case "input_audio_buffer.speech_started":
             startRawAudioTrackSegmentIfNeeded()
@@ -3277,6 +3302,282 @@ final class LiveSessionStore {
         default:
             break
         }
+    }
+
+    private func prepareVoiceprintRealtimeEvent(rawType: String, rawJSON: String) -> LiveVoiceprintRealtimeEvent? {
+        guard var event = Self.voiceprintRealtimeEvent(
+            rawType: rawType,
+            rawJSON: rawJSON,
+            route: diagnostics.audioRoute,
+            recordingOffsetMs: recordingSink.currentAudioOffsetMs
+        ) else {
+            return nil
+        }
+
+        switch rawType {
+        case "input_audio_buffer.speech_started":
+            if event.itemID == nil && event.speechWindowID == nil {
+                event.speechWindowID = nextVoiceprintSpeechWindowID()
+            }
+            voiceprintOpenSpeechWindowID = event.speechWindowID ?? event.itemID
+        case "input_audio_buffer.speech_stopped":
+            if event.itemID == nil && event.speechWindowID == nil {
+                event.speechWindowID = voiceprintOpenSpeechWindowID
+            }
+            appendVoiceprintClosedSpeechWindowID(event.speechWindowID ?? event.itemID)
+            voiceprintOpenSpeechWindowID = nil
+        default:
+            break
+        }
+        return event
+    }
+
+    private func enqueueFallbackVoiceprintTranscriptCompleted(itemID: String, transcript: String) {
+        let trimmedItemID = itemID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedItemID.isEmpty else { return }
+        guard !voiceprintTranscriptItemIDsSent.contains(trimmedItemID) else {
+            _ = Self.consumeVoiceprintFallbackSpeechWindowID(
+                forTranscriptItemID: trimmedItemID,
+                from: &voiceprintClosedSpeechWindowIDs,
+                transcriptAlreadySent: true
+            )
+            return
+        }
+        voiceprintTranscriptItemIDsSent.insert(trimmedItemID)
+        let speechWindowID = Self.consumeVoiceprintFallbackSpeechWindowID(
+            forTranscriptItemID: trimmedItemID,
+            from: &voiceprintClosedSpeechWindowIDs,
+            transcriptAlreadySent: false
+        )
+        enqueueVoiceprintRealtimeEvent(LiveVoiceprintRealtimeEvent(
+            type: "conversation.item.input_audio_transcription.completed",
+            itemID: trimmedItemID,
+            speechWindowID: speechWindowID,
+            audioStartMs: nil,
+            audioEndMs: nil,
+            transcript: transcript,
+            audioArtifactID: nil,
+            audioPath: nil,
+            sampleRate: nil,
+            route: diagnostics.audioRoute
+        ))
+    }
+
+    private func appendVoiceprintClosedSpeechWindowID(_ id: String?) {
+        guard let id = Self.cleanedString(id) else { return }
+        guard !voiceprintClosedSpeechWindowIDs.contains(id) else { return }
+        voiceprintClosedSpeechWindowIDs.append(id)
+    }
+
+    private func enqueueCurrentVoiceprintAudioArtifact(itemID: String?, speechWindowID: String?) {
+        guard Self.cleanedString(itemID) != nil || Self.cleanedString(speechWindowID) != nil else { return }
+        guard let artifact = recordingSink.currentAudioArtifact else { return }
+        enqueueVoiceprintRealtimeEvent(Self.voiceprintAudioArtifactEvent(
+            itemID: itemID,
+            speechWindowID: speechWindowID,
+            artifact: artifact,
+            route: diagnostics.audioRoute
+        ))
+    }
+
+    private func enqueueVoiceprintRealtimeEvent(_ event: LiveVoiceprintRealtimeEvent) {
+        guard let bridge = gatewayBridge,
+              let target = Self.voiceprintRealtimeRuntimeTarget(activeConfig: activeConfig, draftConfig: config) else {
+            return
+        }
+        let previous = voiceprintRealtimeTask
+        let generation = voiceprintRealtimeGeneration
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self, bridge, event, previous, target, generation, taskID] in
+            defer { self?.voiceprintRealtimeTasks.removeValue(forKey: taskID) }
+            await previous?.value
+            guard let self, !Task.isCancelled, self.voiceprintRealtimeGeneration == generation else { return }
+            guard Self.voiceprintRealtimeRuntimeTarget(activeConfig: self.activeConfig, draftConfig: self.config) == target else { return }
+            let result = await bridge.sendVoiceprintRealtimeEvent(
+                event,
+                sessionKey: target.sessionKey,
+                mode: target.modeRaw
+            )
+            guard !Task.isCancelled, self.voiceprintRealtimeGeneration == generation, let result else { return }
+            self.handleVoiceprintRealtimeResult(result)
+        }
+        voiceprintRealtimeTask = task
+        voiceprintRealtimeTasks[taskID] = task
+    }
+
+    private func enqueueVoiceprintRealtimeResetIfNeeded(config: LiveSessionConfig) {
+        guard let bridge = gatewayBridge,
+              let target = Self.voiceprintRealtimeRuntimeTarget(activeConfig: nil, draftConfig: config) else {
+            return
+        }
+        let previous = voiceprintRealtimeTask
+        let generation = voiceprintRealtimeGeneration
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self, bridge, previous, target, generation, taskID] in
+            defer { self?.voiceprintRealtimeTasks.removeValue(forKey: taskID) }
+            await previous?.value
+            guard let self, !Task.isCancelled, self.voiceprintRealtimeGeneration == generation else { return }
+            _ = await bridge.resetVoiceprintRealtime(
+                sessionKey: target.sessionKey,
+                mode: target.modeRaw
+            )
+            guard !Task.isCancelled, self.voiceprintRealtimeGeneration == generation else { return }
+            self.appendVerbose("Voiceprint realtime buffer reset")
+        }
+        voiceprintRealtimeTask = task
+        voiceprintRealtimeTasks[taskID] = task
+    }
+
+    private func resetVoiceprintRealtimeQueue() {
+        voiceprintRealtimeGeneration += 1
+        voiceprintRealtimeTask?.cancel()
+        for task in voiceprintRealtimeTasks.values {
+            task.cancel()
+        }
+        voiceprintRealtimeTask = nil
+        voiceprintRealtimeTasks.removeAll()
+        voiceprintTranscriptItemIDsSent.removeAll()
+        voiceprintOpenSpeechWindowID = nil
+        voiceprintClosedSpeechWindowIDs.removeAll()
+        voiceprintSpeechWindowCounter = 0
+    }
+
+    private func handleVoiceprintRealtimeResult(_ result: LiveVoiceprintRealtimeResult) {
+        guard !result.finalizedTurns.isEmpty else { return }
+        appendVerbose(
+            "Voiceprint finalized \(result.finalizedTurns.count) turn\(result.finalizedTurns.count == 1 ? "" : "s")",
+            detail: result.finalizedTurns
+                .map { "\($0.transcriptItemID) \(Int($0.startMs))-\(Int($0.endMs))ms" }
+                .joined(separator: "\n")
+        )
+    }
+
+    private func nextVoiceprintSpeechWindowID() -> String {
+        voiceprintSpeechWindowCounter += 1
+        return "ios_speech_\(voiceprintSpeechWindowCounter)"
+    }
+
+    nonisolated static func voiceprintRealtimeEvent(
+        rawType: String,
+        rawJSON: String,
+        route: String? = nil,
+        recordingOffsetMs: Double? = nil
+    ) -> LiveVoiceprintRealtimeEvent? {
+        let object = rawJSONObject(rawJSON)
+        let itemID = stringValue(object, keys: ["item_id", "itemId"])
+        let speechWindowID = stringValue(object, keys: ["speech_window_id", "speechWindowId"])
+        let eventRoute = stringValue(object, keys: ["route", "audio_route", "audioRoute"]) ?? cleanedString(route)
+        let recordingOffset = finiteNumber(recordingOffsetMs)
+
+        switch rawType {
+        case "input_audio_buffer.speech_started":
+            guard let audioStartMs = numberValue(object, keys: ["audio_start_ms", "start_ms", "at_ms"]) ?? recordingOffset else {
+                return nil
+            }
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: itemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: audioStartMs,
+                audioEndMs: nil,
+                transcript: nil,
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        case "input_audio_buffer.speech_stopped":
+            guard let audioEndMs = numberValue(object, keys: ["audio_end_ms", "end_ms", "at_ms"]) ?? recordingOffset else {
+                return nil
+            }
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: itemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: nil,
+                audioEndMs: audioEndMs,
+                transcript: nil,
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        case "conversation.item.input_audio_transcription.completed":
+            guard itemID != nil else { return nil }
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: itemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: nil,
+                audioEndMs: nil,
+                transcript: stringValue(object, keys: ["transcript", "text"]),
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        case "response.audio_transcript.done", "response.output_audio_transcript.done":
+            let transcriptItemID = itemID ?? stringValue(object, keys: ["response_id", "responseId"])
+            guard transcriptItemID != nil else { return nil }
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: transcriptItemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: nil,
+                audioEndMs: nil,
+                transcript: stringValue(object, keys: ["transcript", "text"]),
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        default:
+            return nil
+        }
+    }
+
+    nonisolated static func voiceprintAudioArtifactEvent(
+        itemID: String?,
+        speechWindowID: String?,
+        artifact: LiveVoiceprintAudioArtifactReference,
+        route: String? = nil
+    ) -> LiveVoiceprintRealtimeEvent {
+        let cleanItemID = cleanedString(itemID)
+        let cleanSpeechWindowID = cleanedString(speechWindowID)
+        let joinID = cleanItemID ?? cleanSpeechWindowID
+        let artifactID = [artifact.audioArtifactID, joinID]
+            .compactMap { cleanedString($0) }
+            .joined(separator: ":")
+        return LiveVoiceprintRealtimeEvent(
+            type: "live_recording.audio_artifact",
+            itemID: cleanItemID,
+            speechWindowID: cleanSpeechWindowID,
+            audioStartMs: nil,
+            audioEndMs: nil,
+            transcript: nil,
+            audioArtifactID: artifactID,
+            audioPath: artifact.audioPath,
+            sampleRate: artifact.sampleRate,
+            route: cleanedString(route)
+        )
+    }
+
+    nonisolated static func consumeVoiceprintFallbackSpeechWindowID(
+        forTranscriptItemID itemID: String,
+        from closedSpeechWindowIDs: inout [String],
+        transcriptAlreadySent: Bool
+    ) -> String? {
+        let cleanItemID = cleanedString(itemID) ?? itemID
+        if transcriptAlreadySent {
+            if let index = closedSpeechWindowIDs.firstIndex(of: cleanItemID) {
+                closedSpeechWindowIDs.remove(at: index)
+            } else if !closedSpeechWindowIDs.isEmpty {
+                closedSpeechWindowIDs.removeFirst()
+            }
+            return nil
+        }
+        guard !closedSpeechWindowIDs.isEmpty else { return nil }
+        return closedSpeechWindowIDs.removeFirst()
     }
 
     private func append(_ message: String, level: LiveEventLogEntry.Level = .info, detail: String? = nil) {
@@ -3683,6 +3984,11 @@ final class LiveSessionStore {
         let modeRaw: String
     }
 
+    struct LiveVoiceprintRealtimeRuntimeTarget: Equatable {
+        let sessionKey: String
+        let modeRaw: String
+    }
+
     nonisolated static func bridgeStartDecision(for result: LiveBootContextResult, required: Bool) -> LiveBridgeStartDecision {
         switch result {
         case .loaded, .skipped:
@@ -3720,6 +4026,21 @@ final class LiveSessionStore {
             return nil
         }
         return LiveTranscriptAppendRuntimeTarget(sessionKey: sessionKey, modeRaw: cfg.mode.rawValue)
+    }
+
+    nonisolated static func voiceprintRealtimeRuntimeTarget(
+        activeConfig: LiveSessionConfig?,
+        draftConfig: LiveSessionConfig
+    ) -> LiveVoiceprintRealtimeRuntimeTarget? {
+        let cfg = activeConfig ?? draftConfig
+        guard cfg.gatewayBridgeEnabled,
+              cfg.voiceprintRealtimeEnabled,
+              cfg.audioInputEnabled,
+              cfg.mediaPersistenceMode != .off,
+              let sessionKey = resolvedRuntimeGatewayBridgeSessionKey(from: cfg) else {
+            return nil
+        }
+        return LiveVoiceprintRealtimeRuntimeTarget(sessionKey: sessionKey, modeRaw: cfg.mode.rawValue)
     }
 
     private func fetchStartupBootContext(config: LiveSessionConfig) async -> LiveBootContextResult {
@@ -4739,6 +5060,52 @@ final class LiveSessionStore {
             return #"{"error":"Could not encode diagnostic payload"}"#
         }
         return text
+    }
+
+    private nonisolated static func rawJSONObject(_ rawJSON: String) -> [String: Any] {
+        guard let data = rawJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return object
+    }
+
+    private nonisolated static func stringValue(_ object: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = cleanedString(object[key] as? String) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func numberValue(_ object: [String: Any], keys: [String]) -> Double? {
+        for key in keys {
+            if let value = object[key] as? Double, value.isFinite {
+                return value
+            }
+            if let value = object[key] as? Int {
+                return Double(value)
+            }
+            if let value = object[key] as? NSNumber {
+                let number = value.doubleValue
+                if number.isFinite {
+                    return number
+                }
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func finiteNumber(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return value
+    }
+
+    private nonisolated static func cleanedString(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     private func currentRealtimeBridgeSessionKey() -> String {

@@ -19,6 +19,7 @@
     "hawky": "bun run src/index.ts",
     "dev": "bun run src/index.ts",
     "gateway": "bun run src/index.ts gateway",
+    "voiceprint:score": "bun run scripts/voiceprint-score-fixtures.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
     "prepublishOnly": "bash scripts/prepare-publish-package.sh",
     "typecheck": "tsc --noEmit",
