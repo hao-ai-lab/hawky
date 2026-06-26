@@ -1,0 +1,10 @@
+# XcodeBuildMCP for Codex (CLI / IDE), mirroring ../.mcp.json (Claude Code's
+# project MCP config) so both agents drive the same simulator loop. See #605.
+# Codex uses TOML, not .mcp.json; project-scoped config requires the project to
+# be trusted in Codex. Teammates on Codex can also just install OpenAI's
+# "Build iOS Apps" plugin (it bundles the same XcodeBuildMCP) — either way the
+# ../.xcodebuildmcp/config.yaml defaults still apply.
+[mcp_servers.XcodeBuildMCP]
+command = "npx"
+args = ["-y", "xcodebuildmcp@2.6.2", "mcp"]
+env = { XCODEBUILDMCP_SENTRY_DISABLED = "true", XCODEBUILDMCP_ENABLED_WORKFLOWS = "simulator,ui-automation,debugging,logging" }

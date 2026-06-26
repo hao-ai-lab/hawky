@@ -1,0 +1,9 @@
+interface:
+  display_name: "iOS App Test"
+  short_description: "Run iOS simulator smoke, UI tests, and audits"
+  default_prompt: "Use $ios-app-test to test the iOS app locally and report pass/fail, screenshots, and accessibility findings."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "XcodeBuildMCP"
+      description: "Build, launch, screenshot, inspect, and drive the iOS simulator."

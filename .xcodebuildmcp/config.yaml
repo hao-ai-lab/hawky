@@ -1,0 +1,13 @@
+# XcodeBuildMCP project defaults (repo-scoped, team-shared). See #605.
+#
+# Enabled workflow groups are set via XCODEBUILDMCP_ENABLED_WORKFLOWS in
+# ../.mcp.json (matching OpenAI's Build iOS Apps plugin), so they live in one
+# place. This file only pins repo defaults so the agent doesn't have to
+# rediscover them each session. Keep teammate-local differences in
+# session_set_defaults, not in this shared file.
+schemaVersion: 1
+sessionDefaults:
+  projectPath: ./ios/hawky.xcodeproj
+  scheme: hawky
+  configuration: Debug
+  simulatorName: iPhone 17 Pro
