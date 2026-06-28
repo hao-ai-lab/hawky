@@ -1254,7 +1254,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "live.hawky.lock-screen-widget";
+				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky.lockscreenwidget;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = NO;
 				SWIFT_VERSION = 5.10;
@@ -1355,7 +1355,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = live.hawky;
+				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "hawky/hawky-Bridging-Header.h";
 				SWIFT_VERSION = 5.10;
@@ -1444,7 +1444,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = live.hawky;
+				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "hawky/hawky-Bridging-Header.h";
 				SWIFT_VERSION = 5.10;
@@ -1470,7 +1470,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = "live.hawky.lock-screen-widget";
+				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky.lockscreenwidget;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = NO;
 				SWIFT_VERSION = 5.10;

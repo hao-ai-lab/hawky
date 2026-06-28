@@ -2,15 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>com.apple.developer.usernotifications.time-sensitive</key>
-    <true/>
     <key>keychain-access-groups</key>
     <array>
-        <string>$(AppIdentifierPrefix)live.hawky</string>
-    </array>
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>group.live.hawky</string>
+        <string>$(AppIdentifierPrefix)com.starry7420.hawky</string>
     </array>
 </dict>
 </plist>
