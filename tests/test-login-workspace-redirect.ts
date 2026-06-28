@@ -7,6 +7,8 @@ import { AppAuth } from "../src/gateway/app-auth.js";
 import { GatewayServer, resetGatewayState } from "../src/gateway/server.js";
 import { resetConfig, resetConfigDir, setConfigDir } from "../src/storage/config.js";
 
+const CONTROL_HOST = "login.hawky.live";
+
 function getTestPort(): number {
   return 10000 + Math.floor(Math.random() * 50000);
 }
@@ -70,7 +72,7 @@ describe("login workspace routing", () => {
     process.env.HAWKY_PUBLIC_REGISTRATION = "1";
     process.env.HAWKY_ADMIN_EMAILS = "admin@example.com";
     process.env.HAWKY_WORKSPACE_REGISTRY_FILE = registryPath;
-    process.env.HAWKY_CONTROL_HOSTNAMES = "hawky.live";
+    process.env.HAWKY_CONTROL_HOSTNAMES = CONTROL_HOST;
 
     server = new GatewayServer();
     port = getTestPort();
@@ -95,7 +97,7 @@ describe("login workspace routing", () => {
     const res = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
-      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Host: CONTROL_HOST, "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody("juc049@ucsd.edu"),
     });
 
@@ -107,14 +109,14 @@ describe("login workspace routing", () => {
     const login = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
-      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Host: CONTROL_HOST, "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody("juc049@ucsd.edu"),
     });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
 
     const res = await fetch(`http://localhost:${port}/`, {
       redirect: "manual",
-      headers: { Host: "hawky.live", Cookie: cookie },
+      headers: { Host: CONTROL_HOST, Cookie: cookie },
     });
 
     expect(res.status).toBe(200);
@@ -126,14 +128,14 @@ describe("login workspace routing", () => {
     const login = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
-      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Host: CONTROL_HOST, "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody("juc049@ucsd.edu"),
     });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
 
     const res = await fetch(`http://localhost:${port}/sessions/today?mode=live`, {
       redirect: "manual",
-      headers: { Host: "hawky.live", Cookie: cookie },
+      headers: { Host: CONTROL_HOST, Cookie: cookie },
     });
 
     expect(res.status).toBe(200);
@@ -157,7 +159,7 @@ describe("login workspace routing", () => {
     const res = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
-      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Host: CONTROL_HOST, "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody("admin@example.com"),
     });
 
@@ -169,18 +171,18 @@ describe("login workspace routing", () => {
     const login = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
-      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Host: CONTROL_HOST, "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody("admin@example.com"),
     });
     const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
 
     const app = await fetch(`http://localhost:${port}/`, {
       redirect: "manual",
-      headers: { Host: "hawky.live", Cookie: cookie },
+      headers: { Host: CONTROL_HOST, Cookie: cookie },
     });
     const admin = await fetch(`http://localhost:${port}/admin`, {
       redirect: "manual",
-      headers: { Host: "hawky.live", Cookie: cookie },
+      headers: { Host: CONTROL_HOST, Cookie: cookie },
     });
 
     expect(app.status).toBe(200);

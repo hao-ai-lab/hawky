@@ -20,6 +20,12 @@ cd website && python3 -m http.server 8011
 # open http://localhost:8011
 ```
 
+## Production routing
+
+- `www.hawky.live` serves this public homepage.
+- `hawky.live` redirects to `www.hawky.live`.
+- `login.hawky.live` serves the authenticated Hawk app.
+
 ## Deploy (Modal)
 
 ```bash
