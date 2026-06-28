@@ -34,6 +34,13 @@ export function workspaceUrlForUser(user: AppAuthUser): string | null {
   return `https://${workspace.hostname}/`;
 }
 
+export function workspaceLocalTargetForUser(user: AppAuthUser): string | null {
+  const workspace = findWorkspaceForUser(user);
+  const port = Number(workspace?.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return `127.0.0.1:${port}`;
+}
+
 export function isControlHost(host: string): boolean {
   const hostname = host.split(":")[0]?.toLowerCase() ?? "";
   const configured = (process.env.HAWKY_CONTROL_HOSTNAMES || "hawky.live,realtime-gateway.hawky.live")

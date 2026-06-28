@@ -21,6 +21,9 @@ const log = createSubsystemLogger("gateway/conn");
 /** Data attached to each Bun WebSocket via ws.data */
 export interface WSData {
   connId: string;
+  proxyTarget?: string;
+  proxyUpstream?: WebSocket;
+  proxyPending?: Array<string | Buffer>;
 }
 
 // -----------------------------------------------------------------------------

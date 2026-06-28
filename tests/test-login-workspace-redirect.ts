@@ -19,9 +19,11 @@ function formBody(email: string, password = "a long safe password"): URLSearchPa
   return form;
 }
 
-describe("login workspace redirects", () => {
+describe("login workspace routing", () => {
   let server: GatewayServer;
+  let workspaceServer: ReturnType<typeof Bun.serve>;
   let port: number;
+  let workspacePort: number;
   let configDir: string;
 
   beforeEach(() => {
@@ -41,10 +43,25 @@ describe("login workspace redirects", () => {
     const { user: pending } = auth.register("juc049@ucsd.edu", "a long safe password");
     auth.approveUser(admin, pending.id, "user");
 
+    workspaceServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        return new Response(`workspace:${url.pathname}${url.search}`, {
+          headers: {
+            "Content-Type": "text/plain",
+            "X-Workspace": "juc049",
+          },
+        });
+      },
+    });
+    workspacePort = workspaceServer.port;
+
     const registryPath = join(configDir, "workspaces.json");
     writeFileSync(registryPath, JSON.stringify({
       users: [
-        { slug: "juc049", email: "juc049@ucsd.edu", hostname: "juc049.hawky.live", port: 4302 },
+        { slug: "juc049", email: "juc049@ucsd.edu", hostname: "juc049.hawky.live", port: workspacePort },
       ],
     }, null, 2));
 
@@ -61,6 +78,7 @@ describe("login workspace redirects", () => {
 
   afterEach(async () => {
     await server.stop(1000);
+    workspaceServer.stop();
     resetGatewayState();
     resetConfigDir();
     resetConfig();
@@ -72,7 +90,7 @@ describe("login workspace redirects", () => {
     delete process.env.HAWKY_CONTROL_HOSTNAMES;
   });
 
-  test("control login redirects approved users to their workspace hostname", async () => {
+  test("control login keeps approved users on the control host", async () => {
     const res = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
@@ -81,10 +99,10 @@ describe("login workspace redirects", () => {
     });
 
     expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("https://juc049.hawky.live/");
+    expect(res.headers.get("location")).toBe("/");
   });
 
-  test("control host redirects already logged-in users to their workspace", async () => {
+  test("control host proxies already logged-in users to their workspace", async () => {
     const login = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
@@ -98,11 +116,12 @@ describe("login workspace redirects", () => {
       headers: { Host: "hawky.live", Cookie: cookie },
     });
 
-    expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("https://juc049.hawky.live/");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-workspace")).toBe("juc049");
+    expect(await res.text()).toBe("workspace:/");
   });
 
-  test("control host preserves the path when redirecting logged-in users", async () => {
+  test("control host preserves the path when proxying logged-in users", async () => {
     const login = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
@@ -116,8 +135,9 @@ describe("login workspace redirects", () => {
       headers: { Host: "hawky.live", Cookie: cookie },
     });
 
-    expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("https://juc049.hawky.live/sessions/today?mode=live");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-workspace")).toBe("juc049");
+    expect(await res.text()).toBe("workspace:/sessions/today?mode=live");
   });
 
   test("workspace-host login stays on the workspace", async () => {

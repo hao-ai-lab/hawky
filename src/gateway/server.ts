@@ -29,7 +29,7 @@ import {
 } from "./live-realtime-broker.js";
 import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
 import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
-import { isControlHost, workspaceUrlForUser } from "./workspace-registry.js";
+import { isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -94,6 +94,14 @@ function loginThrottleKey(req: Request): string {
   return requestIp(req) || "unknown";
 }
 
+function proxyHeaders(headers: Headers): Headers {
+  const out = new Headers(headers);
+  out.delete("host");
+  out.delete("connection");
+  out.delete("upgrade");
+  return out;
+}
+
 // -----------------------------------------------------------------------------
 // Gateway Server
 // -----------------------------------------------------------------------------
@@ -146,6 +154,17 @@ export class GatewayServer {
       fetch(req, server) {
         // WebSocket upgrade — check FIRST, before any URL parsing.
         if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const proxyTarget = self.workspaceProxyTarget(req, new URL(req.url));
+          if (proxyTarget) {
+            const url = new URL(req.url);
+            const upgraded = server.upgrade(req, {
+              data: {
+                connId: "",
+                proxyTarget: `ws://${proxyTarget}${url.pathname}${url.search}`,
+              } as WSData,
+            });
+            return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
+          }
           const upgraded = server.upgrade(req, {
             data: { connId: "" } as WSData,
           });
@@ -217,8 +236,8 @@ export class GatewayServer {
             headers: { "Content-Type": "text/html; charset=utf-8" },
           });
         }
-        const workspaceRedirect = self.controlWorkspaceRedirect(req, url);
-        if (workspaceRedirect) return workspaceRedirect;
+        const workspaceProxy = self.proxyWorkspaceRequest(req, url);
+        if (workspaceProxy) return workspaceProxy;
 
         // Device auth endpoint — issues signed device tokens.
         // For remote access, Cloudflare Access gates this endpoint (email OTP).
@@ -262,6 +281,25 @@ export class GatewayServer {
         sendPings: true,
 
         open(ws) {
+          if (ws.data?.proxyTarget) {
+            const pending: Array<string | Buffer> = [];
+            const upstream = new WebSocket(ws.data.proxyTarget);
+            ws.data.proxyUpstream = upstream;
+            ws.data.proxyPending = pending;
+            upstream.addEventListener("open", () => {
+              for (const message of pending.splice(0)) upstream.send(message);
+            });
+            upstream.addEventListener("message", (event) => {
+              ws.send(event.data);
+            });
+            upstream.addEventListener("close", (event) => {
+              ws.close(event.code || 1000, event.reason || "");
+            });
+            upstream.addEventListener("error", () => {
+              ws.close(1011, "upstream websocket error");
+            });
+            return;
+          }
           const remoteAddress = ws.remoteAddress || "unknown";
           const conn = new GatewayConnection(ws, remoteAddress);
           self.connections.set(conn.connId, conn);
@@ -270,6 +308,15 @@ export class GatewayServer {
         },
 
         message(ws, raw) {
+          const upstream = ws.data?.proxyUpstream;
+          if (upstream) {
+            if (upstream.readyState === WebSocket.OPEN) {
+              upstream.send(raw);
+            } else {
+              ws.data?.proxyPending?.push(typeof raw === "string" ? raw : Buffer.from(raw));
+            }
+            return;
+          }
           const connId = ws.data?.connId;
           if (!connId) return;
 
@@ -281,6 +328,13 @@ export class GatewayServer {
         },
 
         close(ws, code, reason) {
+          const upstream = ws.data?.proxyUpstream;
+          if (upstream) {
+            if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
+              upstream.close(code || 1000, reason || "");
+            }
+            return;
+          }
           const connId = ws.data?.connId;
           if (!connId) return;
 
@@ -594,11 +648,7 @@ export class GatewayServer {
 
   private postLoginRedirect(req: Request, user: AppAuthUser, returnUrl: string): string {
     if (user.role === "admin" && returnUrl === "/") return "/admin";
-    const host = req.headers.get("Host") ?? "";
-    if (!isControlHost(host)) return returnUrl;
-    if (returnUrl !== "/") return returnUrl;
-    const workspaceUrl = workspaceUrlForUser(user);
-    return workspaceUrl ?? returnUrl;
+    return returnUrl;
   }
 
   private async handleAdmin(req: Request, url: URL): Promise<Response> {
@@ -657,18 +707,36 @@ export class GatewayServer {
     return true;
   }
 
-  private controlWorkspaceRedirect(req: Request, url: URL): Response | null {
+  private workspaceProxyTarget(req: Request, url: URL): string | null {
     if (!this.appAuth) return null;
-    if (req.method !== "GET" && req.method !== "HEAD") return null;
     if (!isControlHost(req.headers.get("Host") ?? "")) return null;
-    if (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/admin")) return null;
-    if (url.pathname === "/ws" || url.pathname.startsWith("/api/")) return null;
+    if (url.pathname === "/health" || url.pathname === "/healthz") return null;
+    if (url.pathname === "/ready" || url.pathname === "/readyz") return null;
+    if (url.pathname === "/auth/login") return null;
+    if (url.pathname === "/auth/register") return null;
+    if (url.pathname === "/auth/logout") return null;
+    if (url.pathname === "/auth/me") return null;
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return null;
+    if (isProviderGatewayPath(url.pathname)) return null;
     const user = this.appAuth.userFromRequest(req);
     if (!user || user.role === "admin") return null;
-    const workspaceUrl = workspaceUrlForUser(user);
-    if (!workspaceUrl) return null;
-    const path = sanitizeReturnUrl(url.pathname + url.search);
-    return redirect(new URL(path, workspaceUrl).toString());
+    return workspaceLocalTargetForUser(user);
+  }
+
+  private proxyWorkspaceRequest(req: Request, url: URL): Promise<Response> | null {
+    const target = this.workspaceProxyTarget(req, url);
+    if (!target) return null;
+    const upstreamUrl = `http://${target}${url.pathname}${url.search}`;
+    return fetch(upstreamUrl, {
+      method: req.method,
+      headers: proxyHeaders(req.headers),
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+      signal: req.signal,
+    }).then((upstream) => new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: upstream.headers,
+    }));
   }
 
   private isAuthorizedHealthRequest(req: Request): boolean {
