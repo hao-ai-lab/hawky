@@ -34,25 +34,35 @@ final class FakeFaceCropper: FaceCropper, @unchecked Sendable {
     }
 }
 
-/// In-memory stand-in for DeepFace: identity tag → person. identify() returns the
-/// enrolled person for that tag (or nil); enroll() creates one. Records calls so
-/// tests can assert enroll/update behavior.
+/// In-memory stand-in for DeepFace: identity tag → person. identify() returns a
+/// matched person, suppressed signal, or no match; enroll() creates one. Records
+/// calls so tests can assert enroll/update behavior.
 final class FakeRecognitionClient: FaceRecognitionClient, @unchecked Sendable {
     struct Stored { var person: LivePerson }
     private let lock = NSLock()
     private var byTag: [String: LivePerson] = [:]
+    private var suppressedTags: [String: (candidateID: String?, reason: String?)] = [:]
     private(set) var enrollCount = 0
 
     /// Pre-seed a known identity (as if previously enrolled).
     func seed(tag: String, person: LivePerson) {
         lock.lock(); byTag[tag] = person; lock.unlock()
     }
+    func suppress(tag: String, candidateID: String? = nil, reason: String? = "candidate_rejected") {
+        lock.lock(); suppressedTags[tag] = (candidateID, reason); lock.unlock()
+    }
     func person(tag: String) -> LivePerson? { lock.lock(); defer { lock.unlock() }; return byTag[tag] }
 
-    func identify(cropBase64: String) async -> LivePerson? {
-        guard let tag = FakeCropFactory.identity(ofCrop: cropBase64) else { return nil }
+    func identify(cropBase64: String) async -> FaceIdentifyResult {
+        guard let tag = FakeCropFactory.identity(ofCrop: cropBase64) else { return .noMatch }
         lock.lock(); defer { lock.unlock() }
-        return byTag[tag]
+        if let suppressed = suppressedTags[tag] {
+            return .suppressed(candidateID: suppressed.candidateID, reason: suppressed.reason)
+        }
+        if let person = byTag[tag] {
+            return .person(person)
+        }
+        return .noMatch
     }
 
     func enroll(cropBase64: String, name: String) async -> LivePerson? {

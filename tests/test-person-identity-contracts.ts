@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   allowedUsesForIdentitySignal,
   assertIdentitySignalAllowedUsesSafe,
 } from "../src/identity/core/index.js";
 import {
+  buildPersonCandidateReviewRecord,
   buildFaceIdentitySignal,
   buildPersonFact,
+  FilePersonCandidateReviewStore,
   normalizeLegacyDeepFaceProfile,
   personFactCanBeReadByMemoryDistill,
 } from "../src/identity/person/index.js";
@@ -164,5 +169,35 @@ describe("person identity contracts", () => {
     expect(signal.allowedUses.promoteMemory).toBe(false);
     expect(signal.allowedUses.exportContext).toBe(false);
     expect(() => assertIdentitySignalAllowedUsesSafe(signal)).not.toThrow();
+  });
+
+  test("persists candidate review records with atomic JSON store", () => {
+    const dir = mkdtempSync(join(tmpdir(), "haoclaw-person-review-"));
+    try {
+      const normalized = normalizeLegacyDeepFaceProfile({ id: "p-unknown", name: "Unknown" }, { now });
+      const candidate = normalized.candidate!;
+      const filePath = join(dir, "person-candidates.json");
+      const store = new FilePersonCandidateReviewStore(filePath);
+      store.put(buildPersonCandidateReviewRecord({
+        candidate,
+        review: {
+          state: "rejected",
+          reviewedAt: now,
+          reviewer: "owner",
+          reason: "not someone to remember",
+        },
+        metadata: { source: "test" },
+        now,
+      }));
+
+      const reloaded = new FilePersonCandidateReviewStore(filePath);
+      const record = reloaded.get(candidate.id);
+      expect(record?.candidateId).toBe(candidate.id);
+      expect(record?.review.state).toBe("rejected");
+      expect(record?.review.reason).toBe("not someone to remember");
+      expect(record?.metadata.source).toBe("test");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

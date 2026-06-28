@@ -69,6 +69,24 @@ import Testing
         }
     }
 
+    @Test func rejectedCandidateDoesNotReEnrollOrSurfaceAfterCooldown() async {
+        let client = FakeRecognitionClient()
+        client.suppress(tag: "ghost", candidateID: "cand-face-ghost")
+        var now = Date(timeIntervalSince1970: 1700)
+        var cfg = CocktailPartyConfig.default
+        cfg.minFrameInterval = 0
+        cfg.enrollCooldown = 1
+        cfg.perPersonCooldown = 0
+        let rec = makeRecognizer(crops: { _ in [FakeCropFactory.crop(identity: "present")] }, client: client, config: cfg, clock: { now })
+
+        #expect(await rec.process(jpeg: frame("ghost")).isEmpty)
+        #expect(client.enrollCount == 0)
+
+        now = now.addingTimeInterval(2)
+        #expect(await rec.process(jpeg: frame("ghost")).isEmpty)
+        #expect(client.enrollCount == 0)
+    }
+
     @Test func knownFaceRecallsThenCooldown() async {
         let client = FakeRecognitionClient()
         client.seed(tag: "sarah", person: LivePerson(id: "p-sarah", name: "Sarah", facts: ["coffee startup"], lastRecap: "seed round"))
@@ -218,11 +236,15 @@ import Testing
         let enrolled = await bridge.enrollFace(imageBase64: "frame-b", name: "Alice", personId: nil, sessionKey: "session-a")
         let updated = await bridge.updatePerson(personId: "p-alice", name: "Alice", facts: ["met at demo"], recap: "likes espresso", sessionKey: "session-a")
         let people = await bridge.listPeople(sessionKey: "session-a")
+        let confirmed = await bridge.confirmIdentityCandidate(candidateId: "cand-alice", name: "Alice", personId: nil, reason: "user verified", sessionKey: "session-a")
+        let rejected = await bridge.rejectIdentityCandidate(candidateId: "cand-bob", reason: "not them", sessionKey: "session-a")
 
         #expect(identified?.id == "p-alice")
         #expect(enrolled?.name == "Alice")
         #expect(updated?.facts == ["met at demo"])
         #expect(people.map(\.id) == ["p-alice"])
+        #expect(confirmed?.id == "p-alice")
+        #expect(rejected == true)
 
         let frames = recorder.sentFrames()
         #expect(frames.map(\.method) == [
@@ -230,8 +252,10 @@ import Testing
             "person.update_profile",
             "person.update_profile",
             "person.list",
+            "person.confirm_candidate",
+            "person.reject_candidate",
         ])
-        #expect(recorder.connectPlatforms() == Array(repeating: "ios-live-rpc", count: 4))
+        #expect(recorder.connectPlatforms() == Array(repeating: "ios-live-rpc", count: 6))
 
         #expect(stringParam(frames[0], "image_base64") == "frame-a")
         #expect(stringParam(frames[0], "session_key") == "session-a")
@@ -245,6 +269,11 @@ import Testing
         #expect(stringParam(frames[2], "recap") == "likes espresso")
         #expect(stringParam(frames[3], "session_key") == "session-a")
         #expect(boolParam(frames[3], "include_candidates") == true)
+        #expect(stringParam(frames[4], "candidate_id") == "cand-alice")
+        #expect(stringParam(frames[4], "name") == "Alice")
+        #expect(stringParam(frames[4], "reason") == "user verified")
+        #expect(stringParam(frames[5], "candidate_id") == "cand-bob")
+        #expect(stringParam(frames[5], "reason") == "not them")
     }
 
     @Test func provisionalUnknownIdentifyCandidateSuppressesNilMiss() async throws {
@@ -276,8 +305,190 @@ import Testing
         let identified = await bridge.identifyFace(imageBase64: "unknown-match", sessionKey: "session-c")
 
         #expect(identified?.id == "p-ghost")
+        #expect(identified?.candidateID == "cand-face-ghost")
         #expect(identified?.name == "Unknown")
         #expect(recorder.sentFrames().map(\.method) == ["person.identify_current_frame"])
+    }
+
+    @Test func rejectedCandidateIdentifyReturnsSuppressedNoEnrollSignal() async throws {
+        let url = uniqueURL()
+        try KeychainStore.save(token: "test-token", for: url)
+        defer { try? KeychainStore.delete(for: url) }
+
+        let recorder = RecordingGatewayTransportStore(
+            identifyPayload: .object([
+                "found": .bool(false),
+                "candidate_id": .string("cand-face-ghost"),
+                "reason": .string("candidate_rejected"),
+                "suppressed": .bool(true),
+                "no_enroll": .bool(true),
+                "message": .string("This face matches an identity candidate that was rejected or suppressed."),
+            ])
+        )
+        let bridge = LiveGatewayBridge(
+            gatewayURL: url,
+            transportFactory: { RecordingGatewayTransport(recorder: recorder) }
+        )
+
+        let result = await bridge.identifyFaceResult(imageBase64: "unknown-match", sessionKey: "session-c")
+
+        if case let .suppressed(candidateID, reason) = result {
+            #expect(candidateID == "cand-face-ghost")
+            #expect(reason == "candidate_rejected")
+        } else {
+            Issue.record("expected rejected candidate to return suppressed no-enroll signal")
+        }
+        #expect(await bridge.identifyFace(imageBase64: "unknown-match", sessionKey: "session-c") == nil)
+    }
+
+    @Test func identifyPersonToolSurfacesCandidateIdForProvisionalUnknown() async throws {
+        var config = LiveSessionConfig()
+        config.gatewayBridgeEnabled = true
+        config.bridgeAvailability = .available
+        config.cocktailPartyEnabled = true
+        config.gatewayBridgeSessionKey = "session-tool"
+        let context = LiveToolContext(
+            config: config,
+            gatewayBridge: nil,
+            awaitPendingTranscriptAppend: nil,
+            cocktailPartyActive: true,
+            identifyOnCamera: {
+                .person(LivePerson(id: "p-ghost", name: "Unknown", candidateID: "cand-face-ghost"))
+            }
+        )
+
+        let json = await LiveToolRegistry.default.execute(
+            name: "identify_person",
+            argumentsJSON: "{}",
+            context: context
+        )
+        let output = try jsonObject(json)
+        let candidate = try #require(output["candidate"] as? [String: Any])
+
+        #expect(output["ok"] as? Bool == true)
+        #expect(output["found"] as? Bool == false)
+        #expect(output["candidate_id"] as? String == "cand-face-ghost")
+        #expect(candidate["id"] as? String == "p-ghost")
+        #expect(candidate["candidate_id"] as? String == "cand-face-ghost")
+        #expect(candidate["is_candidate"] as? Bool == true)
+        #expect(output["person"] == nil)
+    }
+
+    @Test func identifyPersonToolSurfacesSuppressedCandidateSignal() async throws {
+        var config = LiveSessionConfig()
+        config.gatewayBridgeEnabled = true
+        config.bridgeAvailability = .available
+        config.cocktailPartyEnabled = true
+        config.gatewayBridgeSessionKey = "session-tool"
+        let context = LiveToolContext(
+            config: config,
+            gatewayBridge: nil,
+            awaitPendingTranscriptAppend: nil,
+            cocktailPartyActive: true,
+            identifyOnCamera: {
+                .suppressed(candidateID: "cand-face-ghost", reason: "candidate_rejected")
+            }
+        )
+
+        let json = await LiveToolRegistry.default.execute(
+            name: "identify_person",
+            argumentsJSON: "{}",
+            context: context
+        )
+        let output = try jsonObject(json)
+        let message = try #require(output["message"] as? String)
+
+        #expect(output["ok"] as? Bool == true)
+        #expect(output["found"] as? Bool == false)
+        #expect(output["suppressed"] as? Bool == true)
+        #expect(output["no_enroll"] as? Bool == true)
+        #expect(output["reason"] as? String == "candidate_rejected")
+        #expect(output["candidate_id"] as? String == "cand-face-ghost")
+        #expect(message.contains("rejected or suppressed"))
+        #expect(!message.contains("They may be new"))
+        #expect(output["candidate"] == nil)
+        #expect(output["person"] == nil)
+    }
+
+    @Test func updatePersonToolRefusesUnconfirmedResolvedCandidate() async throws {
+        let url = uniqueURL()
+        try KeychainStore.save(token: "test-token", for: url)
+        defer { try? KeychainStore.delete(for: url) }
+
+        let recorder = RecordingGatewayTransportStore()
+        let bridge = LiveGatewayBridge(
+            gatewayURL: url,
+            transportFactory: { RecordingGatewayTransport(recorder: recorder) }
+        )
+        var config = LiveSessionConfig()
+        config.gatewayBridgeEnabled = true
+        config.bridgeAvailability = .available
+        config.cocktailPartyEnabled = true
+        config.gatewayBridgeSessionKey = "session-tool-update"
+        let context = LiveToolContext(
+            config: config,
+            gatewayBridge: bridge,
+            awaitPendingTranscriptAppend: nil,
+            cocktailPartyActive: true,
+            resolveCameraPerson: { _ in
+                .person(LivePerson(id: "p-ghost", name: "Unknown", candidateID: "cand-face-ghost"))
+            }
+        )
+
+        let json = await LiveToolRegistry.default.execute(
+            name: "update_person_profile",
+            argumentsJSON: #"{"name":"Morgan"}"#,
+            context: context
+        )
+        let output = try jsonObject(json)
+        let error = try #require(output["error"] as? String)
+
+        #expect(output["ok"] as? Bool == false)
+        #expect(output["candidate_id"] as? String == "cand-face-ghost")
+        #expect(error.contains("confirm_identity_candidate"))
+        #expect(recorder.sentFrames().isEmpty)
+    }
+
+    @Test func updatePersonToolRefusesSuppressedResolvedFaceEvenWithStaleId() async throws {
+        let url = uniqueURL()
+        try KeychainStore.save(token: "test-token", for: url)
+        defer { try? KeychainStore.delete(for: url) }
+
+        let recorder = RecordingGatewayTransportStore()
+        let bridge = LiveGatewayBridge(
+            gatewayURL: url,
+            transportFactory: { RecordingGatewayTransport(recorder: recorder) }
+        )
+        var config = LiveSessionConfig()
+        config.gatewayBridgeEnabled = true
+        config.bridgeAvailability = .available
+        config.cocktailPartyEnabled = true
+        config.gatewayBridgeSessionKey = "session-tool-update-suppressed"
+        let context = LiveToolContext(
+            config: config,
+            gatewayBridge: bridge,
+            awaitPendingTranscriptAppend: nil,
+            cocktailPartyActive: true,
+            resolveCameraPerson: { _ in
+                .suppressed(candidateID: "cand-face-ghost", reason: "candidate_rejected")
+            }
+        )
+
+        let json = await LiveToolRegistry.default.execute(
+            name: "update_person_profile",
+            argumentsJSON: #"{"id":"p-stale","name":"Morgan"}"#,
+            context: context
+        )
+        let output = try jsonObject(json)
+        let error = try #require(output["error"] as? String)
+
+        #expect(output["ok"] as? Bool == false)
+        #expect(output["suppressed"] as? Bool == true)
+        #expect(output["no_enroll"] as? Bool == true)
+        #expect(output["reason"] as? String == "candidate_rejected")
+        #expect(output["candidate_id"] as? String == "cand-face-ghost")
+        #expect(error.contains("cannot be updated or enrolled"))
+        #expect(recorder.sentFrames().isEmpty)
     }
 
     @Test func listPeopleIncludesProvisionalUnknownCandidatesForClearPath() async throws {
@@ -309,11 +520,69 @@ import Testing
         let people = await bridge.listPeople(sessionKey: "session-d")
 
         #expect(people.map(\.id) == ["p-unknown"])
+        #expect(people.map(\.candidateID) == ["cand-face-unknown"])
         #expect(people.map(\.name) == ["Unknown"])
         let frames = recorder.sentFrames()
         #expect(frames.map(\.method) == ["person.list"])
         #expect(stringParam(frames[0], "session_key") == "session-d")
         #expect(boolParam(frames[0], "include_candidates") == true)
+    }
+
+    @Test func listPeopleToolSurfacesCandidateIdForProvisionalUnknowns() async throws {
+        let url = uniqueURL()
+        try KeychainStore.save(token: "test-token", for: url)
+        defer { try? KeychainStore.delete(for: url) }
+
+        let recorder = RecordingGatewayTransportStore(
+            listPayload: .object([
+                "people": .array([]),
+                "candidates": .array([
+                    .object([
+                        "id": .string("cand-face-unknown"),
+                        "candidateType": .string("unknown_face"),
+                        "modalities": .array([.string("face")]),
+                        "metadata": .object(["deepfaceProfileId": .string("p-unknown")]),
+                        "legacyRefs": .array([
+                            .object(["system": .string("deepface"), "profileId": .string("p-unknown")]),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+        let bridge = LiveGatewayBridge(
+            gatewayURL: url,
+            transportFactory: { RecordingGatewayTransport(recorder: recorder) }
+        )
+        var config = LiveSessionConfig()
+        config.gatewayBridgeEnabled = true
+        config.bridgeAvailability = .available
+        config.cocktailPartyEnabled = true
+        config.gatewayBridgeSessionKey = "session-tool-list"
+        let context = LiveToolContext(
+            config: config,
+            gatewayBridge: bridge,
+            awaitPendingTranscriptAppend: nil,
+            cocktailPartyActive: true
+        )
+
+        let json = await LiveToolRegistry.default.execute(
+            name: "list_people",
+            argumentsJSON: "{}",
+            context: context
+        )
+        let output = try jsonObject(json)
+        let people = try #require(output["people"] as? [[String: Any]])
+        let candidates = try #require(output["candidates"] as? [[String: Any]])
+        let person = try #require(people.first)
+        let candidate = try #require(candidates.first)
+
+        #expect(output["ok"] as? Bool == true)
+        #expect(output["count"] as? Int == 1)
+        #expect(person["id"] as? String == "p-unknown")
+        #expect(person["candidate_id"] as? String == "cand-face-unknown")
+        #expect(person["is_candidate"] as? Bool == true)
+        #expect(candidate["id"] as? String == "p-unknown")
+        #expect(candidate["candidate_id"] as? String == "cand-face-unknown")
     }
 
     @Test func provisionalUnknownAndAddCropEnrollsStayOnLegacyFaceTool() async throws {
@@ -389,6 +658,10 @@ private final class RecordingGatewayTransportStore: @unchecked Sendable {
             return .object(["person": Self.person(facts: stringArrayParam(frame, "facts"))])
         case "person.list":
             return listPayload
+        case "person.confirm_candidate":
+            return .object(["ok": .bool(true), "candidate": Self.candidate(), "person": Self.person()])
+        case "person.reject_candidate":
+            return .object(["ok": .bool(true), "candidate": Self.candidate(reviewState: "rejected")])
         case "tool.invoke":
             return .object(["result": .object(["metadata": .object(["person": Self.person()])])])
         default:
@@ -402,6 +675,19 @@ private final class RecordingGatewayTransportStore: @unchecked Sendable {
             "name": .string("Alice"),
             "facts": .array(facts.map { .string($0) }),
             "last_recap": .string("likes espresso"),
+        ])
+    }
+
+    private static func candidate(reviewState: String = "confirmed") -> JSONValue {
+        .object([
+            "id": .string("cand-alice"),
+            "candidateType": .string("unknown_face"),
+            "modalities": .array([.string("face")]),
+            "review": .object(["state": .string(reviewState)]),
+            "metadata": .object(["deepfaceProfileId": .string("p-alice")]),
+            "legacyRefs": .array([
+                .object(["system": .string("deepface"), "profileId": .string("p-alice")]),
+            ]),
         ])
     }
 }
@@ -465,4 +751,17 @@ private func stringArrayParam(_ frame: RequestFrame, _ key: String) -> [String] 
         guard case let .string(text) = value else { return nil }
         return text
     }
+}
+
+private enum TestJSONError: Error {
+    case invalidJSON
+}
+
+private func jsonObject(_ text: String) throws -> [String: Any] {
+    guard let data = text.data(using: .utf8),
+          let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        throw TestJSONError.invalidJSON
+    }
+    return object
 }

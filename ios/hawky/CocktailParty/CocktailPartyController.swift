@@ -41,13 +41,24 @@ final class CocktailPartyController {
     }
 
     /// On-demand identify (identify_person tool): who is on camera? Picks the best of
-    /// the recent frames locally, then ONE server call. nil if no face / no match.
+    /// the recent frames locally, then ONE server call. Preserves suppressed results
+    /// so rejected candidates are not described as new people.
+    func identifyResult(amongFrames frames: [Data]) async -> FaceIdentifyResult {
+        await recognizer.identifyOnlyResult(amongFrames: frames)
+    }
+
+    /// Compatibility helper for call sites that only need a matched person.
     func identify(amongFrames frames: [Data]) async -> LivePerson? {
         await recognizer.identifyOnly(amongFrames: frames)
     }
 
     /// Resolve the person on camera for a profile write across recent frames (one
-    /// server call): identify, or enroll under `name` if new. nil if no face.
+    /// server call): identify, enroll under `name`, or preserve a suppressed face.
+    func resolvePersonResult(amongFrames frames: [Data], name: String?) async -> FaceIdentifyResult {
+        await recognizer.resolveOrEnrollResult(amongFrames: frames, name: name)
+    }
+
+    /// Compatibility helper for call sites that only need a matched/enrolled person.
     func resolvePerson(amongFrames frames: [Data], name: String?) async -> LivePerson? {
         await recognizer.resolveOrEnroll(amongFrames: frames, name: name)
     }

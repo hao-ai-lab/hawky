@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { useRealtime } from "../src/lib/useRealtime";
+import { WEB_PERSON_TOOL_NAME_LIST, useRealtime } from "../src/lib/useRealtime";
 import { useSocketStore } from "../src/lib/socket-store";
 import { useLiveSettings } from "../src/lib/live-settings";
 
@@ -32,6 +32,14 @@ describe("Live modes", () => {
     expect(result.current.cocktailParty).toBe(false);
     expect(result.current.safetyOn).toBe(false);
     expect(result.current.staySilent).toBe(false);
+    expect(WEB_PERSON_TOOL_NAME_LIST).toEqual([
+      "identify_person",
+      "list_people",
+      "recall_person",
+      "update_person_profile",
+      "confirm_identity_candidate",
+      "reject_identity_candidate",
+    ]);
   });
 
   it("toggling Stay Silent flips state and emits a system marker in the transcript", () => {

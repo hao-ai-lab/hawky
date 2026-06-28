@@ -7,18 +7,17 @@
 
 import { createSubsystemLogger } from "../logging/index.js";
 import {
-  buildFaceIdentitySignal,
-  deepFaceProfileToPersonToolPerson,
-  deepFaceProfilesToPersonToolPeople,
-  normalizeLegacyDeepFaceProfile,
+  FilePersonCandidateReviewStore,
+  PersonService,
+  PersonServiceError,
   type LegacyDeepFaceProfile,
-  type IdentityCandidate,
+  type LegacyPersonRepository,
   type PersonIdentifyResult,
   type PersonListResult,
   type PersonRecallResult,
+  type PersonCandidateReviewResult,
   type PersonUpdateProfileResult,
 } from "../identity/person/index.js";
-import { allowedUsesForIdentitySignal } from "../identity/core/index.js";
 import { resolveDeepFaceURL } from "../tools/face_recognize.js";
 import type { GatewayServer } from "./server.js";
 import { MethodError } from "./methods.js";
@@ -27,215 +26,182 @@ const log = createSubsystemLogger("gateway/person-methods");
 
 const REQUEST_TIMEOUT_MS = 20_000;
 
-export function registerPersonMethods(server: GatewayServer): void {
+let defaultService: PersonService | undefined;
+
+export function registerPersonMethods(server: GatewayServer, service?: PersonService): void {
   server.registerMethod("person.identify_current_frame", async (_conn, params) => {
-    return identifyCurrentFrame(params);
+    return identifyCurrentFrame(params, service ?? getDefaultPersonService());
   });
   server.registerMethod("person.list", async (_conn, params) => {
-    return listPeople(params);
+    return listPeople(params, service ?? getDefaultPersonService());
   });
   server.registerMethod("person.recall", async (_conn, params) => {
-    return recallPerson(params);
+    return recallPerson(params, service ?? getDefaultPersonService());
   });
   server.registerMethod("person.update_profile", async (_conn, params) => {
-    return updatePersonProfile(params);
+    return updatePersonProfile(params, service ?? getDefaultPersonService());
   });
-  server.registerMethod("person.confirm_candidate", () => {
-    throw new MethodError("NOT_IMPLEMENTED", "Identity candidate persistence is not available yet.");
+  server.registerMethod("person.confirm_candidate", async (_conn, params) => {
+    return confirmCandidate(params, service ?? getDefaultPersonService());
   });
-  server.registerMethod("person.reject_candidate", () => {
-    throw new MethodError("NOT_IMPLEMENTED", "Identity candidate persistence is not available yet.");
+  server.registerMethod("person.reject_candidate", async (_conn, params) => {
+    return rejectCandidate(params, service ?? getDefaultPersonService());
   });
 }
 
-export async function identifyCurrentFrame(params: unknown): Promise<PersonIdentifyResult> {
+export async function identifyCurrentFrame(
+  params: unknown,
+  service = getDefaultPersonService(),
+): Promise<PersonIdentifyResult> {
   const p = recordParams(params);
-  const imageBase64 = stringParam(p.image_base64, "image_base64");
-  const sessionKey = optionalStringParam(p.session_key);
-  const result = await callDeepFace("/identify", { image_base64: imageBase64 });
-  if (!result.ok) {
-    throw new MethodError("UNAVAILABLE", result.error);
-  }
-  const data = result.data;
-  if (!truthy(data.found)) {
-    return {
-      ok: true,
-      found: false,
-      reason: "no_match",
-      message: "No one on camera matches a person you've met.",
-    };
-  }
-
-  const rawPerson = objectOrUndefined(data.person);
-  if (!rawPerson) {
-    throw new MethodError("INVALID_RESPONSE", "DeepFace identify response omitted person.");
-  }
-  const confidence = numberOr(data.similarity, 0.5);
-  const person = deepFaceProfileToPersonToolPerson(rawPerson as LegacyDeepFaceProfile, {
-    includeStructured: shouldIncludeStructured(p),
-  });
-  if (!person) {
-    const normalized = normalizeLegacyDeepFaceProfile(rawPerson as LegacyDeepFaceProfile, {
-      defaultConfidence: confidence,
+  try {
+    return await service.identifyCurrentFrame({
+      imageBase64: stringParam(p.image_base64, "image_base64"),
+      sessionKey: optionalStringParam(p.session_key),
+      includeStructured: shouldIncludeStructured(p),
     });
-    if (normalized.candidate) {
-      return {
-        ok: true,
-        found: false,
-        candidate: normalized.candidate,
-        candidate_id: normalized.candidate.id,
-        reason: "candidate_like_legacy_unknown",
-        message: "This face matches an unconfirmed identity candidate, not a named person yet.",
-      };
-    }
-    return {
-      ok: true,
-      found: false,
-      reason: "candidate_like_legacy_unknown",
-      message: "The matching legacy profile is unknown and needs review before it becomes a person.",
-    };
+  } catch (error) {
+    throw personMethodError(error);
   }
-
-  const subject = { type: "person" as const, personId: person.id };
-  const identitySignal = buildFaceIdentitySignal({
-    id: `face_sig_identify_${person.id}_${Date.now()}`,
-    signalType: "face_match",
-    subject,
-    sourceSession: sessionKey ? { sessionKey } : undefined,
-    evidenceRefs: sessionKey ? undefined : [{ type: "tool_result", id: `deepface_identify:${person.id}` }],
-    confidence,
-    review: { state: "unreviewed" },
-    allowedUses: allowedUsesForIdentitySignal({
-      subject,
-      reviewState: "unreviewed",
-      confidence,
-    }),
-    metadata: {
-      personId: person.id,
-      deepfaceProfileId: person.id,
-      service: "deepface",
-      similarity: typeof data.similarity === "number" ? data.similarity : undefined,
-    },
-  });
-
-  return {
-    ok: true,
-    found: true,
-    person,
-    identity_signal: identitySignal,
-  };
 }
 
-export async function listPeople(params: unknown = {}): Promise<PersonListResult> {
+export async function listPeople(
+  params: unknown = {},
+  service = getDefaultPersonService(),
+): Promise<PersonListResult> {
   const p = params && typeof params === "object" && !Array.isArray(params)
     ? (params as Record<string, unknown>)
     : {};
-  const includeStructured = shouldIncludeStructured(p);
-  const includeCandidates = p.include_candidates === true;
-  const result = await callDeepFace("/people", {});
-  if (!result.ok) {
-    log.debug("person.list service unavailable", { error: result.error });
-    return {
-      ok: true,
-      available: false,
-      people: [],
-      note: "Face database service is not running.",
-    };
-  }
-  const peopleRaw = Array.isArray(result.data.people) ? result.data.people : [];
-  return {
-    ok: true,
-    available: true,
-    people: deepFaceProfilesToPersonToolPeople(peopleRaw, { includeStructured }),
-    ...(includeCandidates ? { candidates: deepFaceProfilesToIdentityCandidates(peopleRaw) } : {}),
-  };
-}
-
-export async function recallPerson(params: unknown): Promise<PersonRecallResult> {
-  const p = recordParams(params);
-  const query = stringParam(p.name, "name").toLowerCase();
-  const listed = await listPeople({ include_structured: shouldIncludeStructured(p) });
-  if (!listed.available) {
-    return { ok: true, found: false };
-  }
-  const exact = listed.people.find((person) => person.name.toLowerCase() === query);
-  const partial = exact ?? listed.people.find((person) => person.name.toLowerCase().includes(query));
-  return partial ? { ok: true, found: true, person: partial } : { ok: true, found: false };
-}
-
-export async function updatePersonProfile(params: unknown): Promise<PersonUpdateProfileResult> {
-  const p = recordParams(params);
-  let personId = optionalStringParam(p.id ?? p.person_id);
-  const name = optionalStringParam(p.name);
-  const imageBase64 = optionalStringParam(p.image_base64);
-  const facts = stringArrayParam(p.facts);
-  const recap = optionalStringParam(p.recap);
-  if (!name && facts.length === 0 && !recap) {
-    throw new MethodError("INVALID_REQUEST", "name, facts, or recap is required.");
-  }
-  if (!personId) {
-    if (!name || !imageBase64) {
-      throw new MethodError("INVALID_REQUEST", "id is required unless name and image_base64 are provided.");
-    }
-    const enrolled = await callDeepFace("/enroll", {
-      image_base64: imageBase64,
-      name,
-      person_id: null,
-    });
-    if (!enrolled.ok) {
-      throw new MethodError("UNAVAILABLE", enrolled.error);
-    }
-    const enrolledPerson = objectOrUndefined(enrolled.data.person);
-    const enrolledId = enrolledPerson ? optionalStringParam(enrolledPerson.id) : undefined;
-    if (!enrolledPerson || !enrolledId) {
-      throw new MethodError("INVALID_RESPONSE", "DeepFace enroll response omitted person id.");
-    }
-    personId = enrolledId;
-    if (facts.length === 0 && !recap) {
-      const person = deepFaceProfileToPersonToolPerson(enrolledPerson as LegacyDeepFaceProfile, {
-        includeStructured: shouldIncludeStructured(p),
-      });
-      if (!person) {
-        throw new MethodError("INVALID_RESPONSE", "Enrolled profile did not become a named person.");
-      }
-      return { ok: true, person };
-    }
-  }
-
-  const result = await callDeepFace("/update", {
-    person_id: personId,
-    name: name ?? null,
-    facts: facts.length > 0 ? facts : null,
-    recap: recap ?? null,
+  return service.listPeople({
+    includeStructured: shouldIncludeStructured(p),
+    includeCandidates: p.include_candidates === true,
   });
-  if (!result.ok) {
-    throw new MethodError("UNAVAILABLE", result.error);
-  }
+}
 
-  const rawPerson = objectOrUndefined(result.data.person);
-  if (!rawPerson) {
-    throw new MethodError("INVALID_RESPONSE", "DeepFace update response omitted person.");
-  }
-  const person = deepFaceProfileToPersonToolPerson(rawPerson as LegacyDeepFaceProfile, {
+export async function recallPerson(
+  params: unknown,
+  service = getDefaultPersonService(),
+): Promise<PersonRecallResult> {
+  const p = recordParams(params);
+  return service.recallPerson({
+    name: stringParam(p.name, "name"),
     includeStructured: shouldIncludeStructured(p),
   });
-  if (!person) {
-    throw new MethodError("INVALID_RESPONSE", "Updated legacy profile is still an unknown candidate.");
+}
+
+export async function updatePersonProfile(
+  params: unknown,
+  service = getDefaultPersonService(),
+): Promise<PersonUpdateProfileResult> {
+  const p = recordParams(params);
+  try {
+    return await service.updateProfile({
+      id: optionalStringParam(p.id ?? p.person_id),
+      name: optionalStringParam(p.name),
+      imageBase64: optionalStringParam(p.image_base64),
+      facts: stringArrayParam(p.facts),
+      recap: optionalStringParam(p.recap),
+      includeStructured: shouldIncludeStructured(p),
+    });
+  } catch (error) {
+    throw personMethodError(error);
   }
-  return { ok: true, person };
+}
+
+export async function confirmCandidate(
+  params: unknown,
+  service = getDefaultPersonService(),
+): Promise<PersonCandidateReviewResult> {
+  const p = recordParams(params);
+  try {
+    return await service.confirmCandidate({
+      candidateId: stringParam(p.candidate_id ?? p.candidateId, "candidate_id"),
+      name: optionalStringParam(p.name),
+      personId: optionalStringParam(p.person_id ?? p.personId),
+      reason: optionalStringParam(p.reason),
+      sessionKey: optionalStringParam(p.session_key),
+      includeStructured: shouldIncludeStructured(p),
+    });
+  } catch (error) {
+    throw personMethodError(error);
+  }
+}
+
+export async function rejectCandidate(
+  params: unknown,
+  service = getDefaultPersonService(),
+): Promise<PersonCandidateReviewResult> {
+  const p = recordParams(params);
+  try {
+    return await service.rejectCandidate({
+      candidateId: stringParam(p.candidate_id ?? p.candidateId, "candidate_id"),
+      reason: optionalStringParam(p.reason),
+      sessionKey: optionalStringParam(p.session_key),
+    });
+  } catch (error) {
+    throw personMethodError(error);
+  }
 }
 
 function shouldIncludeStructured(params: Record<string, unknown>): boolean {
   return params.include_structured === true;
 }
 
-function deepFaceProfilesToIdentityCandidates(rawProfiles: unknown[]): IdentityCandidate[] {
-  return rawProfiles.flatMap((raw) => {
-    const profile = objectOrUndefined(raw);
-    if (!profile) return [];
-    const normalized = normalizeLegacyDeepFaceProfile(profile as LegacyDeepFaceProfile);
-    return normalized.candidate ? [normalized.candidate] : [];
-  });
+export function getDefaultPersonService(): PersonService {
+  defaultService ??= new PersonService(
+    new DeepFaceLegacyPersonRepository(),
+    new FilePersonCandidateReviewStore(),
+  );
+  return defaultService;
+}
+
+class DeepFaceLegacyPersonRepository implements LegacyPersonRepository {
+  async identify(imageBase64: string) {
+    const result = await callDeepFace("/identify", { image_base64: imageBase64 });
+    if (!result.ok) return result;
+    if (!truthy(result.data.found)) return { ok: true as const, found: false as const };
+    const person = objectOrUndefined(result.data.person);
+    if (!person) {
+      return { ok: false as const, code: "INVALID_RESPONSE" as const, error: "DeepFace identify response omitted person." };
+    }
+    return {
+      ok: true as const,
+      found: true as const,
+      person: person as LegacyDeepFaceProfile,
+      similarity: numberOrUndefined(result.data.similarity),
+    };
+  }
+
+  async listPeople() {
+    const result = await callDeepFace("/people", {});
+    if (!result.ok) {
+      log.debug("person.list service unavailable", { error: result.error });
+      return result;
+    }
+    return {
+      ok: true as const,
+      people: Array.isArray(result.data.people) ? result.data.people : [],
+    };
+  }
+
+  async enroll(input: { imageBase64: string; name: string; personId?: string | null }) {
+    const result = await callDeepFace("/enroll", {
+      image_base64: input.imageBase64,
+      name: input.name,
+      person_id: input.personId ?? null,
+    });
+    return writeResult(result, "DeepFace enroll response omitted person.");
+  }
+
+  async update(input: { personId: string; name?: string | null; facts?: string[] | null; recap?: string | null }) {
+    const result = await callDeepFace("/update", {
+      person_id: input.personId,
+      name: input.name ?? null,
+      facts: input.facts && input.facts.length > 0 ? input.facts : null,
+      recap: input.recap ?? null,
+    });
+    return writeResult(result, "DeepFace update response omitted person.");
+  }
 }
 
 async function callDeepFace(
@@ -309,6 +275,26 @@ function truthy(value: unknown): boolean {
   return value === true;
 }
 
-function numberOr(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function writeResult(
+  result: Awaited<ReturnType<typeof callDeepFace>>,
+  missingMessage: string,
+) {
+  if (!result.ok) return result;
+  const person = objectOrUndefined(result.data.person);
+  if (!person) {
+    return { ok: false as const, code: "INVALID_RESPONSE" as const, error: missingMessage };
+  }
+  return { ok: true as const, person: person as LegacyDeepFaceProfile };
+}
+
+function personMethodError(error: unknown): MethodError {
+  if (error instanceof MethodError) return error;
+  if (error instanceof PersonServiceError) {
+    return new MethodError(error.code, error.message);
+  }
+  return new MethodError("INVALID_REQUEST", error instanceof Error ? error.message : String(error));
 }

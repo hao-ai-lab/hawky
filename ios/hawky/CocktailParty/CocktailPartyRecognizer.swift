@@ -11,7 +11,7 @@ import Foundation
 
 /// The recognition service (DeepFace via the gateway). Injected so tests fake it.
 protocol FaceRecognitionClient: Sendable {
-    func identify(cropBase64: String) async -> LivePerson?
+    func identify(cropBase64: String) async -> FaceIdentifyResult
     func enroll(cropBase64: String, name: String) async -> LivePerson?
 }
 
@@ -21,8 +21,8 @@ struct BridgeFaceRecognitionClient: FaceRecognitionClient {
     let bridge: LiveGatewayBridge
     let sessionKey: String
 
-    func identify(cropBase64: String) async -> LivePerson? {
-        await bridge.identifyFace(imageBase64: cropBase64, sessionKey: sessionKey)
+    func identify(cropBase64: String) async -> FaceIdentifyResult {
+        await bridge.identifyFaceResult(imageBase64: cropBase64, sessionKey: sessionKey)
     }
     func enroll(cropBase64: String, name: String) async -> LivePerson? {
         await bridge.enrollFace(imageBase64: cropBase64, name: name, personId: nil, sessionKey: sessionKey)
@@ -92,31 +92,79 @@ final class CocktailPartyRecognizer {
 
     /// On-demand identify (identify_person tool). Picks the best recent frame LOCALLY,
     /// then does exactly ONE server identify — fast. Pure lookup, no enroll.
-    func identifyOnly(amongFrames frames: [Data]) async -> LivePerson? {
-        guard let crop = await bestCrop(amongFrames: frames) else { return nil }
+    func identifyOnlyResult(amongFrames frames: [Data]) async -> FaceIdentifyResult {
+        guard let crop = await bestCrop(amongFrames: frames) else { return .noMatch }
         return await client.identify(cropBase64: crop.base64EncodedString())
+    }
+
+    func identifyOnly(amongFrames frames: [Data]) async -> LivePerson? {
+        if case let .person(person) = await identifyOnlyResult(amongFrames: frames) {
+            return person
+        }
+        return nil
     }
 
     /// Resolve the person on camera for a profile write: best local frame, then ONE
     /// server identify, else enroll (under `name`). One round-trip on the hot path.
-    func resolveOrEnroll(amongFrames frames: [Data], name: String?) async -> LivePerson? {
-        guard let crop = await bestCrop(amongFrames: frames) else { return nil }
+    func resolveOrEnrollResult(amongFrames frames: [Data], name: String?) async -> FaceIdentifyResult {
+        guard let crop = await bestCrop(amongFrames: frames) else { return .noMatch }
         let base64 = crop.base64EncodedString()
-        if let known = await client.identify(cropBase64: base64) { return known }
-        return await client.enroll(cropBase64: base64, name: name?.isEmpty == false ? name! : "Unknown")
+        switch await client.identify(cropBase64: base64) {
+        case let .person(person):
+            return .person(person)
+        case let .suppressed(candidateID, reason):
+            return .suppressed(candidateID: candidateID, reason: reason)
+        case .noMatch:
+            break
+        }
+        if let enrolled = await client.enroll(cropBase64: base64, name: name?.isEmpty == false ? name! : "Unknown") {
+            return .person(enrolled)
+        }
+        return .noMatch
+    }
+
+    func resolveOrEnroll(amongFrames frames: [Data], name: String?) async -> LivePerson? {
+        if case let .person(person) = await resolveOrEnrollResult(amongFrames: frames, name: name) {
+            return person
+        }
+        return nil
     }
 
     /// Single-frame variants (used by the per-frame background loop).
-    func identifyOnly(jpeg: Data) async -> LivePerson? {
-        guard let crop = await cropper.bestFaceCrop(in: jpeg) else { return nil }
+    func identifyOnlyResult(jpeg: Data) async -> FaceIdentifyResult {
+        guard let crop = await cropper.bestFaceCrop(in: jpeg) else { return .noMatch }
         return await client.identify(cropBase64: crop.base64EncodedString())
     }
 
-    func resolveOrEnroll(jpeg: Data, name: String?) async -> LivePerson? {
-        guard let crop = await cropper.bestFaceCrop(in: jpeg) else { return nil }
+    func identifyOnly(jpeg: Data) async -> LivePerson? {
+        if case let .person(person) = await identifyOnlyResult(jpeg: jpeg) {
+            return person
+        }
+        return nil
+    }
+
+    func resolveOrEnrollResult(jpeg: Data, name: String?) async -> FaceIdentifyResult {
+        guard let crop = await cropper.bestFaceCrop(in: jpeg) else { return .noMatch }
         let base64 = crop.base64EncodedString()
-        if let known = await client.identify(cropBase64: base64) { return known }
-        return await client.enroll(cropBase64: base64, name: name?.isEmpty == false ? name! : "Unknown")
+        switch await client.identify(cropBase64: base64) {
+        case let .person(person):
+            return .person(person)
+        case let .suppressed(candidateID, reason):
+            return .suppressed(candidateID: candidateID, reason: reason)
+        case .noMatch:
+            break
+        }
+        if let enrolled = await client.enroll(cropBase64: base64, name: name?.isEmpty == false ? name! : "Unknown") {
+            return .person(enrolled)
+        }
+        return .noMatch
+    }
+
+    func resolveOrEnroll(jpeg: Data, name: String?) async -> LivePerson? {
+        if case let .person(person) = await resolveOrEnrollResult(jpeg: jpeg, name: name) {
+            return person
+        }
+        return nil
     }
 
     func resetSessionState() {
@@ -146,13 +194,18 @@ final class CocktailPartyRecognizer {
 
         var events: [RecognitionEvent] = []
         // 1) Retrieve from the DB. Known → recall (off cooldown).
-        if let known = await client.identify(cropBase64: base64) {
+        switch await client.identify(cropBase64: base64) {
+        case let .person(known):
             if let last = lastAnnounced[known.id], clock().timeIntervalSince(last) < config.perPersonCooldown {
                 return []
             }
             lastAnnounced[known.id] = clock()
             events.append(.knownPerson(person: known))
             return events
+        case .suppressed:
+            return []
+        case .noMatch:
+            break
         }
         // 2) Unknown → enroll ONCE, then back off. The cooldown stops the same
         // unrecognized face from spawning a new profile every frame; once the service

@@ -1,13 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  confirmCandidate,
   identifyCurrentFrame,
   listPeople,
+  rejectCandidate,
   recallPerson,
   updatePersonProfile,
 } from "../src/gateway/person-methods.js";
 import {
+  InMemoryPersonCandidateReviewStore,
+  PersonService,
   PERSON_MODEL_TOOL_NAMES,
   PERSON_RPC_METHODS,
+  type LegacyDeepFaceProfile,
+  type LegacyPersonRepository,
   personToolForName,
 } from "../src/identity/person/index.js";
 
@@ -64,6 +70,9 @@ describe("person tool contract", () => {
       "person.reject_candidate",
     ]);
     expect(personToolForName("update_person_profile").parameters.properties).toHaveProperty("facts");
+    expect(personToolForName("confirm_identity_candidate").parameters.required).toEqual(["candidate_id", "name"]);
+    expect(personToolForName("confirm_identity_candidate").parameters.properties).toHaveProperty("person_id");
+    expect(personToolForName("reject_identity_candidate").parameters.required).toEqual(["candidate_id"]);
   });
 });
 
@@ -179,14 +188,13 @@ describe("person.* gateway methods over legacy DeepFace", () => {
   });
 
   test("person.update_profile writes through DeepFace compatibility endpoint", async () => {
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     restore = stubDeepFaceFetch((path, body) => {
+      calls.push({ path, body });
+      if (path === "/people") {
+        return Response.json({ people: RAW_PEOPLE });
+      }
       expect(path).toBe("/update");
-      expect(body).toEqual({
-        person_id: "p-sarah",
-        name: "Sarah Chen",
-        facts: ["studies robotics"],
-        recap: "Talked about mapping.",
-      });
       return Response.json({
         ok: true,
         person: {
@@ -210,18 +218,34 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     expect(result.person.name).toBe("Sarah Chen");
     expect(result.person.facts).toContain("studies robotics");
     expect(result.person.structured).toBeUndefined();
+    expect(calls).toEqual([
+      { path: "/people", body: {} },
+      {
+        path: "/update",
+        body: {
+          person_id: "p-sarah",
+          name: "Sarah Chen",
+          facts: ["studies robotics"],
+          recap: "Talked about mapping.",
+        },
+      },
+    ]);
   });
 
   test("person.update_profile includes structured records only when explicitly requested", async () => {
-    restore = stubDeepFaceFetch(() =>
-      Response.json({
+    restore = stubDeepFaceFetch((path) => {
+      if (path === "/people") {
+        return Response.json({ people: RAW_PEOPLE });
+      }
+      expect(path).toBe("/update");
+      return Response.json({
         ok: true,
         person: {
           ...RAW_PEOPLE[0],
           facts: ["climber", "studies robotics"],
         },
-      }),
-    );
+      });
+    });
 
     const result = await updatePersonProfile({
       id: "p-sarah",
@@ -235,6 +259,9 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     restore = stubDeepFaceFetch((path, body) => {
       calls.push({ path, body });
+      if (path === "/identify") {
+        return Response.json({ ok: true, found: false });
+      }
       if (path === "/enroll") {
         return Response.json({
           ok: true,
@@ -266,10 +293,258 @@ describe("person.* gateway methods over legacy DeepFace", () => {
 
     expect(result.person.id).toBe("p-mina");
     expect(calls[0]).toEqual({
+      path: "/identify",
+      body: { image_base64: "frame" },
+    });
+    expect(calls[1]).toEqual({
       path: "/enroll",
       body: { image_base64: "frame", name: "Mina", person_id: null },
     });
-    expect(calls[1].body).toMatchObject({ person_id: "p-mina", name: "Mina" });
+    expect(calls[2].body).toMatchObject({ person_id: "p-mina", name: "Mina" });
     expect(JSON.stringify(calls)).not.toContain("Unknown");
   });
+
+  test("person.update_profile refuses to rename an unconfirmed frame-matched candidate", async () => {
+    const store = new InMemoryPersonCandidateReviewStore();
+    const enrolls: Array<Record<string, unknown>> = [];
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      identify: {
+        found: true,
+        person: RAW_PEOPLE[1],
+        similarity: 0.86,
+      },
+      enroll: (input) => {
+        enrolls.push(input);
+        return { id: "p-should-not-enroll", name: input.name, facts: [], recaps: [] };
+      },
+      update: (input) => {
+        updates.push(input);
+        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+      },
+    }), store);
+
+    await expect(updatePersonProfile({
+      name: "Morgan",
+      image_base64: "frame",
+    }, service)).rejects.toThrow(/unconfirmed identity candidate/);
+
+    expect(enrolls).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+
+  test("person.update_profile refuses direct writes to an unconfirmed candidate profile id", async () => {
+    const store = new InMemoryPersonCandidateReviewStore();
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      update: (input) => {
+        updates.push(input);
+        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+      },
+    }), store);
+
+    await expect(updatePersonProfile({
+      id: "p-unknown",
+      name: "Morgan",
+    }, service)).rejects.toThrow(/unconfirmed identity candidate/);
+
+    expect(updates).toEqual([]);
+  });
+
+  test("person.update_profile refuses to re-enroll a rejected frame-matched candidate", async () => {
+    const store = new InMemoryPersonCandidateReviewStore();
+    const enrolls: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      identify: {
+        found: true,
+        person: RAW_PEOPLE[1],
+        similarity: 0.86,
+      },
+      enroll: (input) => {
+        enrolls.push(input);
+        return { id: "p-should-not-enroll", name: input.name, facts: [], recaps: [] };
+      },
+    }), store);
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    await rejectCandidate({
+      candidate_id: candidateId,
+      reason: "not a person to remember",
+    }, service);
+    await expect(updatePersonProfile({
+      name: "Morgan",
+      image_base64: "frame",
+    }, service)).rejects.toThrow(/rejected or suppressed identity candidate/);
+
+    expect(enrolls).toEqual([]);
+  });
+
+  test("person.update_profile refuses direct writes to a rejected candidate profile id", async () => {
+    const store = new InMemoryPersonCandidateReviewStore();
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      update: (input) => {
+        updates.push(input);
+        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+      },
+    }), store);
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    await rejectCandidate({
+      candidate_id: candidateId,
+      reason: "not a person to remember",
+    }, service);
+    await expect(updatePersonProfile({
+      id: "p-unknown",
+      name: "Morgan",
+    }, service)).rejects.toThrow(/rejected or suppressed identity candidate/);
+
+    expect(updates).toEqual([]);
+  });
+
+  test("person.confirm_candidate promotes a legacy Unknown candidate through the person service boundary", async () => {
+    const store = new InMemoryPersonCandidateReviewStore();
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      update: (input) => {
+        updates.push(input);
+        return {
+          ...RAW_PEOPLE[1],
+          name: "Morgan",
+          facts: [],
+          recaps: [],
+        };
+      },
+    }), store, { now: () => "2026-06-27T12:00:00.000Z" });
+
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    const result = await confirmCandidate({
+      candidate_id: candidateId,
+      name: "Morgan",
+      session_key: "realtime:session-1",
+    }, service);
+
+    expect(result.ok).toBe(true);
+    expect(result.person?.id).toBe("p-unknown");
+    expect(result.person?.name).toBe("Morgan");
+    expect(result.candidate.review.state).toBe("confirmed");
+    expect(result.candidate.allowedUses.profilePromotion).toBe(true);
+    expect(updates).toEqual([
+      {
+        personId: "p-unknown",
+        name: "Morgan",
+        facts: null,
+        recap: null,
+      },
+    ]);
+    const stored = store.get(candidateId!);
+    expect(stored?.review.state).toBe("confirmed");
+    expect(stored?.promotedPersonId).toBe("p-unknown");
+    expect(stored?.sourceSession?.sessionKey).toBe("realtime:session-1");
+  });
+
+  test("person.reject_candidate suppresses a legacy Unknown candidate from future list and identify results", async () => {
+    const store = new InMemoryPersonCandidateReviewStore();
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      identify: {
+        found: true,
+        person: RAW_PEOPLE[1],
+        similarity: 0.83,
+      },
+    }), store, { now: () => "2026-06-27T12:00:00.000Z" });
+
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    const rejected = await rejectCandidate({
+      candidate_id: candidateId,
+      reason: "not a person to remember",
+      session_key: "realtime:session-1",
+    }, service);
+    expect(rejected.candidate.review.state).toBe("rejected");
+    expect(store.get(candidateId!)?.review.reason).toBe("not a person to remember");
+
+    const afterList = await listPeople({ include_candidates: true }, service);
+    expect(afterList.candidates).toEqual([]);
+
+    const afterIdentify = await identifyCurrentFrame({ image_base64: "abc" }, service);
+    expect(afterIdentify.found).toBe(false);
+    if (!afterIdentify.found) {
+      expect(afterIdentify.reason).toBe("candidate_rejected");
+      expect(afterIdentify.candidate_id).toBe(candidateId);
+      expect(afterIdentify.suppressed).toBe(true);
+      expect(afterIdentify.no_enroll).toBe(true);
+      expect(afterIdentify.candidate).toBeUndefined();
+    }
+  });
 });
+
+function fakeLegacyPersonRepository(options: {
+  people?: unknown[];
+  identify?: { found: false } | { found: true; person: LegacyDeepFaceProfile; similarity?: number };
+  update?: (input: {
+    personId: string;
+    name?: string | null;
+    facts?: string[] | null;
+    recap?: string | null;
+  }) => Record<string, unknown>;
+  enroll?: (input: {
+    imageBase64: string;
+    name: string;
+    personId?: string | null;
+  }) => Record<string, unknown>;
+}): LegacyPersonRepository {
+  return {
+    async identify() {
+      const identify = options.identify;
+      if (!identify || !identify.found) return { ok: true, found: false };
+      return {
+        ok: true,
+        found: true,
+        person: identify.person,
+        similarity: identify.similarity,
+      };
+    },
+    async listPeople() {
+      return { ok: true, people: options.people ?? [] };
+    },
+    async enroll(input) {
+      const person = options.enroll?.(input);
+      if (person) {
+        return { ok: true, person: person as LegacyDeepFaceProfile };
+      }
+      return {
+        ok: true,
+        person: {
+          id: "p-enrolled",
+          name: input.name,
+          facts: [],
+          recaps: [],
+        },
+      };
+    },
+    async update(input) {
+      const person = options.update?.(input) ?? {
+        id: input.personId,
+        name: input.name ?? "Updated",
+        facts: input.facts ?? [],
+        recaps: input.recap ? [{ summary: input.recap }] : [],
+      };
+      return { ok: true, person: person as LegacyDeepFaceProfile };
+    },
+  };
+}
