@@ -21,7 +21,7 @@ import type { MethodHandler, MethodRegistry } from "./methods.js";
 import { createMethodRegistry } from "./methods.js";
 import { NodeRegistry } from "./node-registry.js";
 import { DeviceAuth, callbackRedirectHtml, manualTokenHtml, webAuthRedirectHtml, type DeviceTokenPayload } from "./device-auth.js";
-import { AppAuth, sanitizeReturnUrl } from "./app-auth.js";
+import { AppAuth, sanitizeReturnUrl, type AppAuthUser } from "./app-auth.js";
 import {
   LiveRealtimeBrokerError,
   mintOpenAIRealtimeClientSecret,
@@ -29,6 +29,7 @@ import {
 } from "./live-realtime-broker.js";
 import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
 import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
+import { isControlHost, workspaceUrlForUser } from "./workspace-registry.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -530,8 +531,8 @@ export class GatewayServer {
     const body = await readFormOrJson(req);
     const returnUrl = sanitizeReturnUrl(body.return_url ?? "/");
     try {
-      const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
-      return redirect(returnUrl, [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+      const { user, token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
+      return redirect(this.postLoginRedirect(req, user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.loginPage(returnUrl, err instanceof Error ? err.message : "Login failed."), {
         status: 401,
@@ -560,7 +561,7 @@ export class GatewayServer {
         });
       }
       const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
-      return redirect(result.user.role === "admin" ? "/admin" : returnUrl, [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+      return redirect(result.user.role === "admin" ? "/admin" : this.postLoginRedirect(req, result.user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.registerPage(returnUrl, "", err instanceof Error ? err.message : "Registration failed."), {
         status: 400,
@@ -586,6 +587,15 @@ export class GatewayServer {
     const user = this.appAuth.userFromRequest(req);
     if (!user) return Response.json({ ok: false, error: "Login required" }, { status: 401 });
     return Response.json({ ok: true, user });
+  }
+
+  private postLoginRedirect(req: Request, user: AppAuthUser, returnUrl: string): string {
+    if (user.role === "admin" && returnUrl === "/") return "/admin";
+    const host = req.headers.get("Host") ?? "";
+    if (!isControlHost(host)) return returnUrl;
+    if (returnUrl !== "/") return returnUrl;
+    const workspaceUrl = workspaceUrlForUser(user);
+    return workspaceUrl ?? returnUrl;
   }
 
   private async handleAdmin(req: Request, url: URL): Promise<Response> {
