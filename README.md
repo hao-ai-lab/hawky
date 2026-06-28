@@ -1,7 +1,7 @@
 # Hawky
 
-[![CI](https://github.com/zhisbug/hawky/actions/workflows/ci.yml/badge.svg)](https://github.com/zhisbug/hawky/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/hawky)](https://www.npmjs.com/package/hawky)
+<!-- [![CI](https://github.com/zhisbug/hawky/actions/workflows/ci.yml/badge.svg)](https://github.com/zhisbug/hawky/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/hawky)](https://www.npmjs.com/package/hawky) -->
 
 A personal assistant built on a powerful coding agent core. Gateway-client architecture with TUI, web, and mobile (PWA) interfaces.
 
