@@ -21,6 +21,7 @@ describe("app logout", () => {
     resetConfig();
     resetGatewayState();
     process.env.HAWKY_APP_AUTH = "1";
+    process.env.HAWKY_SESSION_COOKIE_DOMAIN = ".hawky.live";
     server = new GatewayServer();
     port = getTestPort();
     server.start(port);
@@ -33,6 +34,7 @@ describe("app logout", () => {
     resetConfig();
     rmSync(configDir, { recursive: true, force: true });
     delete process.env.HAWKY_APP_AUTH;
+    delete process.env.HAWKY_SESSION_COOKIE_DOMAIN;
   });
 
   test("clears the session cookie and browser device tokens", async () => {
@@ -41,6 +43,7 @@ describe("app logout", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("set-cookie")).toContain("hawky_session=;");
+    expect(res.headers.get("set-cookie")).toContain("Domain=.hawky.live");
     expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
     expect(body).toContain("localStorage.removeItem");
     expect(body).toContain("hawky_device_token");

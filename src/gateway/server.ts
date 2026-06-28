@@ -573,12 +573,13 @@ export class GatewayServer {
   private handleAppLogout(url: URL): Response {
     if (!this.appAuth) return new Response("Not found", { status: 404 });
     const returnUrl = sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/auth/login");
+    const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+    for (const cookie of this.appAuth.clearSessionCookies()) {
+      headers.append("Set-Cookie", cookie);
+    }
     return new Response(logoutRedirectHtml(returnUrl), {
       status: 200,
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Set-Cookie": this.appAuth.clearSessionCookie(),
-      },
+      headers,
     });
   }
 

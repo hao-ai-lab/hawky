@@ -111,11 +111,28 @@ function parseCookies(header: string | null): Record<string, string> {
   return out;
 }
 
-function sessionCookieDomainAttribute(): string[] {
+function sessionCookieDomain(): string {
   const domain = (process.env.HAWKY_SESSION_COOKIE_DOMAIN || "").trim();
-  if (!domain) return [];
-  if (!/^\.?[a-z0-9.-]+$/i.test(domain)) return [];
-  return [`Domain=${domain}`];
+  if (!domain) return "";
+  if (!/^\.?[a-z0-9.-]+$/i.test(domain)) return "";
+  return domain;
+}
+
+function sessionCookieDomainAttribute(): string[] {
+  const domain = sessionCookieDomain();
+  return domain ? [`Domain=${domain}`] : [];
+}
+
+function expiredSessionCookie(domain = ""): string {
+  return [
+    `${SESSION_COOKIE}=`,
+    "Path=/",
+    ...(domain ? [`Domain=${domain}`] : []),
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Max-Age=0",
+  ].join("; ");
 }
 
 function hashPassword(password: string): StoredUser["password"] {
@@ -346,15 +363,12 @@ export class AppAuth {
   }
 
   clearSessionCookie(): string {
-    return [
-      `${SESSION_COOKIE}=`,
-      "Path=/",
-      ...sessionCookieDomainAttribute(),
-      "HttpOnly",
-      "Secure",
-      "SameSite=Lax",
-      "Max-Age=0",
-    ].join("; ");
+    return expiredSessionCookie(sessionCookieDomain());
+  }
+
+  clearSessionCookies(): string[] {
+    const domain = sessionCookieDomain();
+    return domain ? [expiredSessionCookie(), expiredSessionCookie(domain)] : [expiredSessionCookie()];
   }
 
   loginPage(returnUrl: string, error = ""): string {

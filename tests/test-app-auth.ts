@@ -165,6 +165,10 @@ describe("AppAuth", () => {
       const login = auth.login("a@example.com", "a long safe password");
       expect(auth.createSessionCookie(login.token)).toContain("Domain=.hawky.live");
       expect(auth.clearSessionCookie()).toContain("Domain=.hawky.live");
+      expect(auth.clearSessionCookies()).toEqual([
+        "hawky_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        "hawky_session=; Path=/; Domain=.hawky.live; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+      ]);
     } finally {
       if (previous === undefined) delete process.env.HAWKY_SESSION_COOKIE_DOMAIN;
       else process.env.HAWKY_SESSION_COOKIE_DOMAIN = previous;
