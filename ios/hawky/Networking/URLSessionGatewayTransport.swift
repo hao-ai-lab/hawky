@@ -35,6 +35,7 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
     }
 
     func connect(url: URL, connectParams: ConnectParams) async throws -> HelloPayload {
+        let startedAt = Date()
         var request = URLRequest(url: url)
         CloudflareAccessStore.applyHeaders(to: &request, requestURL: url)
         // DO NOT set Sec-WebSocket-Extensions here — Hardening note: iOS deflate compat.
@@ -87,6 +88,14 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
             // Handshake failed — close with 4000 and propagate.
             ws.cancel(with: .init(rawValue: 4000) ?? .normalClosure, reason: nil)
             await correlator.rejectAll(error: GatewayTransportError.handshakeTimeout)
+            Self.logConnect(
+                url: url,
+                platform: connectParams.platform,
+                sessionKey: connectParams.sessionKey,
+                ok: false,
+                duration: Date().timeIntervalSince(startedAt),
+                error: "\(error)"
+            )
             throw error
         }
 
@@ -96,8 +105,24 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
             }
             let hello = try decodeHello(from: payload)
             state.withLock { $0.connected = true }
+            Self.logConnect(
+                url: url,
+                platform: connectParams.platform,
+                sessionKey: connectParams.sessionKey,
+                ok: true,
+                duration: Date().timeIntervalSince(startedAt),
+                error: nil
+            )
             return hello
         } else {
+            Self.logConnect(
+                url: url,
+                platform: connectParams.platform,
+                sessionKey: connectParams.sessionKey,
+                ok: false,
+                duration: Date().timeIntervalSince(startedAt),
+                error: response.error?.message
+            )
             if response.error?.code == "UNAUTHORIZED" {
                 // Do not retry — caller (ReconnectingTransport) must decide.
                 throw GatewayTransportError.unauthorized
@@ -113,14 +138,94 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
     func send(_ frame: RequestFrame, timeout: TimeInterval?) async throws -> ResponseFrame {
         let ws = state.withLock { $0.task }
         guard let ws else { throw GatewayTransportError.notConnected }
+        let startedAt = Date()
+        let summary = Self.summarize(frame: frame)
+        let pendingBefore = await correlator.pendingCount()
         async let registered = correlator.register(id: frame.id, timeout: timeout)
+        let encodeStartedAt = Date()
+        let encoded: (message: URLSessionWebSocketTask.Message, byteCount: Int)
         do {
-            try await encodeAndSend(frame: frame, on: ws)
+            encoded = try encode(frame: frame)
         } catch {
             state.withLock { $0.connected = false }
+            Self.logSend(
+                method: frame.method,
+                ok: false,
+                duration: Date().timeIntervalSince(startedAt),
+                error: "\(error)",
+                diagnostics: SendDiagnostics(
+                    summary: summary,
+                    requestBytes: nil,
+                    pendingBefore: pendingBefore,
+                    pendingAfter: await correlator.pendingCount(),
+                    encodeDuration: Date().timeIntervalSince(encodeStartedAt),
+                    socketSendDuration: nil,
+                    responseWaitDuration: nil
+                )
+            )
             throw error
         }
-        return try await registered
+        let encodeDuration = Date().timeIntervalSince(encodeStartedAt)
+        let sendStartedAt = Date()
+        do {
+            try await ws.send(encoded.message)
+        } catch {
+            state.withLock { $0.connected = false }
+            Self.logSend(
+                method: frame.method,
+                ok: false,
+                duration: Date().timeIntervalSince(startedAt),
+                error: "\(error)",
+                diagnostics: SendDiagnostics(
+                    summary: summary,
+                    requestBytes: encoded.byteCount,
+                    pendingBefore: pendingBefore,
+                    pendingAfter: await correlator.pendingCount(),
+                    encodeDuration: encodeDuration,
+                    socketSendDuration: Date().timeIntervalSince(sendStartedAt),
+                    responseWaitDuration: nil
+                )
+            )
+            throw error
+        }
+        let socketSendDuration = Date().timeIntervalSince(sendStartedAt)
+        let waitStartedAt = Date()
+        do {
+            let response = try await registered
+            Self.logSend(
+                method: frame.method,
+                ok: response.ok,
+                duration: Date().timeIntervalSince(startedAt),
+                error: response.error?.message,
+                diagnostics: SendDiagnostics(
+                    summary: summary,
+                    requestBytes: encoded.byteCount,
+                    pendingBefore: pendingBefore,
+                    pendingAfter: await correlator.pendingCount(),
+                    encodeDuration: encodeDuration,
+                    socketSendDuration: socketSendDuration,
+                    responseWaitDuration: Date().timeIntervalSince(waitStartedAt)
+                )
+            )
+            return response
+        } catch {
+            Self.logSend(
+                method: frame.method,
+                ok: false,
+                duration: Date().timeIntervalSince(startedAt),
+                error: "\(error)",
+                diagnostics: SendDiagnostics(
+                    summary: summary,
+                    requestBytes: encoded.byteCount,
+                    pendingBefore: pendingBefore,
+                    pendingAfter: await correlator.pendingCount(),
+                    encodeDuration: encodeDuration,
+                    socketSendDuration: socketSendDuration,
+                    responseWaitDuration: Date().timeIntervalSince(waitStartedAt)
+                )
+            )
+            throw error
+        }
     }
 
     func events() -> AsyncStream<EventFrame> {
@@ -155,11 +260,15 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
     // MARK: - internals
 
     private func encodeAndSend(frame: RequestFrame, on ws: URLSessionWebSocketTask) async throws {
+        try await ws.send(try encode(frame: frame).message)
+    }
+
+    private func encode(frame: RequestFrame) throws -> (message: URLSessionWebSocketTask.Message, byteCount: Int) {
         let data = try JSONEncoder().encode(frame)
         guard let str = String(data: data, encoding: .utf8) else {
             throw GatewayTransportError.decodeError(message: "failed to stringify frame")
         }
-        try await ws.send(.string(str))
+        return (.string(str), data.count)
     }
 
     private func decodeHello(from payload: JSONValue) throws -> HelloPayload {
@@ -224,5 +333,89 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
             NSLog("[GatewayTransport] parse failed: \(error) raw=\(raw)")
             DebugFrameLog.shared.append(raw: raw, reason: "parse failed: \(error)")
         }
+    }
+
+    private static func logConnect(
+        url: URL,
+        platform: String,
+        sessionKey: String,
+        ok: Bool,
+        duration: TimeInterval,
+        error: String?
+    ) {
+        let host = url.host ?? url.absoluteString
+        let ms = Int((duration * 1000).rounded())
+        let suffix = error.map { " error=\($0.prefix(120))" } ?? ""
+        NSLog("[GatewayTransport] connect \(ok ? "ok" : "error") platform=\(platform) host=\(host) session=\(sessionKey) duration_ms=\(ms)\(suffix)")
+    }
+
+    private struct SendDiagnostics {
+        let summary: FrameSummary
+        let requestBytes: Int?
+        let pendingBefore: Int
+        let pendingAfter: Int
+        let encodeDuration: TimeInterval?
+        let socketSendDuration: TimeInterval?
+        let responseWaitDuration: TimeInterval?
+    }
+
+    private struct FrameSummary {
+        let mediaKind: String?
+        let mime: String?
+        let mediaID: String?
+        let sessionKey: String?
+        let base64Chars: Int?
+    }
+
+    private static func summarize(frame: RequestFrame) -> FrameSummary {
+        guard let params = frame.params else {
+            return FrameSummary(
+                mediaKind: nil,
+                mime: nil,
+                mediaID: nil,
+                sessionKey: nil,
+                base64Chars: nil
+            )
+        }
+        func string(_ key: String) -> String? {
+            if case .string(let value)? = params[key] { return value }
+            return nil
+        }
+        let bytesLen: Int?
+        if case .string(let bytes)? = params["bytes"] {
+            bytesLen = bytes.count
+        } else {
+            bytesLen = nil
+        }
+        return FrameSummary(
+            mediaKind: string("media_kind"),
+            mime: string("mime"),
+            mediaID: string("media_id"),
+            sessionKey: string("session_key"),
+            base64Chars: bytesLen
+        )
+    }
+
+    private static func logSend(
+        method: String,
+        ok: Bool,
+        duration: TimeInterval,
+        error: String?,
+        diagnostics: SendDiagnostics
+    ) {
+        let ms = Int((duration * 1000).rounded())
+        let isMediaChunk = method == "media.chunk.upload"
+        guard !isMediaChunk || !ok || ms >= 500 else { return }
+        let suffix = error.map { " error=\($0.prefix(120))" } ?? ""
+        let encode = diagnostics.encodeDuration.map { " encode_ms=\(Int(($0 * 1000).rounded()))" } ?? ""
+        let socket = diagnostics.socketSendDuration.map { " ws_send_ms=\(Int(($0 * 1000).rounded()))" } ?? ""
+        let wait = diagnostics.responseWaitDuration.map { " wait_ms=\(Int(($0 * 1000).rounded()))" } ?? ""
+        let requestBytes = diagnostics.requestBytes.map { " request_bytes=\($0)" } ?? ""
+        let b64 = diagnostics.summary.base64Chars.map { " b64_chars=\($0)" } ?? ""
+        let mediaKind = diagnostics.summary.mediaKind.map { " media_kind=\($0)" } ?? ""
+        let mime = diagnostics.summary.mime.map { " mime=\($0.prefix(40))" } ?? ""
+        let mediaID = diagnostics.summary.mediaID.map { " media_id=\($0.prefix(64))" } ?? ""
+        let sessionKey = diagnostics.summary.sessionKey.map { " session_key=\($0.prefix(64))" } ?? ""
+        NSLog("[GatewayTransport] rpc \(ok ? "ok" : "error") method=\(method) duration_ms=\(ms) pending_before=\(diagnostics.pendingBefore) pending_after=\(diagnostics.pendingAfter)\(encode)\(socket)\(wait)\(requestBytes)\(b64)\(mediaKind)\(mime)\(mediaID)\(sessionKey)\(suffix)")
     }
 }

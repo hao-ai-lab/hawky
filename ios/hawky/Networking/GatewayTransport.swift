@@ -40,6 +40,8 @@ protocol GatewayTransport: Sendable {
     var isConnected: Bool { get }
 }
 
+typealias GatewayTransportResolver = @MainActor @Sendable () async -> GatewayTransport?
+
 extension GatewayTransport {
     /// Default: ignore the custom timeout (use the plain send). Concrete
     /// transports that support per-call timeouts override this.

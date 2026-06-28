@@ -821,7 +821,10 @@ export class GatewayServer {
   // ---------------------------------------------------------------------------
 
   private handleMessage(conn: GatewayConnection, raw: string): void {
+    const parseStartedAt = Date.now();
     const frame = parseFrame(raw);
+    const parseDurationMs = Date.now() - parseStartedAt;
+    const rawBytes = Buffer.byteLength(raw, "utf8");
     if (!frame) {
       conn.sendResponse({
         type: "res",
@@ -859,7 +862,7 @@ export class GatewayServer {
     }
 
     // Dispatch to method handler
-    this.dispatchMethod(conn, frame);
+    this.dispatchMethod(conn, frame, { rawBytes, parseDurationMs });
   }
 
   private handleConnect(conn: GatewayConnection, frame: RequestFrame): void {
@@ -949,7 +952,12 @@ export class GatewayServer {
     });
   }
 
-  private async dispatchMethod(conn: GatewayConnection, frame: RequestFrame): Promise<void> {
+  private async dispatchMethod(
+    conn: GatewayConnection,
+    frame: RequestFrame,
+    ingress?: { rawBytes: number; parseDurationMs: number },
+  ): Promise<void> {
+    const startedAt = Date.now();
     const handler = this.methods.get(frame.method);
     if (!handler) {
       conn.sendResponse({
@@ -957,6 +965,16 @@ export class GatewayServer {
         id: frame.id,
         ok: false,
         error: { code: ErrorCodes.METHOD_NOT_FOUND, message: `Unknown method: ${frame.method}` },
+      });
+      log.info("rpc completed", {
+        connId: conn.connId,
+        platform: conn.clientPlatform || "unknown",
+        sessionKey: conn.sessionKey || undefined,
+        method: frame.method,
+        ok: false,
+        code: ErrorCodes.METHOD_NOT_FOUND,
+        durationMs: Date.now() - startedAt,
+        ...(ingress ? { rawBytes: ingress.rawBytes, parseMs: ingress.parseDurationMs } : {}),
       });
       return;
     }
@@ -969,6 +987,15 @@ export class GatewayServer {
         ok: true,
         payload: result,
       });
+      log.info("rpc completed", {
+        connId: conn.connId,
+        platform: conn.clientPlatform || "unknown",
+        sessionKey: conn.sessionKey || undefined,
+        method: frame.method,
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        ...(ingress ? { rawBytes: ingress.rawBytes, parseMs: ingress.parseDurationMs } : {}),
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code = (err as any)?.code ?? ErrorCodes.INTERNAL_ERROR;
@@ -977,6 +1004,16 @@ export class GatewayServer {
         id: frame.id,
         ok: false,
         error: { code, message },
+      });
+      log.info("rpc completed", {
+        connId: conn.connId,
+        platform: conn.clientPlatform || "unknown",
+        sessionKey: conn.sessionKey || undefined,
+        method: frame.method,
+        ok: false,
+        code,
+        durationMs: Date.now() - startedAt,
+        ...(ingress ? { rawBytes: ingress.rawBytes, parseMs: ingress.parseDurationMs } : {}),
       });
     }
   }

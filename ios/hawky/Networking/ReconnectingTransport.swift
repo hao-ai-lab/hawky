@@ -67,6 +67,12 @@ final class ReconnectingTransport: GatewayTransport, @unchecked Sendable {
         return try await t.send(frame)
     }
 
+    func send(_ frame: RequestFrame, timeout: TimeInterval?) async throws -> ResponseFrame {
+        let t = state.withLock { $0.underlying }
+        guard let t else { throw GatewayTransportError.notConnected }
+        return try await t.send(frame, timeout: timeout)
+    }
+
     func events() -> AsyncStream<EventFrame> { eventStream }
 
     var isConnected: Bool {

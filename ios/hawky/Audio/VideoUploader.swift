@@ -209,29 +209,37 @@ final class KeyframeUploader: ObservableObject {
     private var queue: [PendingKeyframe] = []
     private var drainTask: Task<Void, Never>?
 
+    func reset() {
+        drainTask?.cancel()
+        drainTask = nil
+        transport = nil
+        captureId = ""
+        nextSeq = 0
+        totalEnqueued = 0
+        totalDispatched = 0
+        queue.removeAll()
+        queueDepth = 0
+        droppedCount = 0
+        lastError = nil
+        status = .idle
+    }
+
     func start(transport: GatewayTransport?, captureId: String) {
+        reset()
         self.transport = transport
         self.captureId = captureId
-        self.nextSeq = 0
-        self.totalEnqueued = 0
-        self.totalDispatched = 0
-        self.queue.removeAll()
-        self.queueDepth = 0
-        self.droppedCount = 0
-        self.lastError = nil
 
         status = (transport?.isConnected == true)
             ? .uploading(sent: 0, total: 0)
             : .localOnly
 
-        drainTask?.cancel()
         drainTask = Task { [weak self] in
             await self?.drainLoop()
         }
     }
 
     func ingest(jpegBytes: Data, capturedAtNs: UInt64) {
-        guard !captureId.isEmpty else { return }
+        guard !captureId.isEmpty, transport != nil else { return }
         let frame = PendingKeyframe(seq: nextSeq, bytes: jpegBytes, capturedAtNs: capturedAtNs)
         nextSeq += 1
         enqueue(frame)

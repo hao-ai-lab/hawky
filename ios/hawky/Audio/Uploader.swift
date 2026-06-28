@@ -52,31 +52,39 @@ final class Uploader: ObservableObject {
     private var accumulatorSampleRate: Double = 48_000
     private var drainTask: Task<Void, Never>?
 
+    func reset() {
+        drainTask?.cancel()
+        drainTask = nil
+        transport = nil
+        mediaId = ""
+        nextSegmentIndex = 0
+        totalEnqueued = 0
+        totalDispatched = 0
+        queue.removeAll()
+        accumulator = Data()
+        accumulatorStartNs = 0
+        accumulatorSampleRate = 48_000
+        lastError = nil
+        status = .idle
+    }
+
     func start(transport: GatewayTransport?, mediaId: String = UUID().uuidString) {
+        reset()
         self.transport = transport
         self.mediaId = mediaId
         print("[Uploader] start mediaId='\(mediaId)' (len=\(mediaId.count))")
-        self.nextSegmentIndex = 0
-        self.totalEnqueued = 0
-        self.totalDispatched = 0
-        self.queue.removeAll()
-        self.accumulator = Data()
-        self.accumulatorStartNs = 0
-        self.accumulatorSampleRate = 48_000
-        self.lastError = nil
 
         status = (transport?.isConnected == true)
             ? .uploading(sent: 0, total: 0)
             : .localOnly
 
-        drainTask?.cancel()
         drainTask = Task { [weak self] in
             await self?.drainLoop()
         }
     }
 
     func ingest(chunk: AudioChunk, capturedAtNs: UInt64) {
-        guard !mediaId.isEmpty else { return }
+        guard !mediaId.isEmpty, transport != nil else { return }
         if accumulator.isEmpty {
             accumulatorStartNs = capturedAtNs
             accumulatorSampleRate = chunk.sampleRate

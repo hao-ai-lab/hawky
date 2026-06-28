@@ -27,6 +27,46 @@ import Testing
     }
 }
 
+@Suite struct LiveRealtimeFastPathTests {
+    @Test func openAIRealtimeDefersLiveUploadAtRuntime() {
+        var config = LiveSessionConfig()
+        config.provider = .openAIRealtime
+        config.mediaPersistenceMode = .liveUpload
+
+        let result = LiveSessionStore.realtimeFastPathConfig(config)
+
+        #expect(result.config.mediaPersistenceMode == .deferredUpload)
+        #expect(result.deferredLiveUpload)
+        #expect(config.mediaPersistenceMode == .liveUpload)
+    }
+
+    @Test func openAIRealtimeLeavesLocalAndOffModesUnchanged() {
+        var config = LiveSessionConfig()
+        config.provider = .openAIRealtime
+
+        config.mediaPersistenceMode = .local
+        var result = LiveSessionStore.realtimeFastPathConfig(config)
+        #expect(result.config.mediaPersistenceMode == .local)
+        #expect(!result.deferredLiveUpload)
+
+        config.mediaPersistenceMode = .off
+        result = LiveSessionStore.realtimeFastPathConfig(config)
+        #expect(result.config.mediaPersistenceMode == .off)
+        #expect(!result.deferredLiveUpload)
+    }
+
+    @Test func nonRealtimeProviderKeepsLiveUploadMode() {
+        var config = LiveSessionConfig()
+        config.provider = .geminiLive
+        config.mediaPersistenceMode = .liveUpload
+
+        let result = LiveSessionStore.realtimeFastPathConfig(config)
+
+        #expect(result.config.mediaPersistenceMode == .liveUpload)
+        #expect(!result.deferredLiveUpload)
+    }
+}
+
 @Suite struct LiveVoiceprintBridgeContractTests {
     @Test func realtimeEventParamsUseGatewayContractKeys() throws {
         let event = LiveVoiceprintRealtimeEvent(

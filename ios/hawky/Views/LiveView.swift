@@ -943,7 +943,19 @@ struct LiveView: View {
             ) {
                 // start() is the single entry: it preflights `startBlockReason`
                 // and raises the alert itself, so the button just calls it.
-                Task { await store.start(recordingTransport: container.transport) }
+                Task {
+                    await store.start(
+                        recordingTransport: container.transport,
+                        recordingTransportProvider: {
+                            do {
+                                try await container.ensureConnected()
+                            } catch {
+                                NSLog("[LiveView] deferred media upload transport unavailable: \(error)")
+                            }
+                            return container.transport
+                        }
+                    )
+                }
             }
             .accessibilityLabel("Start live session")
             .accessibilityIdentifier("live.start")

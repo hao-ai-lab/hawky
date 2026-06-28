@@ -256,6 +256,7 @@ final class LiveSessionStore {
     /// The recording transport from the last start(), reused when auto-recovery
     /// restarts the session (scene-phase recovery has no `container` to read it).
     @ObservationIgnored private var lastRecordingTransport: GatewayTransport?
+    @ObservationIgnored private var lastRecordingTransportProvider: GatewayTransportResolver?
     private static let interruptedRecoveryWindow: TimeInterval = 180
     private var audioSampleRecorder: LiveAudioSampleRecorder?
     private var rawAudioTrackSegmentStartedAt: Date?
@@ -1080,6 +1081,18 @@ final class LiveSessionStore {
         persist()
     }
 
+    nonisolated static func realtimeFastPathConfig(
+        _ config: LiveSessionConfig
+    ) -> (config: LiveSessionConfig, deferredLiveUpload: Bool) {
+        var effectiveConfig = config
+        guard effectiveConfig.provider == .openAIRealtime,
+              effectiveConfig.mediaPersistenceMode == .liveUpload else {
+            return (effectiveConfig, false)
+        }
+        effectiveConfig.mediaPersistenceMode = .deferredUpload
+        return (effectiveConfig, true)
+    }
+
     func updateTurnDetectionMode(_ mode: LiveTurnDetectionMode) {
         config.turnDetectionMode = mode
         persist()
@@ -1521,12 +1534,16 @@ final class LiveSessionStore {
         persistSessions()
     }
 
-    func start(recordingTransport: GatewayTransport? = nil) async {
+    func start(
+        recordingTransport: GatewayTransport? = nil,
+        recordingTransportProvider: GatewayTransportResolver? = nil
+    ) async {
         guard !phase.isActive else { return }
         // Remember the transport so auto-recovery (scene-phase, no container) can
         // restart with the same recording target; a fresh start cancels any
         // pending interruption recovery. (#673)
         lastRecordingTransport = recordingTransport
+        lastRecordingTransportProvider = recordingTransportProvider
         cancelInterruptedRecovery()
         // Blocked preconditions surface as the centered alert (general channel),
         // not a `.failed` banner — the session never entered a failed state, it
@@ -1566,6 +1583,9 @@ final class LiveSessionStore {
             effectiveConfig.openingBehavior = .silent
             refreshDirectOpenAIAPIKeyStatus()
         }
+        let realtimeFastPath = Self.realtimeFastPathConfig(effectiveConfig)
+        effectiveConfig = realtimeFastPath.config
+        let realtimeFastPathDeferredLiveUpload = realtimeFastPath.deferredLiveUpload
         effectiveConfig.bridgeAvailability = effectiveConfig.gatewayBridgeEnabled ? .available : .disabled
         phase = .connecting
         bridgeStatus = .idle
@@ -1608,6 +1628,12 @@ final class LiveSessionStore {
         resetOutputAudioDiagnosticsTotals()
         append("Connecting \(effectiveConfig.provider.label)")
         appendSystemMessage("Connecting \(effectiveConfig.provider.label)")
+        if realtimeFastPathDeferredLiveUpload {
+            appendSystemMessage(
+                "Realtime fast path: live media upload will run after stop",
+                detail: "Save + upload live is deferred during OpenAI Realtime sessions to keep voice response latency stable."
+            )
+        }
         recordStartTiming("prepare", since: prepareStartedAt)
 
         if effectiveConfig.gatewayBridgeEnabled {
@@ -1740,7 +1766,11 @@ final class LiveSessionStore {
         do {
             // Recording mic must start before connect() grabs the audio device —
             // two voice-processing engines fighting for the mic crash CoreAudio.
-            await startRecordingIfNeeded(transport: recordingTransport, config: effectiveConfig)
+            await startRecordingIfNeeded(
+                transport: recordingTransport,
+                transportProvider: recordingTransportProvider,
+                config: effectiveConfig
+            )
             let connectStartedAt = Date()
             try await nextProvider.connect(config: effectiveConfig)
             recordStartTiming("provider connect", since: connectStartedAt)
@@ -2191,26 +2221,51 @@ final class LiveSessionStore {
                 return
             }
             let cfg = liveConfig
-            await startRecording(transport: transport, deferredUploadTransport: nil, config: cfg)
+            await startRecording(
+                transport: transport,
+                deferredUploadTransport: nil,
+                deferredUploadTransportProvider: nil,
+                config: cfg
+            )
         }
     }
 
-    private func startRecordingIfNeeded(transport: GatewayTransport?, config: LiveSessionConfig) async {
+    private func startRecordingIfNeeded(
+        transport: GatewayTransport?,
+        transportProvider: GatewayTransportResolver?,
+        config: LiveSessionConfig
+    ) async {
         switch config.mediaPersistenceMode {
         case .off:
             break
         case .local:
-            await startRecording(transport: nil, deferredUploadTransport: nil, config: config)
+            await startRecording(
+                transport: nil,
+                deferredUploadTransport: nil,
+                deferredUploadTransportProvider: nil,
+                config: config
+            )
         case .liveUpload:
-            await startRecording(transport: transport, deferredUploadTransport: nil, config: config)
+            await startRecording(
+                transport: transport,
+                deferredUploadTransport: nil,
+                deferredUploadTransportProvider: nil,
+                config: config
+            )
         case .deferredUpload:
-            await startRecording(transport: nil, deferredUploadTransport: transport, config: config)
+            await startRecording(
+                transport: nil,
+                deferredUploadTransport: transport,
+                deferredUploadTransportProvider: transportProvider,
+                config: config
+            )
         }
     }
 
     private func startRecording(
         transport: GatewayTransport?,
         deferredUploadTransport: GatewayTransport?,
+        deferredUploadTransportProvider: GatewayTransportResolver?,
         config: LiveSessionConfig
     ) async {
         guard !isRecording else { return }
@@ -2225,6 +2280,7 @@ final class LiveSessionStore {
             let started = await startParallelMicRecording(
                 transport: transport,
                 deferredUploadTransport: deferredUploadTransport,
+                deferredUploadTransportProvider: deferredUploadTransportProvider,
                 hasVideo: hasVideo,
                 source: source
             )
@@ -2234,6 +2290,7 @@ final class LiveSessionStore {
             recordingSink.start(
                 transport: transport,
                 deferredUploadTransport: deferredUploadTransport,
+                deferredUploadTransportProvider: deferredUploadTransportProvider,
                 hasVideo: hasVideo,
                 source: source,
                 audioSampleRate: LiveRecordingSink.defaultSampleRate
@@ -2262,6 +2319,7 @@ final class LiveSessionStore {
     private func startParallelMicRecording(
         transport: GatewayTransport?,
         deferredUploadTransport: GatewayTransport?,
+        deferredUploadTransportProvider: GatewayTransportResolver?,
         hasVideo: Bool,
         source: RecordingManifest.VideoSource
     ) async -> Bool {
@@ -2288,6 +2346,7 @@ final class LiveSessionStore {
                     self.recordingSink.start(
                         transport: transport,
                         deferredUploadTransport: deferredUploadTransport,
+                        deferredUploadTransportProvider: deferredUploadTransportProvider,
                         hasVideo: hasVideo,
                         source: source,
                         audioSampleRate: chunk.sampleRate
@@ -3098,7 +3157,10 @@ final class LiveSessionStore {
         }
         guard phase == .idle else { return }
         appendSystemMessage("Reconnecting Live after interruption")
-        await start(recordingTransport: lastRecordingTransport)
+        await start(
+            recordingTransport: lastRecordingTransport,
+            recordingTransportProvider: lastRecordingTransportProvider
+        )
     }
 
     private func recordAudioRouteChange(_ notification: Notification) {
