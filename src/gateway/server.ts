@@ -27,6 +27,7 @@ import {
   mintOpenAIRealtimeClientSecret,
   type LiveRealtimeClientSecretParams,
 } from "./live-realtime-broker.js";
+import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -132,6 +133,12 @@ export class GatewayServer {
         }
 
         const url = new URL(req.url);
+
+        // Internal provider gateway — used by per-user gateway processes so
+        // they never need raw OpenAI/Anthropic provider keys in their env.
+        if (isProviderGatewayPath(url.pathname)) {
+          return handleProviderGatewayRequest(req, url);
+        }
 
         // Health endpoints — always unauthenticated (needed for probes/monitoring)
         if (url.pathname === "/health" || url.pathname === "/healthz") {
