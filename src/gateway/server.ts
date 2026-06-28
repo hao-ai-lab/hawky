@@ -28,6 +28,7 @@ import {
   type LiveRealtimeClientSecretParams,
 } from "./live-realtime-broker.js";
 import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
+import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -592,8 +593,14 @@ export class GatewayServer {
       if (action === "approve") {
         const body = await readFormOrJson(req);
         const role = body.role === "admin" ? "admin" : "user";
-        this.appAuth.approveUser(admin, userId, role);
-        return redirect("/admin?message=User%20approved");
+        const approved = this.appAuth.approveUser(admin, userId, role);
+        const provision = await provisionWorkspaceForUser({ user: approved, role, admin });
+        const message = provision.ok
+          ? provision.skipped
+            ? "User approved"
+            : "User approved and workspace provisioned"
+          : `User approved, but workspace provisioning failed: ${provision.message}`;
+        return redirect(`/admin?message=${encodeURIComponent(message)}`);
       }
       this.appAuth.disableUser(admin, userId);
       return redirect("/admin?message=User%20disabled");
