@@ -448,9 +448,9 @@ actor LiveGatewayBridge {
     // MARK: - Cocktail Party Mode (#627): shared person contract over DeepFace
 
     /// Identify a person from a base64 face crop via the gateway `person.*`
-    /// contract. Returns the matched person or nil (no match / offline / service
-    /// down — the caller degrades gracefully).
-    func identifyFace(imageBase64: String, sessionKey: String) async -> LivePerson? {
+    /// contract. Distinguishes a plain miss from a suppressed/rejected candidate so
+    /// the recognizer does not re-enroll a face the user explicitly rejected.
+    func identifyFaceResult(imageBase64: String, sessionKey: String) async -> FaceIdentifyResult {
         let payload = await invokeMethod(
             "person.identify_current_frame",
             params: ["image_base64": .string(imageBase64), "session_key": .string(sessionKey)],
@@ -459,11 +459,38 @@ actor LiveGatewayBridge {
         )
         guard case let .object(root)? = payload,
               case let .bool(found)? = root["found"]
-        else { return nil }
+        else { return .noMatch }
         if found {
-            return LivePerson(metadata: root["person"])
+            guard let person = LivePerson(metadata: root["person"]) else { return .noMatch }
+            return .person(person)
         }
-        return LivePerson(candidate: root["candidate"])
+        let reason: String?
+        if case let .string(value)? = root["reason"] { reason = value } else { reason = nil }
+        let candidateID: String?
+        if case let .string(value)? = root["candidate_id"] { candidateID = value } else { candidateID = nil }
+        let suppressed: Bool
+        if case let .bool(value)? = root["suppressed"] {
+            suppressed = value
+        } else if case let .bool(value)? = root["no_enroll"] {
+            suppressed = value
+        } else {
+            suppressed = reason == "candidate_rejected"
+        }
+        if suppressed {
+            return .suppressed(candidateID: candidateID, reason: reason)
+        }
+        if let candidate = LivePerson(candidate: root["candidate"]) {
+            return .person(candidate)
+        }
+        return .noMatch
+    }
+
+    /// Compatibility helper for call sites that only need a matched person/candidate.
+    func identifyFace(imageBase64: String, sessionKey: String) async -> LivePerson? {
+        if case let .person(person) = await identifyFaceResult(imageBase64: imageBase64, sessionKey: sessionKey) {
+            return person
+        }
+        return nil
     }
 
     /// Enroll a face. Named new-person writes use the gateway `person.*` contract.
@@ -506,6 +533,51 @@ actor LiveGatewayBridge {
         )
         guard case let .object(root)? = payload else { return nil }
         return LivePerson(metadata: root["person"])
+    }
+
+    /// Confirm a provisional identity candidate after the user explicitly names it.
+    @discardableResult
+    func confirmIdentityCandidate(candidateId: String, name: String, personId: String?, reason: String?, sessionKey: String) async -> LivePerson? {
+        var params: [String: JSONValue] = [
+            "candidate_id": .string(candidateId),
+            "name": .string(name),
+            "session_key": .string(sessionKey),
+        ]
+        if let personId, !personId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["person_id"] = .string(personId)
+        }
+        if let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["reason"] = .string(reason)
+        }
+        let payload = await invokeMethod(
+            "person.confirm_candidate",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: 15
+        )
+        guard case let .object(root)? = payload else { return nil }
+        return LivePerson(metadata: root["person"])
+    }
+
+    /// Reject a provisional identity candidate so future list/identify flows can suppress it.
+    @discardableResult
+    func rejectIdentityCandidate(candidateId: String, reason: String?, sessionKey: String) async -> Bool {
+        var params: [String: JSONValue] = [
+            "candidate_id": .string(candidateId),
+            "session_key": .string(sessionKey),
+        ]
+        if let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["reason"] = .string(reason)
+        }
+        let payload = await invokeMethod(
+            "person.reject_candidate",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: 15
+        )
+        guard case let .object(root)? = payload else { return false }
+        if case let .bool(ok)? = root["ok"] { return ok }
+        return root["candidate"] != nil
     }
 
     /// List everyone in the face database.

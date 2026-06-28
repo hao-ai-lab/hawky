@@ -141,14 +141,13 @@ struct LiveToolContext {
     var cocktailPartyActive: Bool = false
     /// Cocktail Party Mode (#627): identify whoever is on the camera RIGHT NOW.
     /// Set by LiveSessionStore; crops the latest frame + calls DeepFace identify.
-    /// Returns the matched person, or nil (no face / no match / mode off). Lets the
-    /// model answer "who is this?" on demand instead of only via background recall.
-    var identifyOnCamera: (() async -> LivePerson?)?
+    /// Returns the matched person, a suppressed candidate, or no match. Lets the
+    /// model answer "who is this?" without treating rejected faces as new people.
+    var identifyOnCamera: (() async -> FaceIdentifyResult)?
     /// Cocktail Party Mode (#627): resolve the person on camera for a profile write —
-    /// identify them, or enroll the current frame (with the given name) if new.
-    /// Returns the person (with an id) or nil if no usable face. Lets the model save
-    /// "this is X" without already having an id.
-    var resolveCameraPerson: ((_ name: String?) async -> LivePerson?)?
+    /// identify them, enroll the current frame (with the given name) if new, or
+    /// preserve a suppressed candidate so stale ids cannot be used for writes.
+    var resolveCameraPerson: ((_ name: String?) async -> FaceIdentifyResult)?
 }
 
 struct LiveToolRegistry {
@@ -185,6 +184,8 @@ struct LiveToolRegistry {
         ListPeopleTool(),
         RecallPersonTool(),
         UpdatePersonProfileTool(),
+        ConfirmIdentityCandidateTool(),
+        RejectIdentityCandidateTool(),
         MemorySearchTool(),
         MemoryAppendTool(),
         ToolboxListToolsTool(),
@@ -501,7 +502,17 @@ private enum PeopleToolSupport {
     }
 
     static func dict(_ p: LivePerson) -> [String: Any] {
-        ["id": p.id, "name": p.name, "facts": p.facts, "lastRecap": p.lastRecap ?? ""]
+        var result: [String: Any] = [
+            "id": p.id,
+            "name": p.name,
+            "facts": p.facts,
+            "lastRecap": p.lastRecap ?? "",
+        ]
+        if let candidateID = p.candidateID {
+            result["candidate_id"] = candidateID
+            result["is_candidate"] = true
+        }
+        return result
     }
 }
 
@@ -528,8 +539,33 @@ private struct IdentifyPersonTool: LiveTool {
         guard context.cocktailPartyActive, let identify = context.identifyOnCamera else {
             return ["ok": false, "error": "Cocktail Party Mode is off — face recognition isn't running."]
         }
-        guard let person = await identify() else {
+        let result = await identify()
+        guard case let .person(person) = result else {
+            if case let .suppressed(candidateID, reason) = result {
+                var response: [String: Any] = [
+                    "ok": true,
+                    "found": false,
+                    "suppressed": true,
+                    "no_enroll": true,
+                    "reason": reason ?? "candidate_rejected",
+                    "message": "This face matches an identity candidate that was rejected or suppressed. Do not ask to remember or enroll it.",
+                ]
+                if let candidateID, !candidateID.isEmpty {
+                    response["candidate_id"] = candidateID
+                }
+                return response
+            }
             return ["ok": true, "found": false, "message": "No one on camera matches a person you've met. They may be new — ask their name to remember them."]
+        }
+        let personRecord = PeopleToolSupport.dict(person)
+        if let candidateID = person.candidateID {
+            return [
+                "ok": true,
+                "found": false,
+                "candidate_id": candidateID,
+                "candidate": personRecord,
+                "message": "This face matches an unconfirmed identity candidate. If the user verifies their name, call confirm_identity_candidate with candidate_id \(candidateID).",
+            ]
         }
         // Build an explicit "say this" instruction so the model relays the profile +
         // recap, not just the name. Phrase the recap in SECOND person — "last time you
@@ -547,7 +583,7 @@ private struct IdentifyPersonTool: LiveTool {
         return [
             "ok": true,
             "found": true,
-            "person": PeopleToolSupport.dict(person),
+            "person": personRecord,
             "say_to_user": instruction,
         ]
     }
@@ -575,7 +611,11 @@ private struct ListPeopleTool: LiveTool {
             return ["ok": false, "error": "Cocktail Party Mode is off."]
         }
         let people = await bridge.listPeople(sessionKey: key)
-        return ["ok": true, "count": people.count, "people": people.map(PeopleToolSupport.dict)]
+        let records = people.map(PeopleToolSupport.dict)
+        let candidates = records.filter { $0["candidate_id"] != nil }
+        var result: [String: Any] = ["ok": true, "count": people.count, "people": records]
+        if !candidates.isEmpty { result["candidates"] = candidates }
+        return result
     }
 }
 
@@ -657,12 +697,33 @@ private struct UpdatePersonProfileTool: LiveTool {
         // second, different person becomes a SEPARATE profile.
         var id = suppliedID
         if let resolve = context.resolveCameraPerson {
-            if let person = await resolve(name?.isEmpty == false ? name : nil) {
+            switch await resolve(name?.isEmpty == false ? name : nil) {
+            case let .person(person):
+                if let candidateID = person.candidateID {
+                    return [
+                        "ok": false,
+                        "candidate_id": candidateID,
+                        "error": "This face matches an unconfirmed identity candidate. Use confirm_identity_candidate after the user verifies the name.",
+                    ]
+                }
                 id = person.id
-            } else if id.isEmpty {
+            case let .suppressed(candidateID, reason):
+                var response: [String: Any] = [
+                    "ok": false,
+                    "suppressed": true,
+                    "no_enroll": true,
+                    "reason": reason ?? "candidate_rejected",
+                    "error": "This face matches a rejected or suppressed identity candidate and cannot be updated or enrolled.",
+                ]
+                if let candidateID, !candidateID.isEmpty {
+                    response["candidate_id"] = candidateID
+                }
+                return response
+            case .noMatch:
+                if !id.isEmpty { break }
                 return ["ok": false, "error": "No face on camera to attach this to. Point the camera at the person and try again."]
             }
-            // else: no live face but the model gave an id → fall back to that id.
+            // With no live match, a model-supplied id can still target an existing profile.
         } else if id.isEmpty {
             return ["ok": false, "error": "Missing person id and no camera available."]
         }
@@ -673,6 +734,100 @@ private struct UpdatePersonProfileTool: LiveTool {
     }
 }
 
+/// Confirm an unreviewed identity candidate after the user has explicitly said
+/// who it is. This moves a legacy Unknown face into a named person profile.
+private struct ConfirmIdentityCandidateTool: LiveTool {
+    let name = "confirm_identity_candidate"
+    var definition: [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": "Confirm an unconfirmed identity candidate only after the user explicitly verifies who it is. Use the candidate_id returned by identify_person/list_people and the verified name. This promotes a legacy Unknown face into a named person profile.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "candidate_id": ["type": "string", "description": "The identity candidate id to confirm."],
+                    "name": ["type": "string", "description": "The verified person's name."],
+                    "person_id": ["type": "string", "description": "Optional existing person id. Current backend cannot merge into a different existing profile yet."],
+                    "reason": ["type": "string", "description": "Optional short reason for audit/debugging."],
+                ],
+                "required": ["candidate_id", "name"],
+                "additionalProperties": false,
+            ],
+        ]
+    }
+    var metadata: LiveToolMetadata {
+        LiveToolMetadata(category: .localContext, latency: .fast, durability: .durable, risk: .medium, visibility: .model)
+    }
+    func isAvailable(config: LiveSessionConfig) -> Bool {
+        config.bridgeToolsAvailable && config.cocktailPartyEnabled
+    }
+    func execute(arguments: [String: Any], context: LiveToolContext) async throws -> [String: Any] {
+        let candidateID = (arguments["candidate_id"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (arguments["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let personID = (arguments["person_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = (arguments["reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidateID.isEmpty else { return ["ok": false, "error": "Missing candidate_id."] }
+        guard !name.isEmpty else { return ["ok": false, "error": "Missing name."] }
+        guard let (bridge, key) = PeopleToolSupport.bridgeAndKey(context) else {
+            return ["ok": false, "error": "Cocktail Party Mode is off."]
+        }
+
+        let person = await bridge.confirmIdentityCandidate(
+            candidateId: candidateID,
+            name: name,
+            personId: personID?.isEmpty == false ? personID : nil,
+            reason: reason?.isEmpty == false ? reason : nil,
+            sessionKey: key
+        )
+        guard let person else { return ["ok": false, "error": "Could not confirm candidate."] }
+        return ["ok": true, "candidate_id": candidateID, "person": PeopleToolSupport.dict(person)]
+    }
+}
+
+/// Reject an unreviewed identity candidate so it does not keep surfacing as a
+/// new person to learn.
+private struct RejectIdentityCandidateTool: LiveTool {
+    let name = "reject_identity_candidate"
+    var definition: [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": "Reject an unconfirmed identity candidate when the user says it is wrong or should not be remembered as a person.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "candidate_id": ["type": "string", "description": "The identity candidate id to reject."],
+                    "reason": ["type": "string", "description": "Optional short reason for audit/debugging."],
+                ],
+                "required": ["candidate_id"],
+                "additionalProperties": false,
+            ],
+        ]
+    }
+    var metadata: LiveToolMetadata {
+        LiveToolMetadata(category: .localContext, latency: .fast, durability: .durable, risk: .medium, visibility: .model)
+    }
+    func isAvailable(config: LiveSessionConfig) -> Bool {
+        config.bridgeToolsAvailable && config.cocktailPartyEnabled
+    }
+    func execute(arguments: [String: Any], context: LiveToolContext) async throws -> [String: Any] {
+        let candidateID = (arguments["candidate_id"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = (arguments["reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidateID.isEmpty else { return ["ok": false, "error": "Missing candidate_id."] }
+        guard let (bridge, key) = PeopleToolSupport.bridgeAndKey(context) else {
+            return ["ok": false, "error": "Cocktail Party Mode is off."]
+        }
+
+        let ok = await bridge.rejectIdentityCandidate(
+            candidateId: candidateID,
+            reason: reason?.isEmpty == false ? reason : nil,
+            sessionKey: key
+        )
+        guard ok else { return ["ok": false, "error": "Could not reject candidate."] }
+        return ["ok": true, "candidate_id": candidateID]
+    }
+}
 
 private struct NodeCommandLiveTool: LiveTool {
     let name: String

@@ -373,9 +373,9 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     /// Set by LiveSessionStore; true while Cocktail Party Mode is active (gates person tools).
     var cocktailPartyActiveHook: (@MainActor () -> Bool)?
     /// Set by LiveSessionStore; identifies whoever is on camera now (identify_person tool).
-    var identifyOnCameraHook: (@MainActor () async -> LivePerson?)?
+    var identifyOnCameraHook: (@MainActor () async -> FaceIdentifyResult)?
     /// Set by LiveSessionStore; resolve+enroll the camera person for a profile write.
-    var resolveCameraPersonHook: (@MainActor (String?) async -> LivePerson?)?
+    var resolveCameraPersonHook: (@MainActor (String?) async -> FaceIdentifyResult)?
 
     /// Build the tool-execution context from the provider's current config + hooks.
     /// MainActor-isolated because the cocktail-party hook runs on the main actor.
@@ -1393,9 +1393,9 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
     /// Hook set by LiveSessionStore; true while Cocktail Party Mode is active.
     var cocktailPartyActiveHook: (@MainActor () -> Bool)?
     /// Hook set by LiveSessionStore; identifies whoever is on camera now.
-    var identifyOnCameraHook: (@MainActor () async -> LivePerson?)?
+    var identifyOnCameraHook: (@MainActor () async -> FaceIdentifyResult)?
     /// Hook set by LiveSessionStore; resolve+enroll the camera person for a write.
-    var resolveCameraPersonHook: (@MainActor (String?) async -> LivePerson?)?
+    var resolveCameraPersonHook: (@MainActor (String?) async -> FaceIdentifyResult)?
 
     /// Build the tool-execution context from the provider's current config + hooks.
     private func makeLiveToolContext() -> LiveToolContext {

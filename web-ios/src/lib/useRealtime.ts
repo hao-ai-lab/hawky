@@ -83,12 +83,15 @@ const BACKEND_TOOL = {
   },
 };
 
-const WEB_PERSON_TOOL_NAMES = new Set<PersonModelToolName>([
+export const WEB_PERSON_TOOL_NAME_LIST = [
   "identify_person",
   "list_people",
   "recall_person",
   "update_person_profile",
-]);
+  "confirm_identity_candidate",
+  "reject_identity_candidate",
+] as const satisfies readonly PersonModelToolName[];
+const WEB_PERSON_TOOL_NAMES = new Set<PersonModelToolName>(WEB_PERSON_TOOL_NAME_LIST);
 const WEB_PERSON_TOOLS = PERSON_MODEL_TOOLS.filter((tool) => WEB_PERSON_TOOL_NAMES.has(tool.name));
 
 // Share the current camera frame to Slack. The browser captures the live video
@@ -186,6 +189,8 @@ function toolLabel(name: string, args: Record<string, any>): string {
   if (name === "list_people") return "List people";
   if (name === "recall_person") return `Recall ${typeof args.name === "string" ? args.name : "person"}`;
   if (name === "update_person_profile") return "Update person";
+  if (name === "confirm_identity_candidate") return "Confirm person";
+  if (name === "reject_identity_candidate") return "Reject person";
   return name;
 }
 
@@ -209,6 +214,8 @@ function personToolDetail(name: PersonModelToolName, result: Record<string, any>
     return result.found && result.person?.name ? `Found ${result.person.name}.` : "No matching person.";
   }
   if (name === "update_person_profile") return result.person?.name ? `Updated ${result.person.name}.` : "Updated person.";
+  if (name === "confirm_identity_candidate") return result.person?.name ? `Confirmed ${result.person.name}.` : "Confirmed person.";
+  if (name === "reject_identity_candidate") return "Rejected candidate.";
   return result.ok === false && typeof result.error === "string" ? result.error : "ok";
 }
 
@@ -1005,7 +1012,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     setCocktailParty((prev) => {
       const next = !prev;
       const extra = next
-        ? "\n\nCOCKTAIL PARTY MODE: People may appear on camera. Stay silent about the camera feed unless the user asks or introduces someone. If the user asks who someone is, call identify_person, then answer once with the matched name plus relevant facts/recaps. If someone new introduces themselves, call update_person_profile to remember their name and add stated facts or a one-line recap. Use list_people or recall_person when the user asks what you know about people. Do not proactively greet known people just because a face appears."
+        ? "\n\nCOCKTAIL PARTY MODE: People may appear on camera. Stay silent about the camera feed unless the user asks or introduces someone. If the user asks who someone is, call identify_person, then answer once with the matched name plus relevant facts/recaps. If identify_person returns an identity candidate and the user explicitly verifies the person's name, call confirm_identity_candidate with that candidate_id and name; if the user says it is wrong or should not be remembered, call reject_identity_candidate. If someone new introduces themselves and you have a person id, call update_person_profile to remember their name and add stated facts or a one-line recap. Use list_people or recall_person when the user asks what you know about people. Do not proactively greet known people just because a face appears."
         : "";
       sendRealtime({
         type: "session.update",

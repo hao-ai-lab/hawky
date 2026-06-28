@@ -395,6 +395,8 @@ import Foundation
             "list_people",
             "recall_person",
             "update_person_profile",
+            "confirm_identity_candidate",
+            "reject_identity_candidate",
         ]
 
         let availableNames = Set(LiveToolRegistry.default.definitions(config: config).compactMap { $0["name"] as? String })

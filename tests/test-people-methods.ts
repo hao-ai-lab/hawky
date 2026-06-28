@@ -1,10 +1,11 @@
 // =============================================================================
 // people.list Tests — Issue #681
 //
-// The web demo's People view reads the DeepFace person DB via the people.list
-// RPC (gateway/people-methods.ts → fetchPeople). These tests prove that
+// The web demo's People view reads the person layer via the legacy people.list
+// RPC (gateway/people-methods.ts -> fetchPeople). These tests prove that
 // fetchPeople:
-//   - maps DeepFace person records to the lean wire DTO and strips embeddings;
+//   - maps person records to the lean wire DTO and strips embeddings;
+//   - filters legacy Unknown candidates through PersonService;
 //   - degrades gracefully (available:false, people:[]) when the service is
 //     unreachable or returns a non-200, rather than throwing.
 // =============================================================================
@@ -27,7 +28,7 @@ const RAW_PEOPLE = [
     created_at: "2026-06-16T19:37:53Z",
     last_seen_at: "2026-06-20T05:51:11Z",
   },
-  { id: "p2", name: "", facts: "nope", recaps: [{ at: "x" }] }, // malformed → defaulted (no thumbnail)
+  { id: "p2", name: "", facts: "nope", recaps: [{ at: "x" }] }, // legacy Unknown candidate -> hidden
 ];
 
 /** Stub fetch for the DeepFace /people endpoint. */
@@ -57,7 +58,7 @@ describe("people.list (fetchPeople)", () => {
     const result = await fetchPeople();
     expect(result.ok).toBe(true);
     expect(result.available).toBe(true);
-    expect(result.people).toHaveLength(2);
+    expect(result.people).toHaveLength(1);
 
     const jay = result.people[0];
     expect(jay.name).toBe("Jay");
@@ -69,14 +70,10 @@ describe("people.list (fetchPeople)", () => {
     // Embeddings must never reach the wire DTO.
     expect((jay as Record<string, unknown>).embeddings).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("0.1");
-
-    // Malformed record defaults: blank name → "Unknown", bad facts → [], recap
-    // with no summary dropped, no thumbnail.
-    const p2 = result.people[1];
-    expect(p2.name).toBe("Unknown");
-    expect(p2.facts).toEqual([]);
-    expect(p2.recaps).toEqual([]);
-    expect(p2.thumbnail).toBeUndefined();
+    // Legacy Unknown candidates are filtered by PersonService instead of being
+    // defaulted into visible People rows.
+    expect(JSON.stringify(result)).not.toContain("Unknown");
+    expect(JSON.stringify(result)).not.toContain("nope");
   });
 
   test("degrades to available:false on a non-200 response", async () => {

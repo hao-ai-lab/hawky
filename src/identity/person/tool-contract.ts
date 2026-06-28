@@ -86,7 +86,7 @@ export const PERSON_MODEL_TOOLS: readonly PersonModelToolDefinition[] = [
   {
     type: "function",
     name: "confirm_identity_candidate",
-    description: "Confirm or promote an identity candidate after the user explicitly verifies who it is.",
+    description: "Confirm or promote an identity candidate after the user explicitly verifies who it is. Current implementation requires a name; merging into a different existing person is not available yet.",
     parameters: {
       type: "object",
       properties: {
@@ -94,7 +94,7 @@ export const PERSON_MODEL_TOOLS: readonly PersonModelToolDefinition[] = [
         person_id: { type: "string", description: "Optional existing person id to merge into." },
         name: { type: "string", description: "Name to use when creating a new person profile." },
       },
-      required: ["candidate_id"],
+      required: ["candidate_id", "name"],
       additionalProperties: false,
     },
   },
@@ -154,6 +154,8 @@ export type PersonIdentifyResult =
       candidate?: IdentityCandidate;
       candidate_id?: string;
       reason?: string;
+      suppressed?: boolean;
+      no_enroll?: boolean;
       message?: string;
     };
 
@@ -176,7 +178,7 @@ export interface PersonUpdateProfileResult {
 
 export type PersonCandidateReviewResult =
   | { ok: false; error: string }
-  | { ok: true; candidate: IdentityCandidate };
+  | { ok: true; candidate: IdentityCandidate; person?: PersonToolPerson };
 
 export function personToolForName(name: PersonModelToolName): PersonModelToolDefinition {
   const tool = PERSON_MODEL_TOOLS.find((candidate) => candidate.name === name);

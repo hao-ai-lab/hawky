@@ -7,8 +7,18 @@ import Foundation
 // from the gateway tool's result.metadata.person JSON ({id,name,facts,recaps,…}).
 // =============================================================================
 
+enum FaceIdentifyResult: Equatable {
+    case noMatch
+    case person(LivePerson)
+    case suppressed(candidateID: String?, reason: String?)
+}
+
 struct LivePerson: Equatable, Identifiable {
     let id: String
+    /// Identity candidate id (cand_face_...) when this record represents a
+    /// provisional Unknown candidate. `id` stays the legacy person/profile id so
+    /// existing UI and add-crop flows keep working.
+    var candidateID: String?
     var name: String
     var facts: [String]
     /// Most recent conversation recap, if any (newest summary from `recaps`).
@@ -17,8 +27,9 @@ struct LivePerson: Equatable, Identifiable {
     /// by the /people listing. nil for identify/enroll responses (no thumbnail there).
     var thumbnailBase64: String?
 
-    init(id: String, name: String, facts: [String] = [], lastRecap: String? = nil, thumbnailBase64: String? = nil) {
+    init(id: String, name: String, facts: [String] = [], lastRecap: String? = nil, thumbnailBase64: String? = nil, candidateID: String? = nil) {
         self.id = id
+        self.candidateID = candidateID
         self.name = name
         self.facts = facts
         self.lastRecap = lastRecap
@@ -33,6 +44,7 @@ struct LivePerson: Equatable, Identifiable {
         guard case let .object(obj)? = candidate,
               case let .string(id)? = obj["id"]
         else { return nil }
+        self.candidateID = id
         self.id = Self.legacyProfileID(from: obj) ?? id
         if case let .string(label)? = obj["label"], !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             self.name = label
@@ -50,6 +62,7 @@ struct LivePerson: Equatable, Identifiable {
               case let .string(id)? = obj["id"]
         else { return nil }
         self.id = id
+        self.candidateID = nil
         if case let .string(name)? = obj["name"] { self.name = name } else { self.name = "Unknown" }
         if case let .array(factsArr)? = obj["facts"] {
             self.facts = factsArr.compactMap { if case let .string(s) = $0 { return s } else { return nil } }

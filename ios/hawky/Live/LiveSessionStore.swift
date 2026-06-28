@@ -818,17 +818,35 @@ final class LiveSessionStore {
 
     /// Identify whoever is on the camera now (identify_person tool). Picks the best
     /// recent frame with a face LOCALLY, then does ONE server identify (was up to 6
-    /// sequential gateway round-trips → slow). nil if no face / no match / no mode.
+    /// sequential gateway round-trips → slow). Preserves suppressed candidate
+    /// results so the tool can distinguish rejected faces from genuinely new ones.
+    func identifyLatestFrameResult() async -> FaceIdentifyResult {
+        guard let cocktailParty else { return .noMatch }
+        return await cocktailParty.identifyResult(amongFrames: recentCameraFrames)
+    }
+
+    /// Compatibility helper for call sites that only need a matched person.
     func identifyLatestFrame() async -> LivePerson? {
-        guard let cocktailParty else { return nil }
-        return await cocktailParty.identify(amongFrames: recentCameraFrames)
+        if case let .person(person) = await identifyLatestFrameResult() {
+            return person
+        }
+        return nil
     }
 
     /// Resolve the person on camera for a profile write (update_person_profile with no
-    /// id): best recent frame locally, then ONE server identify/enroll.
+    /// id): best recent frame locally, then ONE server identify/enroll. Preserves
+    /// suppressed candidate results so a rejected face cannot fall back to a stale id.
+    func resolveCameraPersonResult(name: String?) async -> FaceIdentifyResult {
+        guard let cocktailParty else { return .noMatch }
+        return await cocktailParty.resolvePersonResult(amongFrames: recentCameraFrames, name: name)
+    }
+
+    /// Compatibility helper for call sites that only need a matched/enrolled person.
     func resolveCameraPerson(name: String?) async -> LivePerson? {
-        guard let cocktailParty else { return nil }
-        return await cocktailParty.resolvePerson(amongFrames: recentCameraFrames, name: name)
+        if case let .person(person) = await resolveCameraPersonResult(name: name) {
+            return person
+        }
+        return nil
     }
 
     /// A bridge for People-DB ops that works in ANY session state. The face DB is
@@ -1627,8 +1645,12 @@ final class LiveSessionStore {
                 await self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
             }
             rtProvider.cocktailPartyActiveHook = { [weak self] in self?.cocktailPartyActive ?? false }
-            rtProvider.identifyOnCameraHook = { [weak self] in await self?.identifyLatestFrame() }
-            rtProvider.resolveCameraPersonHook = { [weak self] name in await self?.resolveCameraPerson(name: name) }
+            rtProvider.identifyOnCameraHook = { [weak self] in
+                await self?.identifyLatestFrameResult() ?? .noMatch
+            }
+            rtProvider.resolveCameraPersonHook = { [weak self] name in
+                await self?.resolveCameraPersonResult(name: name) ?? .noMatch
+            }
         }
         // Same hooks for the WebRTC (Pipecat) provider — the active realtime path.
         if let rtcProvider = nextProvider as? PipecatOpenAIRealtimeLiveSessionProvider {
@@ -1645,8 +1667,12 @@ final class LiveSessionStore {
                 await self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
             }
             rtcProvider.cocktailPartyActiveHook = { [weak self] in self?.cocktailPartyActive ?? false }
-            rtcProvider.identifyOnCameraHook = { [weak self] in await self?.identifyLatestFrame() }
-            rtcProvider.resolveCameraPersonHook = { [weak self] name in await self?.resolveCameraPerson(name: name) }
+            rtcProvider.identifyOnCameraHook = { [weak self] in
+                await self?.identifyLatestFrameResult() ?? .noMatch
+            }
+            rtcProvider.resolveCameraPersonHook = { [weak self] name in
+                await self?.resolveCameraPersonResult(name: name) ?? .noMatch
+            }
         }
         provider = nextProvider
 

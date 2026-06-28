@@ -23,7 +23,8 @@ final class RealtimeSurfaceExportTests: XCTestCase {
     ///  - gatewayBridgeEnabled + bridgeAvailability=.available → bridgeToolsAvailable,
     ///    which gates the session/memory/intention bridge tools.
     ///  - cocktailPartyEnabled → the person tools (identify_person, list_people,
-    ///    recall_person, update_person_profile) additionally gate on this.
+    ///    recall_person, update_person_profile, confirm_identity_candidate,
+    ///    reject_identity_candidate) additionally gate on this.
     /// The session key is pinned: realtimeBridgeInstructions interpolates it, and a
     /// random UUID would make the fixture non-deterministic (drift-guard false-positive).
     private func fullSurfaceConfig() -> LiveSessionConfig {
@@ -107,7 +108,14 @@ final class RealtimeSurfaceExportTests: XCTestCase {
         for tool in ["session_send_message", "memory_search", "create_intention"] {
             XCTAssertTrue(names.contains(tool), "full surface should include bridge tool \(tool)")
         }
-        for tool in ["identify_person", "list_people", "recall_person", "update_person_profile"] {
+        for tool in [
+            "identify_person",
+            "list_people",
+            "recall_person",
+            "update_person_profile",
+            "confirm_identity_candidate",
+            "reject_identity_candidate",
+        ] {
             XCTAssertTrue(names.contains(tool), "full surface should include person tool \(tool)")
         }
     }
