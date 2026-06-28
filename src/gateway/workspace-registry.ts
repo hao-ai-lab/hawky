@@ -5,7 +5,7 @@ import type { AppAuthUser } from "./app-auth.js";
 export interface WorkspaceRegistryUser {
   slug: string;
   email: string;
-  hostname: string;
+  hostname?: string;
   port?: number;
   linuxUser?: string;
   userId?: string;
@@ -26,12 +26,6 @@ export function findWorkspaceForUser(user: AppAuthUser): WorkspaceRegistryUser |
   } catch {
     return null;
   }
-}
-
-export function workspaceUrlForUser(user: AppAuthUser): string | null {
-  const workspace = findWorkspaceForUser(user);
-  if (!workspace?.hostname) return null;
-  return `https://${workspace.hostname}/`;
 }
 
 export function workspaceLocalTargetForUser(user: AppAuthUser): string | null {

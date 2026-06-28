@@ -64,8 +64,8 @@ describe("login workspace routing", () => {
     const registryPath = join(configDir, "workspaces.json");
     writeFileSync(registryPath, JSON.stringify({
       users: [
-        { slug: "juc049", email: "juc049@ucsd.edu", hostname: "user-juc049.hawky.live", port: workspacePort },
-        { slug: "admin", email: "admin@example.com", hostname: "user-admin.hawky.live", port: workspacePort },
+        { slug: "juc049", email: "juc049@ucsd.edu", port: workspacePort },
+        { slug: "admin", email: "admin@example.com", port: workspacePort },
       ],
     }, null, 2));
 
@@ -144,18 +144,6 @@ describe("login workspace routing", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("x-workspace")).toBe("juc049");
     expect(await res.text()).toBe("workspace:/sessions/today?mode=live");
-  });
-
-  test("workspace-host login stays on the workspace", async () => {
-    const res = await fetch(`http://localhost:${port}/auth/login`, {
-      method: "POST",
-      redirect: "manual",
-      headers: { Host: "user-juc049.hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
-      body: formBody("juc049@ucsd.edu"),
-    });
-
-    expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("/");
   });
 
   test("control login redirects admins to admin dashboard", async () => {
