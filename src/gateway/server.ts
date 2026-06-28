@@ -217,6 +217,8 @@ export class GatewayServer {
             headers: { "Content-Type": "text/html; charset=utf-8" },
           });
         }
+        const workspaceRedirect = self.controlWorkspaceRedirect(req, url);
+        if (workspaceRedirect) return workspaceRedirect;
 
         // Device auth endpoint — issues signed device tokens.
         // For remote access, Cloudflare Access gates this endpoint (email OTP).
@@ -653,6 +655,20 @@ export class GatewayServer {
     if (url.pathname.startsWith("/auth/")) return false;
     if (url.pathname === "/ws") return false;
     return true;
+  }
+
+  private controlWorkspaceRedirect(req: Request, url: URL): Response | null {
+    if (!this.appAuth) return null;
+    if (req.method !== "GET" && req.method !== "HEAD") return null;
+    if (!isControlHost(req.headers.get("Host") ?? "")) return null;
+    if (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/admin")) return null;
+    if (url.pathname === "/ws" || url.pathname.startsWith("/api/")) return null;
+    const user = this.appAuth.userFromRequest(req);
+    if (!user || user.role === "admin") return null;
+    const workspaceUrl = workspaceUrlForUser(user);
+    if (!workspaceUrl) return null;
+    const path = sanitizeReturnUrl(url.pathname + url.search);
+    return redirect(new URL(path, workspaceUrl).toString());
   }
 
   private isAuthorizedHealthRequest(req: Request): boolean {

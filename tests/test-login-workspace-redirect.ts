@@ -84,6 +84,42 @@ describe("login workspace redirects", () => {
     expect(res.headers.get("location")).toBe("https://juc049.hawky.live/");
   });
 
+  test("control host redirects already logged-in users to their workspace", async () => {
+    const login = await fetch(`http://localhost:${port}/auth/login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody("juc049@ucsd.edu"),
+    });
+    const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+
+    const res = await fetch(`http://localhost:${port}/`, {
+      redirect: "manual",
+      headers: { Host: "hawky.live", Cookie: cookie },
+    });
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://juc049.hawky.live/");
+  });
+
+  test("control host preserves the path when redirecting logged-in users", async () => {
+    const login = await fetch(`http://localhost:${port}/auth/login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody("juc049@ucsd.edu"),
+    });
+    const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+
+    const res = await fetch(`http://localhost:${port}/sessions/today?mode=live`, {
+      redirect: "manual",
+      headers: { Host: "hawky.live", Cookie: cookie },
+    });
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://juc049.hawky.live/sessions/today?mode=live");
+  });
+
   test("workspace-host login stays on the workspace", async () => {
     const res = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
