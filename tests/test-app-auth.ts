@@ -154,6 +154,23 @@ describe("AppAuth", () => {
       rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  test("session cookie can be scoped to the parent domain", () => {
+    const previous = process.env.HAWKY_SESSION_COOKIE_DOMAIN;
+    process.env.HAWKY_SESSION_COOKIE_DOMAIN = ".hawky.live";
+    const stateDir = tempState();
+    try {
+      const auth = new AppAuth({ stateDir, allowFirstUserRegistration: true });
+      auth.register("a@example.com", "a long safe password");
+      const login = auth.login("a@example.com", "a long safe password");
+      expect(auth.createSessionCookie(login.token)).toContain("Domain=.hawky.live");
+      expect(auth.clearSessionCookie()).toContain("Domain=.hawky.live");
+    } finally {
+      if (previous === undefined) delete process.env.HAWKY_SESSION_COOKIE_DOMAIN;
+      else process.env.HAWKY_SESSION_COOKIE_DOMAIN = previous;
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("sanitizeReturnUrl", () => {

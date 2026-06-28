@@ -111,6 +111,13 @@ function parseCookies(header: string | null): Record<string, string> {
   return out;
 }
 
+function sessionCookieDomainAttribute(): string[] {
+  const domain = (process.env.HAWKY_SESSION_COOKIE_DOMAIN || "").trim();
+  if (!domain) return [];
+  if (!/^\.?[a-z0-9.-]+$/i.test(domain)) return [];
+  return [`Domain=${domain}`];
+}
+
 function hashPassword(password: string): StoredUser["password"] {
   const salt = randomBytes(16);
   const params = { N: 131072, r: 8, p: 1, keyLen: 64 };
@@ -330,6 +337,7 @@ export class AppAuth {
     return [
       `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
       "Path=/",
+      ...sessionCookieDomainAttribute(),
       "HttpOnly",
       "Secure",
       "SameSite=Lax",
@@ -338,7 +346,15 @@ export class AppAuth {
   }
 
   clearSessionCookie(): string {
-    return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+    return [
+      `${SESSION_COOKIE}=`,
+      "Path=/",
+      ...sessionCookieDomainAttribute(),
+      "HttpOnly",
+      "Secure",
+      "SameSite=Lax",
+      "Max-Age=0",
+    ].join("; ");
   }
 
   loginPage(returnUrl: string, error = ""): string {
