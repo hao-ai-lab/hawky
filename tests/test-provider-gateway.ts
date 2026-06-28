@@ -22,6 +22,9 @@ function clearProviderEnv(): void {
   delete process.env.HAWKY_PROVIDER_GATEWAY_TOKEN;
   delete process.env.HAWKY_ANTHROPIC_BASE_URL;
   delete process.env.HAWKY_API_BASE_URL;
+  delete process.env.HAWKY_PROVIDER_BUDGET_STORE;
+  delete process.env.HAWKY_PROVIDER_DAILY_UNITS;
+  delete process.env.HAWKY_PROVIDER_CANARY_UNITS;
   resetConfig();
   resetRealtimeMintQuotaForTests();
 }
@@ -168,5 +171,44 @@ describe("provider gateway internal endpoints", () => {
     expect(captured.url).toBe("https://api.anthropic.com/v1/messages");
     expect(captured.xApiKey).toBe(ANTHROPIC_KEY);
     expect(captured.authorization).toBeNull();
+  });
+
+  test("canary consumes budget without making an upstream call by default", async () => {
+    process.env.HAWKY_PROVIDER_BUDGET_STORE = join(configDir, "state", "provider-budget.json");
+    process.env.HAWKY_PROVIDER_CANARY_UNITS = "0.25";
+    let upstreamCalls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("api.openai.com") || url.includes("api.anthropic.com")) {
+        upstreamCalls += 1;
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    const res = await fetch(`http://localhost:${port}/internal/provider/canary?provider=openai&subject=test-user`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.live).toBe(false);
+    expect(body.provider_budget.units).toBe(0.25);
+    expect(upstreamCalls).toBe(0);
+  });
+
+  test("canary returns 429 when daily budget is exhausted", async () => {
+    process.env.HAWKY_PROVIDER_BUDGET_STORE = join(configDir, "state", "provider-budget.json");
+    process.env.HAWKY_PROVIDER_DAILY_UNITS = "0.1";
+    process.env.HAWKY_PROVIDER_CANARY_UNITS = "0.2";
+
+    const res = await fetch(`http://localhost:${port}/internal/provider/canary?provider=anthropic&subject=tiny-budget`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(429);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("budget exceeded");
   });
 });

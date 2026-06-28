@@ -359,7 +359,8 @@ export class AppAuth {
     form { display: grid; gap: 12px; }
     label { display: grid; gap: 6px; color: #d7d8d2; font-size: 13px; }
     input { height: 44px; border: 1px solid #30352f; border-radius: 8px; padding: 0 12px; background: #171b18; color: #fff; font: inherit; }
-    button { height: 44px; border: 0; border-radius: 8px; background: #f5f3ee; color: #101310; font-weight: 650; cursor: pointer; }
+    button, .button { height: 44px; border: 0; border-radius: 8px; background: #f5f3ee; color: #101310; font-weight: 650; cursor: pointer; display: grid; place-items: center; text-decoration: none; font: inherit; }
+    .button.secondary { background: #252a26; color: #f5f3ee; border: 1px solid #3a403a; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
     .muted { color: #888d86; font-size: 12px; margin-top: 14px; }
     .error { padding: 10px 12px; border: 1px solid #6f2e2e; border-radius: 8px; background: #301919; color: #ffd8d8; margin-bottom: 14px; }
@@ -374,9 +375,13 @@ export class AppAuth {
       <input type="hidden" name="return_url" value="${escapeHtml(safeReturn)}" />
       <label>Email <input name="email" type="email" autocomplete="email" required /></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
-      <button type="submit">Sign in</button>
+      ${allowRegister ? `
+        <div class="row">
+          <button type="submit">Sign in</button>
+          <a class="button secondary" href="/auth/register?return_url=${encodeURIComponent(safeReturn)}">Request access</a>
+        </div>
+      ` : `<button type="submit">Sign in</button>`}
     </form>
-    ${allowRegister ? `<p class="muted"><a href="/auth/register?return_url=${encodeURIComponent(safeReturn)}">Request access</a></p>` : ""}
     <p class="muted">Registration is ${allowRegister ? "open by admin approval" : "closed"} on this gateway.</p>
   </main>
 </body>
