@@ -30,7 +30,8 @@ protocol LiveSessionProvider: AnyObject {
     func sendAudio(_ chunk: LiveAudioChunk) async throws
     func streamAudio(_ chunk: LiveAudioChunk) async throws
     func commitAudioStream() async throws
-    func sendFrame(_ frame: LiveJPEGFrame) async throws
+    @discardableResult
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool
     func sendText(_ text: String) async throws
     func sendContext(_ text: String, createResponse: Bool) async throws
     /// Replay prior conversation turns (no response triggered) so a reconnected
@@ -170,7 +171,7 @@ final class DisabledLiveSessionProvider: LiveSessionProvider {
         throw LiveSessionProviderError.adapterUnavailable(message)
     }
 
-    func sendFrame(_ frame: LiveJPEGFrame) async throws {
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool {
         throw LiveSessionProviderError.adapterUnavailable(message)
     }
 
@@ -207,7 +208,7 @@ final class AuthFailingLiveSessionProvider: LiveSessionProvider {
     func sendAudio(_ chunk: LiveAudioChunk) async throws {}
     func streamAudio(_ chunk: LiveAudioChunk) async throws {}
     func commitAudioStream() async throws {}
-    func sendFrame(_ frame: LiveJPEGFrame) async throws {}
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool { false }
     func sendText(_ text: String) async throws {}
     func sendContext(_ text: String, createResponse: Bool) async throws {}
     func surfaceIntention(_ intentionId: String?, _ text: String, speak: Bool, whenBusy: SurfaceBusyPolicy, cautious: Bool) async throws {}
@@ -256,8 +257,9 @@ final class MockLiveSessionProvider: LiveSessionProvider {
         continuation?.yield(.text("Mock audio turn committed"))
     }
 
-    func sendFrame(_ frame: LiveJPEGFrame) async throws {
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool {
         continuation?.yield(.frameAccepted(bytes: frame.data.count))
+        return true
     }
 
     func sendText(_ text: String) async throws {
@@ -326,6 +328,19 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     /// explicitly fire response.create when the user finishes a turn — otherwise the
     /// model never replies. Set by setVisualQuietMode.
     private var manualResponseMode = false
+    /// True after the Realtime server reports `response.created` and until it reports
+    /// `response.done` / `response.cancelled` / `response.failed`. This is deliberately
+    /// separate from `botSpeaking`: audio callbacks can stop or be interrupted while the
+    /// server still rejects a new `response.create`.
+    private var realtimeResponseActive = false
+    /// Latest user turn that ended while the server still had an active response. Keep
+    /// this coalesced to one pending `response.create`; otherwise a quick second/third
+    /// utterance creates an active-response error storm.
+    private var pendingManualResponseCreate = false
+    /// True only for a manual `response.create` sent for a user turn and not yet
+    /// acknowledged/rejected by the server. Active-response errors from frames,
+    /// context, or safety warnings must not create conversational retries.
+    private var manualResponseCreateInFlight = false
     /// Safety Check hard-quiet (#648): when true, suppress ALL unprompted model speech
     /// — the first-contact greeting, Hawky bridge asides/intentions, opening prompts.
     /// The ONLY speech allowed is (a) a reply to the user's own speech turn
@@ -347,6 +362,12 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     /// Watchdog so botSpeaking can't get stuck true (which would block all frames):
     /// if onBotStoppedSpeaking never arrives, auto-clear + flush after this long.
     private var floorBusyWatchdog: Task<Void, Never>?
+    /// If the user finishes a turn while assistant audio is still draining, do not wait
+    /// for the long stuck-floor watchdog. Some WebRTC device runs miss
+    /// output_audio_buffer.stopped; this bounded fallback lets the queued user turn
+    /// continue without reverting to immediate response.done draining.
+    private var queuedTurnPlaybackDrainFallback: Task<Void, Never>?
+    private var queuedTurnPlaybackDrainFallbackNs: UInt64 = 350_000_000
     /// #677: true once the server has acked our data-channel `session.update` with a
     /// `session.updated` event — i.e. the persona/tools/VAD/transcription config was
     /// actually applied. Until then the WebRTC media leg can be "connected" while the
@@ -368,6 +389,28 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     var summarizeHook: ((String) async throws -> String)?
     /// Set by LiveSessionStore so scan tools see the latest transcript window.
     var awaitPendingTranscriptAppend: (() async -> Void)?
+    /// Set by LiveSessionStore so a just-finished user turn can attach the
+    /// freshest visual context before the manual `response.create` is sent.
+    var prepareUserTurnResponseHook: (@MainActor () async -> Void)?
+
+    private var responseFloorBusy: Bool {
+        botSpeaking || realtimeResponseActive
+    }
+
+    #if DEBUG
+    var debugRealtimeResponseActive: Bool { realtimeResponseActive }
+    var debugPendingManualResponseCreate: Bool { pendingManualResponseCreate }
+    var debugResponseFloorBusy: Bool { responseFloorBusy }
+    func debugSetManualResponseMode(_ enabled: Bool) {
+        manualResponseMode = enabled
+    }
+    func debugSetManualResponseCreateInFlight(_ enabled: Bool) {
+        manualResponseCreateInFlight = enabled
+    }
+    func debugSetQueuedTurnPlaybackDrainFallbackNs(_ ns: UInt64) {
+        queuedTurnPlaybackDrainFallbackNs = ns
+    }
+    #endif
     /// Set by LiveSessionStore so summarize_silence returns the captured window.
     var silenceSummaryHook: (() async -> String)?
     /// Set by LiveSessionStore; true while Cocktail Party Mode is active (gates person tools).
@@ -423,6 +466,9 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         self.llmHelper = helper
         startupGuardWaitingForFirstBotStop = false
         botSpeaking = false
+        realtimeResponseActive = false
+        pendingManualResponseCreate = false
+        manualResponseCreateInFlight = false
         // Only "Respond only when I talk" needs manual response.create on user-stop.
         // Safety Check does NOT: now that camera frames no longer trigger responses
         // (SDK run_immediately fix), we keep fast server-VAD auto-response for the
@@ -431,6 +477,8 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         manualResponseMode = config.speakOnlyWhenSpokenTo
         floorBusyWatchdog?.cancel()
         floorBusyWatchdog = nil
+        queuedTurnPlaybackDrainFallback?.cancel()
+        queuedTurnPlaybackDrainFallback = nil
         pendingContextInjections.removeAll()
         pendingSafetyWarning = nil
         lastWarningInFlight = nil
@@ -585,14 +633,14 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
 
     func commitAudioStream() async throws {}
 
-    func sendFrame(_ frame: LiveJPEGFrame) async throws {
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool {
         guard let client else {
             throw LiveSessionProviderError.adapterUnavailable("Visual frames unavailable — WebRTC client not connected.")
         }
         // Appending an input_image while a response is active throws
         // conversation_already_has_active_response. Frames are disposable (another
         // arrives next tick), so drop this one rather than error-storm. (#627)
-        if botSpeaking { cocktailDebugLog("[cocktail-frame] dropped (busy)"); return }
+        if responseFloorBusy { cocktailDebugLog("[cocktail-frame] dropped (busy)"); return false }
         cocktailDebugLog("[cocktail-frame] send")
         let base64 = frame.data.base64EncodedString()
         // Inject a user message with an input_image content block over the data
@@ -610,7 +658,7 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
                 ])
             ])
         ])
-        // Defensive: even with the botSpeaking guard, a response can be active in a
+        // Defensive: even with the floor guard, a response can be active in a
         // race. Frames are disposable, so swallow append errors (the next frame
         // retries) instead of surfacing conversation_already_has_active_response.
         do {
@@ -623,8 +671,10 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
                 ]
             ))
             continuation?.yield(.frameAccepted(bytes: frame.data.count))
+            return true
         } catch {
             // Drop silently; a fresh frame arrives next tick.
+            return false
         }
     }
 
@@ -668,7 +718,7 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
                     pendingContextInjections.removeFirst(pendingContextInjections.count - maxPendingContextInjections)
                 }
             }
-            if botSpeaking {
+            if responseFloorBusy {
                 buffer()
                 return
             }
@@ -698,11 +748,15 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     /// that triggers a response (greeting, sendText, VAD turn-end) calls this so
     /// concurrent frames/context buffer instead of colliding.
     private func markFloorBusy() {
-        cocktailDebugLog("[cocktail-floor] markFloorBusy (was \(botSpeaking))")
+        cocktailDebugLog("[cocktail-floor] markFloorBusy server=\(realtimeResponseActive) playbackWas=\(botSpeaking)")
         botSpeaking = true
         floorBusyWatchdog?.cancel()
         floorBusyWatchdog = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 8_000_000_000) // 8s safety
+            do {
+                try await Task.sleep(nanoseconds: 8_000_000_000) // 8s safety
+            } catch {
+                return
+            }
             // Force the floor clear + run the idle path (which prioritizes a pending
             // safety warning) so a buffered hazard can't get stuck if bot-stopped never
             // arrives after an interrupt/cancel.
@@ -710,12 +764,58 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         }
     }
 
-    /// Clear the floor (assistant idle) + flush buffered context.
+    private func cancelQueuedTurnPlaybackDrainFallback() {
+        queuedTurnPlaybackDrainFallback?.cancel()
+        queuedTurnPlaybackDrainFallback = nil
+    }
+
+    private func scheduleQueuedTurnPlaybackDrainFallbackIfNeeded(reason: String) {
+        guard pendingManualResponseCreate,
+              manualResponseMode,
+              !silentModeActive,
+              botSpeaking,
+              !realtimeResponseActive,
+              queuedTurnPlaybackDrainFallback == nil else {
+            return
+        }
+        let delayNs = queuedTurnPlaybackDrainFallbackNs
+        queuedTurnPlaybackDrainFallback = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delayNs)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.pendingManualResponseCreate,
+                  self.manualResponseMode,
+                  !self.silentModeActive,
+                  self.botSpeaking,
+                  !self.realtimeResponseActive else { return }
+            self.queuedTurnPlaybackDrainFallback = nil
+            cocktailDebugLog("[cocktail-floor] playback fallback clear reason=\(reason) pendingManual=\(self.pendingManualResponseCreate)")
+            await self.clearFloor()
+        }
+    }
+
+    /// Clear the local playback floor. Buffered work only flushes when the server-side
+    /// Realtime response floor is also idle.
     private func clearFloor() async {
-        cocktailDebugLog("[cocktail-floor] clearFloor (buffered=\(pendingContextInjections.count))")
+        cocktailDebugLog("[cocktail-floor] clearFloor server=\(realtimeResponseActive) buffered=\(pendingContextInjections.count)")
         floorBusyWatchdog?.cancel()
         floorBusyWatchdog = nil
+        cancelQueuedTurnPlaybackDrainFallback()
         botSpeaking = false
+        await drainBufferedWorkIfIdle()
+    }
+
+    /// Drain pending user/context work only when both the server response and local
+    /// playback floors are idle. `response.done` must not call `clearFloor()` directly:
+    /// server generation can finish before WebRTC audio has stopped playing.
+    private func drainBufferedWorkIfIdle() async {
+        guard !responseFloorBusy else {
+            cocktailDebugLog("[cocktail-floor] hold drain; floor busy server=\(realtimeResponseActive) playback=\(botSpeaking)")
+            return
+        }
         // Safety Check (#648): a hazard warning takes priority — speak it first (still
         // verbatim), then flush ordinary context. Cleared so it fires at most once.
         if let warning = pendingSafetyWarning {
@@ -723,13 +823,48 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
             await fireSafetyWarning(warning)
             return
         }
+        if await flushPendingManualResponseCreateIfReady() {
+            return
+        }
         await flushPendingContextInjections()
+    }
+
+    @discardableResult
+    private func flushPendingManualResponseCreateIfReady() async -> Bool {
+        guard pendingManualResponseCreate,
+              manualResponseMode,
+              !silentModeActive,
+              !responseFloorBusy,
+              let transport else {
+            return false
+        }
+        pendingManualResponseCreate = false
+        cancelQueuedTurnPlaybackDrainFallback()
+        // If the pending create came from an active-response rejection, the user-turn
+        // credit may already exist. Make sure hard-quiet still authorizes the retry.
+        if sanctionedTurnCredits == 0 {
+            sanctionedTurnCredits += 1
+        }
+        await prepareUserTurnResponseIfNeeded()
+        markFloorBusy()
+        do {
+            cocktailDebugLog("[cocktail-user] queued response.create send")
+            manualResponseCreateInFlight = true
+            try transport.sendCreateResponse()
+            continuation?.yield(.status("Queued user response sent"))
+            return true
+        } catch {
+            manualResponseCreateInFlight = false
+            pendingManualResponseCreate = true
+            continuation?.yield(.error(error.localizedDescription))
+            return false
+        }
     }
 
     /// Flush buffered context-only injections once the assistant is idle. Called
     /// from onBotStoppedSpeaking. Best-effort; failures are dropped.
     private func flushPendingContextInjections() async {
-        guard !botSpeaking, let llmHelper, !pendingContextInjections.isEmpty else { return }
+        guard !responseFloorBusy, let llmHelper, !pendingContextInjections.isEmpty else { return }
         let items = pendingContextInjections
         pendingContextInjections.removeAll()
         for item in items {
@@ -766,7 +901,7 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         let prompt = cautious
             ? "Relay this to the user as a brief, hedged aside (don't over-assert): \(trimmed)"
             : "Relay this to the user as a brief, natural aside: \(trimmed)"
-        if botSpeaking {
+        if responseFloorBusy {
             pendingContextInjections.append(prompt)
             return
         }
@@ -796,7 +931,7 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         // so nothing gets injected ahead of the warning, and cancel whatever the model
         // is currently doing so the warning's turn starts immediately.
         pendingContextInjections.removeAll()
-        if botSpeaking {
+        if responseFloorBusy {
             botSpeaking = false
             try? transport?.sendCancelResponse()
         }
@@ -855,7 +990,7 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         }
         let resultString = await toolRegistry.execute(name: name, argumentsJSON: argsJSON, context: context)
         await MainActor.run {
-            self.continuation?.yield(.toolCallCompleted(name: name, callID: callID, output: resultString))
+            _ = self.continuation?.yield(.toolCallCompleted(name: name, callID: callID, output: resultString))
         }
         // The realtime model expects a JSON result; pass it through as a Value
         // (object if parseable, else a string).
@@ -876,6 +1011,17 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
         startupGuardWaitingForFirstBotStop = false
         pendingAudioInputEnabled = false
         currentAssistantTranscriptItemID = nil
+        botSpeaking = false
+        realtimeResponseActive = false
+        pendingManualResponseCreate = false
+        manualResponseCreateInFlight = false
+        floorBusyWatchdog?.cancel()
+        floorBusyWatchdog = nil
+        queuedTurnPlaybackDrainFallback?.cancel()
+        queuedTurnPlaybackDrainFallback = nil
+        pendingContextInjections.removeAll()
+        pendingSafetyWarning = nil
+        lastWarningInFlight = nil
         sessionConfigWatchdog?.cancel()
         sessionConfigWatchdog = nil
         sessionConfigConfirmed = false
@@ -1173,10 +1319,37 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     nonisolated func onUserStoppedSpeaking() {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let wasBusy = self.botSpeaking
-            // The user's turn just ended → a response is about to start. Mark the floor
-            // busy NOW so frames/context appended in this gap are buffered, not collided
-            // (conversation_already_has_active_response). Cleared on bot-stopped.
+            let wasBusy = self.responseFloorBusy
+            let alreadyQueuedManualResponse = self.pendingManualResponseCreate
+            cocktailDebugLog("[cocktail-user] stopped wasBusy=\(wasBusy) server=\(self.realtimeResponseActive) playback=\(self.botSpeaking) manual=\(self.manualResponseMode) pending=\(self.pendingManualResponseCreate)")
+
+            if wasBusy {
+                if !self.silentModeActive {
+                    // Preserve the existing authorization behavior, but do not re-mark
+                    // the floor busy: repeated VAD/echo stops during assistant playback
+                    // should not keep pushing the 8s stuck-floor watchdog out.
+                    if !self.manualResponseMode || !alreadyQueuedManualResponse {
+                        self.sanctionedTurnCredits += 1
+                    }
+                    if self.manualResponseMode {
+                        self.pendingManualResponseCreate = true
+                        self.scheduleQueuedTurnPlaybackDrainFallbackIfNeeded(reason: "user_stopped")
+                        self.continuation?.yield(.status("Queued user response until active turn finishes"))
+                    }
+                }
+                self.emitUserStoppedSpeakingEvents()
+                return
+            }
+
+            let shouldPrepareDirectManualResponse = !self.silentModeActive
+                && self.manualResponseMode
+                && self.transport != nil
+            if shouldPrepareDirectManualResponse {
+                await self.prepareUserTurnResponseIfNeeded()
+            }
+            // The user's turn just ended → a response is about to start. After the
+            // pre-response visual hook, mark the floor busy so later frames/context are
+            // buffered instead of colliding with response.create.
             self.markFloorBusy()
             // #671: in Stay Silent the model must NOT reply to the user's turn. Do NOT
             // grant a sanctioned credit (so onBotStartedSpeaking cancels any stray turn)
@@ -1186,24 +1359,42 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
                 // The user spoke → the model's reply turn is AUTHORIZED. Grant a hard-quiet
                 // credit so the response that follows (whether server-VAD auto-fires it, or
                 // we trigger it manually below) is NOT canceled as an unprompted turn.
-                self.sanctionedTurnCredits += 1
+                if !self.manualResponseMode || !wasBusy || !alreadyQueuedManualResponse {
+                    self.sanctionedTurnCredits += 1
+                }
                 // "Respond only when I talk": auto-response is off, so explicitly trigger
                 // the reply now that the user finished — but only if no response is already
                 // running (avoid an overlapping response.create). With auto-response ON
                 // (Safety Check), the server fires it itself; we just granted the credit.
-                if self.manualResponseMode, !wasBusy {
-                    try? self.transport?.sendCreateResponse()
+                if self.manualResponseMode {
+                    do {
+                        if let transport = self.transport {
+                            cocktailDebugLog("[cocktail-user] response.create send")
+                            self.manualResponseCreateInFlight = true
+                            try transport.sendCreateResponse()
+                        } else {
+                            self.pendingManualResponseCreate = true
+                        }
+                    } catch {
+                        self.manualResponseCreateInFlight = false
+                        self.pendingManualResponseCreate = true
+                        self.continuation?.yield(.error(error.localizedDescription))
+                    }
                 }
             }
-            continuation?.yield(.raw(direction: .received, type: "input_audio_buffer.speech_stopped", json: "{}"))
-            if !currentConfig.inputTranscriptionEnabled {
-                continuation?.yield(.inputTranscriptComplete(
-                    itemID: "webrtc_voice_\(UUID().uuidString)",
-                    text: "",
-                    detail: nil,
-                    eventType: "input_audio_buffer.speech_stopped"
-                ))
-            }
+            self.emitUserStoppedSpeakingEvents()
+        }
+    }
+
+    private func emitUserStoppedSpeakingEvents() {
+        continuation?.yield(.raw(direction: .received, type: "input_audio_buffer.speech_stopped", json: "{}"))
+        if !currentConfig.inputTranscriptionEnabled {
+            continuation?.yield(.inputTranscriptComplete(
+                itemID: "webrtc_voice_\(UUID().uuidString)",
+                text: "",
+                detail: nil,
+                eventType: "input_audio_buffer.speech_stopped"
+            ))
         }
     }
 
@@ -1309,7 +1500,8 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     }
 
     nonisolated func onError(message: String) {
-        let tag = message.contains("active_response") ? "ACTIVE-RESPONSE" : "other"
+        let alreadyActiveCreateError = Self.isAlreadyActiveCreateError(code: nil, message: message)
+        let tag = alreadyActiveCreateError || message.contains("active_response") ? "ACTIVE-RESPONSE" : "other"
         cocktailDebugLog("[cocktail-err] onError(\(tag)): \(message.prefix(90))")
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1326,9 +1518,16 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
                 self.finishSessionConfigStatus(.failed(detail: detail.isEmpty ? nil : detail))
                 return
             }
+            if alreadyActiveCreateError {
+                self.handleAlreadyActiveCreateRejection(source: "delegate")
+                if let last = self.lastWarningInFlight {
+                    self.pendingSafetyWarning = last
+                }
+                return
+            }
             // If a safety warning's immediate create lost the race to a still-active
             // response (the error arrives async, after fireSafetyWarning already sent),
-            // re-arm it so clearFloor delivers it on the next response.done.
+            // re-arm it so the idle drain retries after both response floors clear.
             if message.contains("active_response"), let last = self.lastWarningInFlight {
                 self.pendingSafetyWarning = last
             }
@@ -1337,17 +1536,99 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     }
 
     /// #677: every OpenAI data-channel message is forwarded by the transport as a
-    /// SERVER_MESSAGE → here. We only care about `session.updated` — the server's ack
-    /// that our session.update was applied — which confirms persona/tools/VAD are live.
-    /// The cheap type check runs in the nonisolated context so we only hop to the main
-    /// actor for the one event we care about (this fires for ALL server messages).
+    /// SERVER_MESSAGE → here. We track session config acks and the server response
+    /// lifecycle; Pipecat audio callbacks alone can report "stopped" before the
+    /// Realtime server accepts another `response.create`.
     nonisolated func onServerMessage(data: Value) {
         guard case .object(let dict) = data,
-              case .string(let type)? = dict["type"],
-              type == "session.updated" else { return }
-        Task { @MainActor [weak self] in
-            self?.markSessionConfigConfirmed()
+              case .string(let type)? = dict["type"] else { return }
+        var errorCode: String?
+        var errorMessage: String?
+        if case .object(let error)? = dict["error"] {
+            if case .string(let code)? = error["code"] {
+                errorCode = code
+            }
+            if case .string(let message)? = error["message"] {
+                errorMessage = message
+            }
         }
+        let rawJSON: String
+        if let jsonData = try? JSONEncoder().encode(data),
+           let encoded = String(data: jsonData, encoding: .utf8) {
+            rawJSON = encoded
+        } else {
+            rawJSON = "{}"
+        }
+        Task { @MainActor [weak self] in
+            await self?.handleRealtimeServerMessage(
+                type: type,
+                rawJSON: rawJSON,
+                errorCode: errorCode,
+                errorMessage: errorMessage
+            )
+        }
+    }
+
+    private func handleRealtimeServerMessage(
+        type: String,
+        rawJSON: String,
+        errorCode: String?,
+        errorMessage: String?
+    ) async {
+        let isAlreadyActiveCreateError = Self.isAlreadyActiveCreateError(code: errorCode, message: errorMessage)
+        if ["response.created", "response.done", "response.cancelled", "response.failed"].contains(type)
+            || isAlreadyActiveCreateError {
+            continuation?.yield(.raw(direction: .received, type: type, json: rawJSON.isEmpty ? "{}" : rawJSON))
+        }
+
+        switch type {
+        case "session.updated":
+            markSessionConfigConfirmed()
+        case "response.created":
+            realtimeResponseActive = true
+            manualResponseCreateInFlight = false
+            cocktailDebugLog("[cocktail-server] response.created playback=\(botSpeaking) pendingManual=\(pendingManualResponseCreate)")
+            markFloorBusy()
+            continuation?.yield(.status("Response active"))
+        case "response.done", "response.cancelled", "response.failed":
+            realtimeResponseActive = false
+            manualResponseCreateInFlight = false
+            cocktailDebugLog("[cocktail-server] \(type) playback=\(botSpeaking) pendingManual=\(pendingManualResponseCreate)")
+            await drainBufferedWorkIfIdle()
+            scheduleQueuedTurnPlaybackDrainFallbackIfNeeded(reason: type)
+            continuation?.yield(.status(type == "response.done" ? "Response done" : type))
+        case "error" where isAlreadyActiveCreateError:
+            handleAlreadyActiveCreateRejection(source: "server_message")
+        case "error":
+            manualResponseCreateInFlight = false
+        default:
+            break
+        }
+    }
+
+    nonisolated private static func isAlreadyActiveCreateError(code: String?, message: String?) -> Bool {
+        if code == "conversation_already_has_active_response" { return true }
+        let lower = message?.lowercased() ?? ""
+        return lower.contains("already has an active response")
+            || (lower.contains("active response in progress") && lower.contains("creating a new one"))
+    }
+
+    private func handleAlreadyActiveCreateRejection(source: String) {
+        let shouldQueueUserTurn = manualResponseCreateInFlight
+        manualResponseCreateInFlight = false
+        realtimeResponseActive = true
+        if shouldQueueUserTurn && manualResponseMode && !silentModeActive {
+            pendingManualResponseCreate = true
+        }
+        cocktailDebugLog("[cocktail-floor] active-create-rejected source=\(source) queuedUserTurn=\(shouldQueueUserTurn) pendingManual=\(pendingManualResponseCreate)")
+        continuation?.yield(.status(shouldQueueUserTurn
+            ? "Realtime response still active; queued next user turn"
+            : "Realtime response still active"))
+    }
+
+    private func prepareUserTurnResponseIfNeeded() async {
+        guard let prepareUserTurnResponseHook else { return }
+        await prepareUserTurnResponseHook()
     }
 
     private func releaseStartupGuardIfNeeded() async {
@@ -1595,7 +1876,7 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
         ])
     }
 
-    func sendFrame(_ frame: LiveJPEGFrame) async throws {
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool {
         let base64 = frame.data.base64EncodedString()
         try await sendJSON([
             "type": "conversation.item.create",
@@ -1611,6 +1892,7 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
             ],
         ])
         continuation?.yield(.frameAccepted(bytes: frame.data.count))
+        return true
     }
 
     func sendText(_ text: String) async throws {
