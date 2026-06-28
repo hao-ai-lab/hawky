@@ -20,7 +20,8 @@ import { serveStatic, resolveWebDistDir } from "./static.js";
 import type { MethodHandler, MethodRegistry } from "./methods.js";
 import { createMethodRegistry } from "./methods.js";
 import { NodeRegistry } from "./node-registry.js";
-import { DeviceAuth, callbackRedirectHtml, manualTokenHtml, webAuthRedirectHtml } from "./device-auth.js";
+import { DeviceAuth, callbackRedirectHtml, manualTokenHtml, webAuthRedirectHtml, type DeviceTokenPayload } from "./device-auth.js";
+import { AppAuth, sanitizeReturnUrl } from "./app-auth.js";
 import {
   LiveRealtimeBrokerError,
   mintOpenAIRealtimeClientSecret,
@@ -36,6 +37,39 @@ const log = createSubsystemLogger("gateway/server");
 const SERVER_VERSION = "0.1.0";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 
+async function readFormOrJson(req: Request): Promise<Record<string, string>> {
+  const contentType = req.headers.get("Content-Type") ?? "";
+  if (contentType.includes("application/json")) {
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(body).map(([key, value]) => [key, typeof value === "string" ? value : ""]),
+    );
+  }
+
+  const form = await req.formData();
+  const out: Record<string, string> = {};
+  for (const [key, value] of form.entries()) {
+    out[key] = typeof value === "string" ? value : "";
+  }
+  return out;
+}
+
+function redirect(location: string, extraHeaders: Array<[string, string]> = []): Response {
+  const headers = new Headers(extraHeaders);
+  headers.set("Location", location);
+  return new Response(null, { status: 303, headers });
+}
+
+function requestIp(req: Request): string {
+  return req.headers.get("CF-Connecting-IP")
+    ?? req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim()
+    ?? "";
+}
+
+function loginThrottleKey(req: Request): string {
+  return requestIp(req) || "unknown";
+}
+
 // -----------------------------------------------------------------------------
 // Gateway Server
 // -----------------------------------------------------------------------------
@@ -50,6 +84,7 @@ export class GatewayServer {
   private activeSessionCountFn: (() => number) | null = null;
   private webDistDir: string | null = null;
   private pushService: PushService | null = null;
+  private appAuth: AppAuth | null = null;
   private _subscriptions = createSubscriptionRegistry();
   private _getSessionKeys: (() => string[]) | null = null;
   private _nodeRegistry = new NodeRegistry();
@@ -62,6 +97,7 @@ export class GatewayServer {
     this.methods = createMethodRegistry();
     // Resolve web frontend dist directory (if built)
     this.webDistDir = resolveWebDistDir();
+    this.appAuth = AppAuth.fromEnv();
   }
 
   // ---------------------------------------------------------------------------
@@ -99,13 +135,56 @@ export class GatewayServer {
 
         // Health endpoints — always unauthenticated (needed for probes/monitoring)
         if (url.pathname === "/health" || url.pathname === "/healthz") {
+          if (self.appAuth && !self.isAuthorizedHealthRequest(req)) {
+            return new Response(self.appAuth.loginPage(url.pathname), {
+              status: 401,
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
           return Response.json({ ok: true, status: "live" });
         }
         if (url.pathname === "/ready" || url.pathname === "/readyz") {
+          if (self.appAuth && !self.isAuthorizedHealthRequest(req)) {
+            return new Response(self.appAuth.loginPage(url.pathname), {
+              status: 401,
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
           return Response.json({
             ok: true,
             status: "ready",
             connections: self.connections.size,
+          });
+        }
+
+        // App auth endpoints — optional email/password login wall before
+        // issuing device tokens. Cloudflare Access can still sit in front.
+        if (self.appAuth && url.pathname === "/auth/login") {
+          return self.handleAppLogin(req, url);
+        }
+        if (self.appAuth && url.pathname === "/auth/register") {
+          return self.handleAppRegister(req, url);
+        }
+        if (self.appAuth && url.pathname === "/auth/logout") {
+          return self.handleAppLogout(url);
+        }
+        if (self.appAuth && url.pathname === "/auth/me" && req.method === "GET") {
+          return self.handleAppMe(req);
+        }
+        if (self.appAuth && url.pathname === "/admin") {
+          return self.handleAdmin(req, url);
+        }
+        if (self.appAuth && url.pathname.startsWith("/admin/users/")) {
+          return self.handleAdminUserAction(req, url);
+        }
+        if (self.appAuth && self.shouldRequireAppLogin(req, url)) {
+          if (req.method !== "GET" && req.method !== "HEAD") {
+            return Response.json({ ok: false, error: "Login required" }, { status: 401 });
+          }
+          const returnUrl = sanitizeReturnUrl(url.pathname + url.search);
+          return new Response(self.appAuth.loginPage(returnUrl), {
+            status: 401,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
           });
         }
 
@@ -355,7 +434,7 @@ export class GatewayServer {
   // Internal: device auth endpoint (HTTP GET /auth/device)
   // ---------------------------------------------------------------------------
 
-  private handleAuthDevice(_req: Request, url: URL): Response {
+  private handleAuthDevice(req: Request, url: URL): Response {
     if (!this.deviceAuth) {
       return Response.json({ ok: false, error: "Device auth not configured" }, { status: 500 });
     }
@@ -363,6 +442,17 @@ export class GatewayServer {
     const callbackPort = url.searchParams.get("callback_port");
     const mode = url.searchParams.get("mode") ?? (callbackPort ? "callback" : "json");
     const deviceLabel = url.searchParams.get("device") ?? "unknown";
+
+    if (this.appAuth && !this.appAuth.userFromRequest(req)) {
+      if (mode === "json") {
+        return Response.json({ ok: false, error: "Login required" }, { status: 401 });
+      }
+      const returnUrl = sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/");
+      return new Response(this.appAuth.loginPage(returnUrl), {
+        status: 401,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
 
     const token = this.deviceAuth.createToken(deviceLabel);
     log.info("device token issued", { device: deviceLabel, mode });
@@ -399,6 +489,127 @@ export class GatewayServer {
     return Response.json({ ok: true, token });
   }
 
+  private async handleAppLogin(req: Request, url: URL): Promise<Response> {
+    if (!this.appAuth) return new Response("Not found", { status: 404 });
+    if (req.method === "GET") {
+      return new Response(this.appAuth.loginPage(url.searchParams.get("return_url") ?? "/"), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+    const body = await readFormOrJson(req);
+    const returnUrl = sanitizeReturnUrl(body.return_url ?? "/");
+    try {
+      const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
+      return redirect(returnUrl, [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+    } catch (err) {
+      return new Response(this.appAuth.loginPage(returnUrl, err instanceof Error ? err.message : "Login failed."), {
+        status: 401,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+  }
+
+  private async handleAppRegister(req: Request, _url: URL): Promise<Response> {
+    if (!this.appAuth) return new Response("Not found", { status: 404 });
+    const url = new URL(req.url);
+    if (req.method === "GET") {
+      return new Response(this.appAuth.registerPage(url.searchParams.get("return_url") ?? "/"), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+    const body = await readFormOrJson(req);
+    const returnUrl = sanitizeReturnUrl(body.return_url ?? "/");
+    try {
+      const result = this.appAuth.register(body.email ?? "", body.password ?? "", body.registration_code ?? "");
+      if (result.approvalRequired) {
+        return new Response(this.appAuth.registerPage(returnUrl, "Request received. An admin will review it before you can sign in."), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+      const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
+      return redirect(result.user.role === "admin" ? "/admin" : returnUrl, [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+    } catch (err) {
+      return new Response(this.appAuth.registerPage(returnUrl, "", err instanceof Error ? err.message : "Registration failed."), {
+        status: 400,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+  }
+
+  private handleAppLogout(url: URL): Response {
+    if (!this.appAuth) return new Response("Not found", { status: 404 });
+    return redirect(sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/"), [
+      ["Set-Cookie", this.appAuth.clearSessionCookie()],
+    ]);
+  }
+
+  private handleAppMe(req: Request): Response {
+    if (!this.appAuth) return new Response("Not found", { status: 404 });
+    const user = this.appAuth.userFromRequest(req);
+    if (!user) return Response.json({ ok: false, error: "Login required" }, { status: 401 });
+    return Response.json({ ok: true, user });
+  }
+
+  private async handleAdmin(req: Request, url: URL): Promise<Response> {
+    if (!this.appAuth) return new Response("Not found", { status: 404 });
+    const user = this.appAuth.userFromRequest(req);
+    if (!user) {
+      return new Response(this.appAuth.loginPage(`/admin${url.search}`), {
+        status: 401,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    if (!this.appAuth.isAdmin(user)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    return new Response(this.appAuth.adminPage(user, url.searchParams.get("message") ?? "", url.searchParams.get("error") ?? ""), {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  private async handleAdminUserAction(req: Request, url: URL): Promise<Response> {
+    if (!this.appAuth) return new Response("Not found", { status: 404 });
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    const admin = this.appAuth.userFromRequest(req);
+    if (!admin || !this.appAuth.isAdmin(admin)) return Response.json({ ok: false, error: "Admin access required" }, { status: 403 });
+
+    const match = /^\/admin\/users\/([^/]+)\/(approve|disable)$/.exec(url.pathname);
+    if (!match) return new Response("Not found", { status: 404 });
+    const [, userIdRaw, action] = match;
+    const userId = decodeURIComponent(userIdRaw);
+    try {
+      if (action === "approve") {
+        const body = await readFormOrJson(req);
+        const role = body.role === "admin" ? "admin" : "user";
+        this.appAuth.approveUser(admin, userId, role);
+        return redirect("/admin?message=User%20approved");
+      }
+      this.appAuth.disableUser(admin, userId);
+      return redirect("/admin?message=User%20disabled");
+    } catch (err) {
+      const error = encodeURIComponent(err instanceof Error ? err.message : "Admin action failed.");
+      return redirect(`/admin?error=${error}`);
+    }
+  }
+
+  private shouldRequireAppLogin(req: Request, url: URL): boolean {
+    if (!this.appAuth) return false;
+    if (this.appAuth.userFromRequest(req)) return false;
+    if (url.pathname.startsWith("/auth/")) return false;
+    if (url.pathname === "/ws") return false;
+    return true;
+  }
+
+  private isAuthorizedHealthRequest(req: Request): boolean {
+    const token = process.env.HAWKY_HEALTH_TOKEN ?? "";
+    if (!token) return false;
+    return req.headers.get("X-Hawky-Health-Token") === token;
+  }
+
   // ---------------------------------------------------------------------------
   // Internal: push re-subscribe (HTTP POST from service worker)
   // ---------------------------------------------------------------------------
@@ -433,23 +644,30 @@ export class GatewayServer {
    * Returns a 401 Response if missing/invalid, null if the check passes.
    * No-ops when deviceAuth is not configured (localhost dev mode).
    */
-  private requireDeviceToken(req: Request): Response | null {
+  private requireDeviceToken(req: Request): Response | DeviceTokenPayload | null {
     if (!this.deviceAuth) return null;
     const authHeader = req.headers.get("Authorization") ?? "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!token || !this.deviceAuth.isValid(token)) {
+    const payload = token ? this.deviceAuth.verifyToken(token) : null;
+    if (!payload) {
       return Response.json({ ok: false, error: "Invalid or missing device token" }, { status: 401 });
     }
-    return null;
+    return payload;
   }
 
   private async handleOpenAIRealtimeClientSecret(req: Request): Promise<Response> {
-    const authError = this.requireDeviceToken(req);
-    if (authError) return authError;
+    const device = this.requireDeviceToken(req);
+    if (device instanceof Response) return device;
 
     try {
       const body = (await req.json().catch(() => ({}))) as LiveRealtimeClientSecretParams;
-      return Response.json(await mintOpenAIRealtimeClientSecret(body));
+      const appUser = this.appAuth?.userFromRequest(req);
+      const quotaKey = appUser
+        ? `user:${appUser.id}`
+        : device
+          ? `device:${device.jti}`
+          : `ip:${requestIp(req) || "unknown"}`;
+      return Response.json(await mintOpenAIRealtimeClientSecret(body, { quotaKey }));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const status = err instanceof LiveRealtimeBrokerError ? err.status : 500;
@@ -503,7 +721,8 @@ export class GatewayServer {
     // appear as localhost).
     if (this.deviceAuth) {
       const token = params.token;
-      if (!token || !this.deviceAuth.isValid(token)) {
+      const payload = token ? this.deviceAuth.verifyToken(token) : null;
+      if (!payload) {
         conn.sendResponse({
           type: "res",
           id: frame.id,
@@ -513,6 +732,8 @@ export class GatewayServer {
         conn.close(1008, "unauthorized");
         return;
       }
+      conn.deviceTokenId = payload.jti;
+      conn.deviceLabel = payload.device;
     }
 
     // Complete handshake (with role + nodeId for node hosts)

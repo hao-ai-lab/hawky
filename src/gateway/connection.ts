@@ -59,6 +59,8 @@ export class GatewayConnection {
   // State
   authenticated = false;
   sessionKey: string | null = null;
+  deviceTokenId: string | null = null;
+  deviceLabel: string | null = null;
 
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 

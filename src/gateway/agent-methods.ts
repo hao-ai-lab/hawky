@@ -2214,9 +2214,14 @@ export function registerAgentMethods(
   // Mirrors the HTTP /api/live/openai/client-secret endpoint without requiring
   // extra Vite HTTP proxy rules during local web development.
   // -------------------------------------------------------------------------
-  server.registerMethod("live.openaiClientSecret", async (_conn, params) => {
+  server.registerMethod("live.openaiClientSecret", async (conn, params) => {
     try {
-      return await mintOpenAIRealtimeClientSecret((params ?? {}) as LiveRealtimeClientSecretParams);
+      const quotaKey = conn.deviceTokenId
+        ? `device:${conn.deviceTokenId}`
+        : conn.sessionKey
+          ? `session:${conn.sessionKey}`
+          : `client:${conn.clientId}`;
+      return await mintOpenAIRealtimeClientSecret((params ?? {}) as LiveRealtimeClientSecretParams, { quotaKey });
     } catch (err) {
       if (err instanceof LiveRealtimeBrokerError) {
         throw new MethodError("UPSTREAM_ERROR", err.message);

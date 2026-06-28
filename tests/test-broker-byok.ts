@@ -12,7 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { mintOpenAIRealtimeClientSecret } from "../src/gateway/live-realtime-broker.js";
+import { mintOpenAIRealtimeClientSecret, resetRealtimeMintQuotaForTests } from "../src/gateway/live-realtime-broker.js";
 
 const GATEWAY_KEY = "sk-gateway-configured-key-aaaaaaaaaaaa";
 const BYOK_KEY = "sk-byok-visitor-key-bbbbbbbbbbbbbbbbbbbb";
@@ -64,6 +64,9 @@ describe("broker BYOK", () => {
 
   afterEach(() => {
     stub.restore();
+    resetRealtimeMintQuotaForTests();
+    delete process.env.HAWKY_REALTIME_MINTS_PER_HOUR;
+    delete process.env.HAWKY_REALTIME_MINTS_PER_DAY;
   });
 
   test("uses a well-formed byok_api_key over the configured key", async () => {
@@ -89,5 +92,19 @@ describe("broker BYOK", () => {
     const serialized = JSON.stringify(res);
     expect(serialized).not.toContain(BYOK_KEY);
     expect(serialized).not.toContain(GATEWAY_KEY);
+  });
+
+  test("limits gateway-key mints per quota identity", async () => {
+    process.env.HAWKY_REALTIME_MINTS_PER_HOUR = "1";
+    process.env.HAWKY_REALTIME_MINTS_PER_DAY = "10";
+    await expect(mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" }, { quotaKey: "device:a" })).resolves.toMatchObject({ ok: true });
+    await expect(mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" }, { quotaKey: "device:a" })).rejects.toThrow("hourly limit");
+    await expect(mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" }, { quotaKey: "device:b" })).resolves.toMatchObject({ ok: true });
+  });
+
+  test("does not charge gateway quota for BYOK mints", async () => {
+    process.env.HAWKY_REALTIME_MINTS_PER_HOUR = "1";
+    await expect(mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2", byok_api_key: BYOK_KEY }, { quotaKey: "device:a" })).resolves.toMatchObject({ ok: true });
+    await expect(mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2", byok_api_key: BYOK_KEY }, { quotaKey: "device:a" })).resolves.toMatchObject({ ok: true });
   });
 });

@@ -158,7 +158,7 @@ function ByokSection() {
   const save = () => { if (!valid) return; saveByokKey(draft); setStored(draft.trim()); setDraft(""); setEditing(false); };
   const clear = () => { saveByokKey(""); setStored(""); setDraft(""); setEditing(false); };
   return (
-    <Section title="OpenAI key (this device)" footer="Used by Live. Stored only in this browser and sent to the gateway solely to mint short-lived realtime secrets.">
+    <Section title="OpenAI key (optional)" footer="Live uses the Hawky Realtime Gateway when this is blank. A saved key overrides the gateway for this browser.">
       {hasKey && !editing ? (
         <>
           <Row label="API key" detail="Saved in this browser"><span className="font-mono text-xs text-white/60">{maskKey(stored)}</span></Row>

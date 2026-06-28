@@ -24,7 +24,11 @@ WebSocket gateway.
 | `tests/` | TS core test suite (`e2e-*`, `test-*`). |
 | `scripts/` | Ops/probe tooling (non-test). |
 | `playgrounds/`, `prompt_test/` | Experiments + prompt-eval harness. |
-| `deploy/`, `docs/`, `website/` | Deployment units, docs, marketing site. |
+| `docs/`, `website/` | Product docs and marketing site. |
+
+Deployment automation, private topology, pod-specific scripts, and internal
+runbooks belong in the private companion repo `hao-ai-lab/hawky-deploy`, not in
+this public product repo.
 
 ## Build / test
 
@@ -61,13 +65,64 @@ co-authors before letting the commit through.
 - jayzou3773
 - Eden-kk
 
+## Pull requests
+
+PRs must be readable by maintainers who did not watch the branch happen.
+
+### Title
+
+Use a conventional-commit title:
+
+```text
+type(scope): summary
+```
+
+Allowed `type` values: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`,
+`ci`, `build`, `perf`, `style`, `revert`.
+
+Examples:
+
+- `feat(gateway): add app login wall`
+- `ci(pr): check pull request metadata`
+- `docs(web-ios): clarify realtime gateway fallback`
+
+Do not prefix titles with tool names such as `[codex]`.
+
+### Body
+
+Use these sections, in this order:
+
+```md
+## Summary
+
+- ...
+
+## Validation
+
+- ...
+
+## Limitations / Follow-ups
+
+1. ...
+```
+
+The summary should explain what changed and why. Validation should list the
+commands or manual checks actually run. Limitations should name known risk,
+deferred work, or `None`.
+
+### CI policy
+
+The `PR Hygiene` workflow enforces the title regex and required body sections.
+Keep this deterministic gate small. If we add an LLM PR reviewer later, it
+should run after these checks and leave advisory comments only; merge blocking
+should stay on explicit tests and deterministic policy.
+
 ## Contribution workflow
 
 1. Branch from `main`; never commit straight to `main`.
 2. Make the change; run the relevant test suite.
 3. `commit` skill -> assembles trailers, runs the AI-coauthor guard.
-4. Open a PR. PR body: one-sentence summary up top, numbered limitations/follow-ups at the
-   bottom.
+4. Open a PR using the title and body format above.
 5. Releases go through the `release` skill.
 
 ## Skills
