@@ -7,7 +7,8 @@ import { AppAuth } from "../src/gateway/app-auth.js";
 import { GatewayServer, resetGatewayState } from "../src/gateway/server.js";
 import { resetConfig, resetConfigDir, setConfigDir } from "../src/storage/config.js";
 
-const CONTROL_HOST = "login.hawky.live";
+const CONTROL_HOST = "app.hawky.live";
+const ADMIN_HOST = "admin.hawky.live";
 
 function getTestPort(): number {
   return 10000 + Math.floor(Math.random() * 50000);
@@ -63,8 +64,8 @@ describe("login workspace routing", () => {
     const registryPath = join(configDir, "workspaces.json");
     writeFileSync(registryPath, JSON.stringify({
       users: [
-        { slug: "juc049", email: "juc049@ucsd.edu", hostname: "juc049.hawky.live", port: workspacePort },
-        { slug: "admin", email: "admin@example.com", hostname: "admin.hawky.live", port: workspacePort },
+        { slug: "juc049", email: "juc049@ucsd.edu", hostname: "user-juc049.hawky.live", port: workspacePort },
+        { slug: "admin", email: "admin@example.com", hostname: "user-admin.hawky.live", port: workspacePort },
       ],
     }, null, 2));
 
@@ -72,7 +73,8 @@ describe("login workspace routing", () => {
     process.env.HAWKY_PUBLIC_REGISTRATION = "1";
     process.env.HAWKY_ADMIN_EMAILS = "admin@example.com";
     process.env.HAWKY_WORKSPACE_REGISTRY_FILE = registryPath;
-    process.env.HAWKY_CONTROL_HOSTNAMES = CONTROL_HOST;
+    process.env.HAWKY_CONTROL_HOSTNAMES = `${CONTROL_HOST},${ADMIN_HOST}`;
+    process.env.HAWKY_ADMIN_HOSTNAMES = ADMIN_HOST;
 
     server = new GatewayServer();
     port = getTestPort();
@@ -91,6 +93,7 @@ describe("login workspace routing", () => {
     delete process.env.HAWKY_ADMIN_EMAILS;
     delete process.env.HAWKY_WORKSPACE_REGISTRY_FILE;
     delete process.env.HAWKY_CONTROL_HOSTNAMES;
+    delete process.env.HAWKY_ADMIN_HOSTNAMES;
   });
 
   test("control login keeps approved users on the control host", async () => {
@@ -147,7 +150,7 @@ describe("login workspace routing", () => {
     const res = await fetch(`http://localhost:${port}/auth/login`, {
       method: "POST",
       redirect: "manual",
-      headers: { Host: "juc049.hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { Host: "user-juc049.hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
       body: formBody("juc049@ucsd.edu"),
     });
 
@@ -188,6 +191,30 @@ describe("login workspace routing", () => {
     expect(app.status).toBe(200);
     expect(app.headers.get("x-workspace")).toBe("juc049");
     expect(await app.text()).toBe("workspace:/");
+    expect(admin.status).toBe(200);
+    expect(admin.headers.get("x-workspace")).toBeNull();
+  });
+
+  test("admin host routes root to admin instead of a workspace", async () => {
+    const login = await fetch(`http://localhost:${port}/auth/login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { Host: ADMIN_HOST, "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody("admin@example.com"),
+    });
+    const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+
+    const root = await fetch(`http://localhost:${port}/`, {
+      redirect: "manual",
+      headers: { Host: ADMIN_HOST, Cookie: cookie },
+    });
+    const admin = await fetch(`http://localhost:${port}/admin`, {
+      redirect: "manual",
+      headers: { Host: ADMIN_HOST, Cookie: cookie },
+    });
+
+    expect(root.status).toBe(303);
+    expect(root.headers.get("location")).toBe("/admin");
     expect(admin.status).toBe(200);
     expect(admin.headers.get("x-workspace")).toBeNull();
   });

@@ -43,7 +43,16 @@ export function workspaceLocalTargetForUser(user: AppAuthUser): string | null {
 
 export function isControlHost(host: string): boolean {
   const hostname = host.split(":")[0]?.toLowerCase() ?? "";
-  const configured = (process.env.HAWKY_CONTROL_HOSTNAMES || "login.hawky.live,realtime-gateway.hawky.live")
+  const configured = (process.env.HAWKY_CONTROL_HOSTNAMES || "app.hawky.live,admin.hawky.live,realtime-gateway.hawky.live")
+    .split(/[,\s]+/)
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  return configured.includes(hostname);
+}
+
+export function isAdminHost(host: string): boolean {
+  const hostname = host.split(":")[0]?.toLowerCase() ?? "";
+  const configured = (process.env.HAWKY_ADMIN_HOSTNAMES || "admin.hawky.live")
     .split(/[,\s]+/)
     .map((part) => part.trim().toLowerCase())
     .filter(Boolean);

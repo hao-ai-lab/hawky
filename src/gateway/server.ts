@@ -29,7 +29,7 @@ import {
 } from "./live-realtime-broker.js";
 import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
 import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
-import { isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
+import { isAdminHost, isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -219,6 +219,9 @@ export class GatewayServer {
         }
         if (self.appAuth && url.pathname === "/auth/me" && req.method === "GET") {
           return self.handleAppMe(req);
+        }
+        if (self.appAuth && url.pathname === "/" && isAdminHost(req.headers.get("Host") ?? "")) {
+          return redirect("/admin");
         }
         if (self.appAuth && url.pathname === "/admin") {
           return self.handleAdmin(req, url);
@@ -612,7 +615,7 @@ export class GatewayServer {
     try {
       const result = this.appAuth.register(body.email ?? "", body.password ?? "", body.registration_code ?? "");
       if (result.approvalRequired) {
-        return new Response(this.appAuth.registerPage(returnUrl, "Request received. An admin will review it before you can sign in."), {
+        return new Response(this.appAuth.loginPage(returnUrl, "", "Sign-up received. An admin will review it before you can sign in."), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -647,6 +650,7 @@ export class GatewayServer {
   }
 
   private postLoginRedirect(req: Request, user: AppAuthUser, returnUrl: string): string {
+    if (isAdminHost(req.headers.get("Host") ?? "") && returnUrl === "/") return "/admin";
     if (user.role === "admin" && returnUrl === "/") return "/admin";
     return returnUrl;
   }
@@ -710,6 +714,7 @@ export class GatewayServer {
   private workspaceProxyTarget(req: Request, url: URL): string | null {
     if (!this.appAuth) return null;
     if (!isControlHost(req.headers.get("Host") ?? "")) return null;
+    if (isAdminHost(req.headers.get("Host") ?? "")) return null;
     if (url.pathname === "/health" || url.pathname === "/healthz") return null;
     if (url.pathname === "/ready" || url.pathname === "/readyz") return null;
     if (url.pathname === "/auth/login") return null;

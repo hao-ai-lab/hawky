@@ -24,7 +24,8 @@ cd website && python3 -m http.server 8011
 
 - `www.hawky.live` serves this public homepage.
 - `hawky.live` redirects to `www.hawky.live`.
-- `login.hawky.live` serves the authenticated Hawk app.
+- `app.hawky.live` serves the authenticated Hawk app.
+- `admin.hawky.live` serves the admin portal.
 
 ## Deploy (Modal)
 
