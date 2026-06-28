@@ -684,6 +684,7 @@ a:focus-visible,button:focus-visible,
         <a class="nav__link" href="#features">Features</a>
         <a class="nav__link" href="#architecture">Architecture</a>
         <a class="nav__link" href="#install">Install</a>
+        <a class="nav__link" href="https://testflight.apple.com/join/fg1mk2WC" rel="noopener">iOS App</a>
         <a class="nav__link" href="#roadmap">Roadmap</a>
         <a class="nav__gh" href="https://github.com/hawk-agent/hawk" rel="noopener" aria-label="Hawk on GitHub">
           <!-- PLACEHOLDER repo URL — swap on release -->
@@ -724,6 +725,10 @@ a:focus-visible,button:focus-visible,
           <a class="btn btn--ghost" href="#demos">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 4 13 8-13 8V4Z" stroke-linejoin="round"/></svg>
             See the demos
+          </a>
+          <a class="btn btn--ghost" href="https://testflight.apple.com/join/fg1mk2WC" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2" stroke-linecap="round"/></svg>
+            iOS App
           </a>
         </div>
       </div>
@@ -1296,7 +1301,7 @@ a:focus-visible,button:focus-visible,
           <p>The eyes and ears you carry.</p>
         </div>
         <ol class="steps">
-          <li>Install the Hawk iOS app on your iPhone.</li>
+          <li><a href="https://testflight.apple.com/join/fg1mk2WC" rel="noopener">Install the Hawk iOS app from TestFlight</a>.</li>
           <li>Point it at your gateway: <code>ws://&lt;your-tailscale-ip&gt;:4242</code></li>
           <li>Pair your Ray-Ban Meta glasses in the Glasses tab.</li>
         </ol>
@@ -1662,7 +1667,7 @@ const BRAND = "Hawk";
     const humanText = {
       "iphone|testflight":
 "# On your iPhone\n" +
-"1. Open the TestFlight invite and install Hawk\n" +
+"1. Open https://testflight.apple.com/join/fg1mk2WC and install Hawk\n" +
 "2. Hawk → Settings → Gateway:  ws://<your-gateway>:4242\n" +
 "3. Glasses tab → pair your Ray-Ban Meta glasses",
       "iphone|xcode":
