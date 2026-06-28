@@ -62,6 +62,7 @@ describe("login workspace routing", () => {
     writeFileSync(registryPath, JSON.stringify({
       users: [
         { slug: "juc049", email: "juc049@ucsd.edu", hostname: "juc049.hawky.live", port: workspacePort },
+        { slug: "admin", email: "admin@example.com", hostname: "admin.hawky.live", port: workspacePort },
       ],
     }, null, 2));
 
@@ -162,5 +163,30 @@ describe("login workspace routing", () => {
 
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/admin");
+  });
+
+  test("control host proxies admin app routes while keeping admin routes on control", async () => {
+    const login = await fetch(`http://localhost:${port}/auth/login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { Host: "hawky.live", "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody("admin@example.com"),
+    });
+    const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+
+    const app = await fetch(`http://localhost:${port}/`, {
+      redirect: "manual",
+      headers: { Host: "hawky.live", Cookie: cookie },
+    });
+    const admin = await fetch(`http://localhost:${port}/admin`, {
+      redirect: "manual",
+      headers: { Host: "hawky.live", Cookie: cookie },
+    });
+
+    expect(app.status).toBe(200);
+    expect(app.headers.get("x-workspace")).toBe("juc049");
+    expect(await app.text()).toBe("workspace:/");
+    expect(admin.status).toBe(200);
+    expect(admin.headers.get("x-workspace")).toBeNull();
   });
 });

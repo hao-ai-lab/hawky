@@ -719,7 +719,7 @@ export class GatewayServer {
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return null;
     if (isProviderGatewayPath(url.pathname)) return null;
     const user = this.appAuth.userFromRequest(req);
-    if (!user || user.role === "admin") return null;
+    if (!user) return null;
     return workspaceLocalTargetForUser(user);
   }
 
