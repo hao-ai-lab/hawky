@@ -37,7 +37,8 @@ cd website && modal deploy deploy_modal.py
 
 - Brand name `Hawk` is kept easy to swap (reserved name, may change).
 - Placeholders pending real values: GitHub/citation URL (`github.com/hawk-agent/hawk`)
-  and install URL (`hawk.sh`). The iOS TestFlight invite is
-  `https://testflight.apple.com/join/fg1mk2WC`.
+  and install URL (`hawk.sh`). The public site should point users to the
+  `login.hawky.live` request-access flow until the TestFlight public link is
+  accepting new testers again.
 - Five of the six demo cells are styled placeholders (each has a `data-demo` hook);
   the Coding cell plays a real recording. Drop clips in to light up the rest.
