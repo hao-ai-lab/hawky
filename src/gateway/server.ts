@@ -62,6 +62,27 @@ function redirect(location: string, extraHeaders: Array<[string, string]> = []):
   return new Response(null, { status: 303, headers });
 }
 
+function logoutRedirectHtml(returnUrl: string): string {
+  const safeReturn = JSON.stringify(returnUrl);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signing out</title>
+</head>
+<body>
+  <script>
+    for (const key of ["hawky_device_token", "hawky-device-token", "hawky-auth-token", "gateway-token"]) {
+      try { localStorage.removeItem(key); } catch {}
+    }
+    window.location.replace(${safeReturn});
+  </script>
+  <noscript><a href="${returnUrl}">Continue</a></noscript>
+</body>
+</html>`;
+}
+
 function requestIp(req: Request): string {
   return req.headers.get("CF-Connecting-IP")
     ?? req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim()
@@ -550,9 +571,14 @@ export class GatewayServer {
 
   private handleAppLogout(url: URL): Response {
     if (!this.appAuth) return new Response("Not found", { status: 404 });
-    return redirect(sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/"), [
-      ["Set-Cookie", this.appAuth.clearSessionCookie()],
-    ]);
+    const returnUrl = sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/auth/login");
+    return new Response(logoutRedirectHtml(returnUrl), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Set-Cookie": this.appAuth.clearSessionCookie(),
+      },
+    });
   }
 
   private handleAppMe(req: Request): Response {

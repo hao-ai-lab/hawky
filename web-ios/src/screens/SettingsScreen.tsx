@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { useEffect, useState } from "react";
-import { useSocketStore } from "../lib/socket-store";
+import { clearStoredDeviceTokens, useSocketStore } from "../lib/socket-store";
 import { loadByokKey, saveByokKey, looksLikeOpenAIKey, maskKey } from "../lib/byok";
 import {
   useLiveSettings, REALTIME_MODELS, VOICES, TRANSCRIBE_MODELS, SEMANTIC_EAGERNESS, REASONING_EFFORT, TOOL_CHOICE,
@@ -103,12 +103,19 @@ export function SettingsScreen() {
 
 function ConnectionSection({ status }: { status: string }) {
   const reconnect = useSocketStore((s) => s.connect);
+  const disconnect = useSocketStore((s) => s.disconnect);
   const label = status === "connected" ? "Connected" : status === "connecting" ? "Connecting…" : status === "reconnecting" ? "Reconnecting…" : "Disconnected";
   const color = status === "connected" ? "bg-ok" : status === "disconnected" ? "bg-danger" : "bg-warn";
+  const logout = () => {
+    disconnect();
+    clearStoredDeviceTokens();
+    window.location.href = "/auth/logout?return_url=/auth/login";
+  };
   return (
     <Section title="Connection" footer="Connects to the Hawk gateway over /ws (same origin in production, dev-proxy in development).">
       <Row label="Gateway"><span className="flex items-center gap-2 text-sm text-white/70"><span className={`h-2.5 w-2.5 rounded-full ${color}`} /> {label}</span></Row>
       <Button onClick={() => void reconnect({ url: "/ws", sessionKey: "web:ios" })}>Reconnect / re-authenticate</Button>
+      <Button onClick={logout}>Log out</Button>
     </Section>
   );
 }

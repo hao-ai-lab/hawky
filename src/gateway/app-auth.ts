@@ -447,7 +447,7 @@ export class AppAuth {
           `).join("")}
         </tbody>
       </table>
-      <p class="muted"><a href="/">Back to app</a></p>
+      <p class="muted"><a href="/">Back to app</a> · <a href="/auth/logout?return_url=/auth/login">Log out</a></p>
     `, true);
   }
 
