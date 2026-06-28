@@ -97,10 +97,14 @@ export function resolveWebDistDir(): string | null {
   const candidates = [
     // 1. Relative to this source file (works when running from source: src/gateway/ → ../../web/dist)
     join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web", "dist"),
-    // 2. Relative to bundle dir (works from npm package: dist/ → ../web-dist/)
+    // 2. Relative to bundle dir (works from deployed bundle: dist/ → ../web/dist)
+    join(dirname(fileURLToPath(import.meta.url)), "..", "web", "dist"),
+    join(dirname(fileURLToPath(import.meta.url)), "..", "web-ios", "dist"),
+    // 3. Relative to bundle dir (works from npm package: dist/ → ../web-dist/)
     join(dirname(fileURLToPath(import.meta.url)), "..", "web-dist"),
-    // 3. Relative to CWD (works in development)
+    // 4. Relative to CWD (works in development)
     join(process.cwd(), "web", "dist"),
+    join(process.cwd(), "web-ios", "dist"),
   ];
 
   for (const candidate of candidates) {
