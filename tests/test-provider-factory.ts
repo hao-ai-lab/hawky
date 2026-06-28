@@ -29,6 +29,16 @@ function baseConfig(overrides: Partial<HawkyConfig> = {}): HawkyConfig {
 }
 
 describe("createProvider", () => {
+  const originalProviderSubject = process.env.HAWKY_PROVIDER_SUBJECT;
+
+  afterEach(() => {
+    if (originalProviderSubject === undefined) {
+      delete process.env.HAWKY_PROVIDER_SUBJECT;
+    } else {
+      process.env.HAWKY_PROVIDER_SUBJECT = originalProviderSubject;
+    }
+  });
+
   test("returns AnthropicProvider when provider is unset (default)", () => {
     const p = createProvider(baseConfig());
     expect(p).toBeInstanceOf(AnthropicProvider);
@@ -37,6 +47,20 @@ describe("createProvider", () => {
   test("returns AnthropicProvider when provider is explicitly 'anthropic'", () => {
     const p = createProvider(baseConfig({ provider: "anthropic" }));
     expect(p).toBeInstanceOf(AnthropicProvider);
+  });
+
+  test("passes provider subject header to AnthropicProvider", () => {
+    process.env.HAWKY_PROVIDER_SUBJECT = "user:juc049@ucsd.edu";
+    const p = createProvider(baseConfig({ provider: "anthropic" }));
+    expect((p as any).client._options.defaultHeaders).toEqual({
+      "X-Hawky-Provider-Subject": "user:juc049@ucsd.edu",
+    });
+  });
+
+  test("drops invalid provider subject header", () => {
+    process.env.HAWKY_PROVIDER_SUBJECT = "bad subject with spaces";
+    const p = createProvider(baseConfig({ provider: "anthropic" }));
+    expect((p as any).client._options.defaultHeaders).toBeUndefined();
   });
 
   test("returns VertexProvider when provider is 'vertex' and project_id is set", () => {

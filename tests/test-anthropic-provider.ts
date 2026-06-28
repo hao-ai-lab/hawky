@@ -369,6 +369,15 @@ describe("AnthropicProvider constructor", () => {
     const provider = new AnthropicProvider("sk-test-key");
     expect(provider).toBeDefined();
   });
+
+  test("passes default headers to the SDK client", () => {
+    const provider = new AnthropicProvider("sk-test-key", {
+      defaultHeaders: { "X-Hawky-Provider-Subject": "user:juc049@ucsd.edu" },
+    });
+    expect((provider as any).client._options.defaultHeaders).toEqual({
+      "X-Hawky-Provider-Subject": "user:juc049@ucsd.edu",
+    });
+  });
 });
 
 // =============================================================================
