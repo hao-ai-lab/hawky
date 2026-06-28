@@ -5,6 +5,8 @@ import Foundation
 /// intentional:
 /// - LocalRecordingSink writes WAV + keyframe manifest only.
 /// - MediaUploadScheduler owns live/deferred gateway upload queues.
+/// - RealtimeFrameFeeder (below) feeds disposable visual context to the realtime
+///   provider without building an unbounded frame backlog.
 @MainActor
 final class LiveRecordingSink {
     // Legacy mic-tee chunks are pcm16 mono at 24 kHz (see LiveAudioSampleRecorder).
@@ -449,6 +451,98 @@ private final class DeferredLiveMediaUploader: @unchecked Sendable {
             return Data(bytes: audioBuffer, count: min(byteCount, Int(buffer.audioBufferList.pointee.mBuffers.mDataByteSize)))
         }
         return Data()
+    }
+}
+
+@MainActor
+final class RealtimeFrameFeeder {
+    nonisolated static let defaultFrameTTL: TimeInterval = 2
+
+    private let frameTTL: TimeInterval
+    private var pendingFrame: LiveJPEGFrame?
+    private var drainTask: Task<Void, Never>?
+    private(set) var isBusy = false
+    private(set) var busyDropCount = 0
+    private(set) var expiredDropCount = 0
+
+    init(frameTTL: TimeInterval = RealtimeFrameFeeder.defaultFrameTTL) {
+        self.frameTTL = frameTTL
+    }
+
+    func reset() {
+        drainTask?.cancel()
+        drainTask = nil
+        pendingFrame = nil
+        isBusy = false
+        busyDropCount = 0
+        expiredDropCount = 0
+    }
+
+    func cancel() {
+        drainTask?.cancel()
+        drainTask = nil
+        pendingFrame = nil
+        isBusy = false
+    }
+
+    func offer(
+        _ frame: LiveJPEGFrame,
+        provider: LiveSessionProvider,
+        onSent: @escaping @MainActor (LiveJPEGFrame) -> Void = { _ in },
+        onError: @escaping @MainActor (Error) -> Void
+    ) {
+        guard !isExpired(frame) else {
+            expiredDropCount += 1
+            return
+        }
+        guard isBusy else {
+            isBusy = true
+            drainTask = Task { @MainActor [weak self, provider] in
+                await self?.drain(
+                    initialFrame: frame,
+                    provider: provider,
+                    onSent: onSent,
+                    onError: onError
+                )
+            }
+            return
+        }
+        if pendingFrame != nil {
+            busyDropCount += 1
+        }
+        pendingFrame = frame
+    }
+
+    private func drain(
+        initialFrame: LiveJPEGFrame,
+        provider: LiveSessionProvider,
+        onSent: @escaping @MainActor (LiveJPEGFrame) -> Void,
+        onError: @escaping @MainActor (Error) -> Void
+    ) async {
+        var current: LiveJPEGFrame? = initialFrame
+        while let frame = current {
+            guard !Task.isCancelled else { break }
+            if isExpired(frame) {
+                expiredDropCount += 1
+            } else {
+                do {
+                    let sent = try await provider.sendFrame(frame)
+                    if sent {
+                        onSent(frame)
+                    }
+                } catch {
+                    onError(error)
+                }
+            }
+            current = pendingFrame
+            pendingFrame = nil
+        }
+        isBusy = false
+        drainTask = nil
+    }
+
+    private func isExpired(_ frame: LiveJPEGFrame) -> Bool {
+        Date().timeIntervalSince(frame.capturedAt) > frameTTL
     }
 }
 

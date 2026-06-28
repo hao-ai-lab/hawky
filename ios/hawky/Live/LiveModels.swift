@@ -1034,6 +1034,223 @@ enum LiveSessionEvent: Equatable {
     }
 }
 
+struct LiveTimelineVisualFrameRef: Equatable, Identifiable {
+    let id: String
+    let capturedAtNs: UInt64
+    let capturedAt: Date
+    let byteCount: Int
+    var sentToRealtimeAtNs: UInt64?
+    var uploadedAtNs: UInt64?
+}
+
+struct LiveTimelineSpeechWindow: Equatable, Identifiable {
+    let id: String
+    let turnID: String
+    var realtimeItemID: String?
+    let audioStartNs: UInt64
+    var audioEndNs: UInt64?
+    var transcript: String?
+}
+
+struct LiveTimelineTurnSnapshot: Equatable, Identifiable {
+    let id: String
+    let turnID: String
+    let speechWindowID: String
+    var realtimeItemID: String?
+    let audioStartNs: UInt64
+    var audioEndNs: UInt64
+    var transcript: String?
+    var visualFrameRefs: [LiveTimelineVisualFrameRef]
+}
+
+final class LiveTimelineStore {
+    private let maxVisualFrameRefs: Int
+    private let turnVisualLookbackNs: UInt64
+    private let turnVisualLookaheadNs: UInt64
+    private var nextSpeechIndex = 0
+    private var nextFrameIndex = 0
+    private var currentSpeechWindowID: String?
+
+    private(set) var speechWindows: [LiveTimelineSpeechWindow] = []
+    private(set) var visualFrameRefs: [LiveTimelineVisualFrameRef] = []
+    private(set) var turnSnapshots: [LiveTimelineTurnSnapshot] = []
+    private(set) var latestRealtimeVisualSentAtNs: UInt64?
+
+    init(
+        maxVisualFrameRefs: Int = 60,
+        turnVisualLookbackNs: UInt64 = 1_500_000_000,
+        turnVisualLookaheadNs: UInt64 = 250_000_000
+    ) {
+        self.maxVisualFrameRefs = max(1, maxVisualFrameRefs)
+        self.turnVisualLookbackNs = turnVisualLookbackNs
+        self.turnVisualLookaheadNs = turnVisualLookaheadNs
+    }
+
+    func reset() {
+        nextSpeechIndex = 0
+        nextFrameIndex = 0
+        currentSpeechWindowID = nil
+        speechWindows.removeAll()
+        visualFrameRefs.removeAll()
+        turnSnapshots.removeAll()
+        latestRealtimeVisualSentAtNs = nil
+    }
+
+    @discardableResult
+    func noteSpeechStarted(
+        atNs: UInt64,
+        realtimeItemID: String? = nil
+    ) -> LiveTimelineSpeechWindow {
+        if let currentSpeechWindowID,
+           let current = speechWindows.first(where: { $0.id == currentSpeechWindowID && $0.audioEndNs == nil }) {
+            return current
+        }
+        nextSpeechIndex += 1
+        let speechID = "ios_speech_\(nextSpeechIndex)"
+        let turnID = "ios_turn_\(nextSpeechIndex)"
+        let window = LiveTimelineSpeechWindow(
+            id: speechID,
+            turnID: turnID,
+            realtimeItemID: cleaned(realtimeItemID),
+            audioStartNs: atNs,
+            audioEndNs: nil,
+            transcript: nil
+        )
+        speechWindows.append(window)
+        currentSpeechWindowID = speechID
+        return window
+    }
+
+    @discardableResult
+    func noteSpeechStopped(atNs: UInt64) -> LiveTimelineTurnSnapshot? {
+        guard let id = currentSpeechWindowID,
+              let index = speechWindows.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        if speechWindows[index].audioEndNs == nil {
+            speechWindows[index].audioEndNs = atNs
+        }
+        let window = speechWindows[index]
+        currentSpeechWindowID = nil
+        guard let audioEndNs = window.audioEndNs else { return nil }
+        let frames = visualFramesForTurn(audioStartNs: window.audioStartNs, audioEndNs: audioEndNs)
+        let snapshot = LiveTimelineTurnSnapshot(
+            id: window.turnID,
+            turnID: window.turnID,
+            speechWindowID: window.id,
+            realtimeItemID: window.realtimeItemID,
+            audioStartNs: window.audioStartNs,
+            audioEndNs: audioEndNs,
+            transcript: window.transcript,
+            visualFrameRefs: frames
+        )
+        turnSnapshots.append(snapshot)
+        return snapshot
+    }
+
+    @discardableResult
+    func noteVisualFrame(
+        capturedAtNs: UInt64,
+        capturedAt: Date,
+        byteCount: Int
+    ) -> LiveTimelineVisualFrameRef {
+        nextFrameIndex += 1
+        let ref = LiveTimelineVisualFrameRef(
+            id: "ios_frame_\(nextFrameIndex)",
+            capturedAtNs: capturedAtNs,
+            capturedAt: capturedAt,
+            byteCount: byteCount,
+            sentToRealtimeAtNs: nil,
+            uploadedAtNs: nil
+        )
+        visualFrameRefs.append(ref)
+        if visualFrameRefs.count > maxVisualFrameRefs {
+            visualFrameRefs.removeFirst(visualFrameRefs.count - maxVisualFrameRefs)
+        }
+        return ref
+    }
+
+    func markVisualFrameSentToRealtime(id: String, atNs: UInt64) {
+        updateFrame(id: id) { frame in
+            frame.sentToRealtimeAtNs = atNs
+        }
+        latestRealtimeVisualSentAtNs = atNs
+    }
+
+    func markVisualFrameUploaded(id: String, atNs: UInt64) {
+        updateFrame(id: id) { frame in
+            frame.uploadedAtNs = atNs
+        }
+    }
+
+    func attachTranscript(itemID: String?, transcript: String) {
+        let cleanedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedTranscript.isEmpty else { return }
+        if let itemID = cleaned(itemID),
+           let index = speechWindows.lastIndex(where: { $0.realtimeItemID == itemID }) {
+            speechWindows[index].transcript = cleanedTranscript
+            updateSnapshot(forSpeechWindowID: speechWindows[index].id, itemID: itemID, transcript: cleanedTranscript)
+            return
+        }
+        guard let index = speechWindows.lastIndex(where: { $0.transcript == nil }) else { return }
+        speechWindows[index].realtimeItemID = cleaned(itemID) ?? speechWindows[index].realtimeItemID
+        speechWindows[index].transcript = cleanedTranscript
+        updateSnapshot(
+            forSpeechWindowID: speechWindows[index].id,
+            itemID: speechWindows[index].realtimeItemID,
+            transcript: cleanedTranscript
+        )
+    }
+
+    func latestVisualFrameRef(maxAgeNs: UInt64, nowNs: UInt64) -> LiveTimelineVisualFrameRef? {
+        guard let latest = visualFrameRefs.last else { return nil }
+        guard nowNs >= latest.capturedAtNs, nowNs - latest.capturedAtNs <= maxAgeNs else { return nil }
+        return latest
+    }
+
+    func hasRealtimeVisualSent(within freshnessNs: UInt64, nowNs: UInt64) -> Bool {
+        guard let sentAt = latestRealtimeVisualSentAtNs, nowNs >= sentAt else { return false }
+        return nowNs - sentAt <= freshnessNs
+    }
+
+    private func visualFramesForTurn(audioStartNs: UInt64, audioEndNs: UInt64) -> [LiveTimelineVisualFrameRef] {
+        let lowerBound = audioStartNs > turnVisualLookbackNs ? audioStartNs - turnVisualLookbackNs : 0
+        let upperBound = audioEndNs + turnVisualLookaheadNs
+        let inWindow = visualFrameRefs
+            .filter { $0.capturedAtNs >= lowerBound && $0.capturedAtNs <= upperBound }
+            .suffix(2)
+        if !inWindow.isEmpty {
+            return Array(inWindow)
+        }
+        return visualFrameRefs
+            .filter { $0.capturedAtNs <= audioEndNs }
+            .suffix(1)
+    }
+
+    private func updateFrame(id: String, update: (inout LiveTimelineVisualFrameRef) -> Void) {
+        if let index = visualFrameRefs.firstIndex(where: { $0.id == id }) {
+            update(&visualFrameRefs[index])
+        }
+        for snapshotIndex in turnSnapshots.indices {
+            for frameIndex in turnSnapshots[snapshotIndex].visualFrameRefs.indices
+            where turnSnapshots[snapshotIndex].visualFrameRefs[frameIndex].id == id {
+                update(&turnSnapshots[snapshotIndex].visualFrameRefs[frameIndex])
+            }
+        }
+    }
+
+    private func updateSnapshot(forSpeechWindowID id: String, itemID: String?, transcript: String) {
+        guard let index = turnSnapshots.lastIndex(where: { $0.speechWindowID == id }) else { return }
+        turnSnapshots[index].realtimeItemID = cleaned(itemID) ?? turnSnapshots[index].realtimeItemID
+        turnSnapshots[index].transcript = transcript
+    }
+
+    private func cleaned(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 enum LiveConversationRole: String, Codable, Equatable {
     case user
     case assistant

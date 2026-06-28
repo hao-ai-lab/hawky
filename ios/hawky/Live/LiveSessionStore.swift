@@ -285,6 +285,12 @@ final class LiveSessionStore {
     private let recordingSink = LiveRecordingSink()
     private var toolCameraFrames = LiveToolCameraFrameCache()
     private static let liveToolCameraFrameMaxAgeNs: UInt64 = 30_000_000_000
+    private let realtimeFrameFeeder = RealtimeFrameFeeder()
+    private let liveTimeline = LiveTimelineStore()
+    private var latestTimelineVisualFrame: (refID: String, frame: LiveJPEGFrame, capturedAtNs: UInt64)?
+    private static let turnVisualFreshnessNs: UInt64 = 1_000_000_000
+    private static let turnVisualMaxAgeNs: UInt64 = 2_000_000_000
+    private static let turnVisualInjectionBudgetNs: UInt64 = 120_000_000
     /// Parallel mic capture used ONLY for recording when the provider owns the
     /// realtime mic (WebRTC) and therefore never tees PCM to `recordingSink`.
     /// nil for providers whose mic chunks already flow through `ingestAudio`.
@@ -1590,6 +1596,8 @@ final class LiveSessionStore {
         phase = .connecting
         bridgeStatus = .idle
         toolCameraFrames.clear()
+        liveTimeline.reset()
+        latestTimelineVisualFrame = nil
         // A start is now underway — clear any stale "can't start" alert so it
         // can't linger over a connecting/connected session.
         pendingUserAlert = nil
@@ -1733,6 +1741,10 @@ final class LiveSessionStore {
         if let rtcProvider = nextProvider as? PipecatOpenAIRealtimeLiveSessionProvider {
             rtcProvider.awaitPendingTranscriptAppend = { [weak self] in
                 await self?.awaitPendingTranscriptAppend()
+            }
+            rtcProvider.prepareUserTurnResponseHook = { [weak self, weak rtcProvider] in
+                guard let provider = rtcProvider else { return }
+                await self?.prepareUserTurnResponseContext(provider: provider)
             }
             rtcProvider.summarizeHook = { [weak self] scope in
                 guard let self, let summarize = self.summarizeProvider else {
@@ -2791,6 +2803,7 @@ final class LiveSessionStore {
         visualDeduplicator = liveConfig.visualDedupEnabled
             ? AverageHashDeduplicator()
             : PassThroughDeduplicator()
+        realtimeFrameFeeder.reset()
 
         switch liveConfig.visualSource {
         case .off:
@@ -2912,16 +2925,50 @@ final class LiveSessionStore {
         if liveConfig.showVisualFramesInTranscript {
             appendVisualFrame(data)
         }
+        let frameRef = liveTimeline.noteVisualFrame(
+            capturedAtNs: capturedAtNs,
+            capturedAt: capturedAt,
+            byteCount: data.count
+        )
+        latestTimelineVisualFrame = (frameRef.id, frame, capturedAtNs)
         // Tee the same visual frame to the recorder sink when recording is on.
         recordingSink.ingestFrame(frame)
-        do {
-            try await provider.sendFrame(frame)
-            if staySilentActive { silenceFrameCount += 1 }
-        } catch {
-            let message = "Visual frame upload failed: \(error.localizedDescription)"
-            diagnostics.lastError = message
-            diagnostics.visualStatus = "Frame send failed"
-            appendSystemMessage(message, level: .error)
+        if liveConfig.provider == .openAIRealtime {
+            realtimeFrameFeeder.offer(
+                frame,
+                provider: provider,
+                onSent: { [weak self] _ in
+                    guard let self else { return }
+                    self.liveTimeline.markVisualFrameSentToRealtime(
+                        id: frameRef.id,
+                        atNs: Self.currentUptimeNanoseconds()
+                    )
+                    if self.staySilentActive { self.silenceFrameCount += 1 }
+                },
+                onError: { [weak self] error in
+                    guard let self else { return }
+                    let message = "Visual frame upload failed: \(error.localizedDescription)"
+                    self.diagnostics.lastError = message
+                    self.diagnostics.visualStatus = "Frame send failed"
+                    self.appendSystemMessage(message, level: .error)
+                }
+            )
+        } else {
+            do {
+                let sent = try await provider.sendFrame(frame)
+                if sent {
+                    liveTimeline.markVisualFrameSentToRealtime(
+                        id: frameRef.id,
+                        atNs: Self.currentUptimeNanoseconds()
+                    )
+                    if staySilentActive { silenceFrameCount += 1 }
+                }
+            } catch {
+                let message = "Visual frame upload failed: \(error.localizedDescription)"
+                diagnostics.lastError = message
+                diagnostics.visualStatus = "Frame send failed"
+                appendSystemMessage(message, level: .error)
+            }
         }
         // Cocktail Party Mode (#627): run face recognition on the same frame. The
         // controller rate-limits/dedups internally, so feeding every frame is fine.
@@ -2945,9 +2992,90 @@ final class LiveSessionStore {
         }
     }
 
+    private func prepareUserTurnResponseContext(provider: LiveSessionProvider) async {
+        let nowNs = Self.currentUptimeNanoseconds()
+        noteTimelineSpeechStopped(atNs: nowNs)
+        await sendLatestVisualContextForTurnIfNeeded(provider: provider, nowNs: nowNs)
+    }
+
+    private func sendLatestVisualContextForTurnIfNeeded(
+        provider: LiveSessionProvider,
+        nowNs: UInt64
+    ) async {
+        guard isStreamingVisual,
+              liveConfig.provider == .openAIRealtime,
+              !liveTimeline.hasRealtimeVisualSent(within: Self.turnVisualFreshnessNs, nowNs: nowNs),
+              let latest = latestTimelineVisualFrame,
+              nowNs >= latest.capturedAtNs,
+              nowNs - latest.capturedAtNs <= Self.turnVisualMaxAgeNs else {
+            return
+        }
+        let sent = await sendTurnVisualContextWithBudget(
+            frame: latest.frame,
+            frameRefID: latest.refID,
+            provider: provider
+        )
+        if !sent {
+            appendVerbose(
+                "Turn visual context skipped",
+                detail: "The latest frame was not sent before the response budget elapsed."
+            )
+        }
+    }
+
+    private func sendTurnVisualContextWithBudget(
+        frame: LiveJPEGFrame,
+        frameRefID: String,
+        provider: LiveSessionProvider
+    ) async -> Bool {
+        let gate = LiveOneShotFlag()
+        return await withCheckedContinuation { continuation in
+            let sendTask = Task { @MainActor [weak self, provider, frame, frameRefID] in
+                let sent = await self?.sendTurnVisualContext(
+                    frame: frame,
+                    frameRefID: frameRefID,
+                    provider: provider
+                ) ?? false
+                if gate.tryComplete() {
+                    continuation.resume(returning: sent)
+                }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: Self.turnVisualInjectionBudgetNs)
+                if gate.tryComplete() {
+                    sendTask.cancel()
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    private func sendTurnVisualContext(
+        frame: LiveJPEGFrame,
+        frameRefID: String,
+        provider: LiveSessionProvider
+    ) async -> Bool {
+        do {
+            let sent = try await provider.sendFrame(frame)
+            guard sent else { return false }
+            liveTimeline.markVisualFrameSentToRealtime(
+                id: frameRefID,
+                atNs: Self.currentUptimeNanoseconds()
+            )
+            if staySilentActive { silenceFrameCount += 1 }
+            return true
+        } catch {
+            let message = "Turn visual context failed: \(error.localizedDescription)"
+            diagnostics.lastError = message
+            appendVerbose(message)
+            return false
+        }
+    }
+
     private func stopVisualStream() async {
         isStreamingVisual = false
         toolCameraFrames.clear()
+        realtimeFrameFeeder.cancel()
         visualDeduplicator.reset()
         visualFramesSkipped = 0
 
@@ -3249,6 +3377,7 @@ final class LiveSessionStore {
             appendUserTranscriptDelta(itemID: itemID, delta: text, detail: detail, eventType: eventType)
         case .inputTranscriptComplete(let itemID, let text, let detail, let eventType):
             finishUserTranscript(itemID: itemID, transcript: text, detail: detail, eventType: eventType)
+            liveTimeline.attachTranscript(itemID: itemID, transcript: text)
             enqueueFallbackVoiceprintTranscriptCompleted(itemID: itemID, transcript: text)
         case .outputAudioDelta(let data):
             publishOutputAudioDiagnostics(receivedBytes: data.count)
@@ -3336,7 +3465,8 @@ final class LiveSessionStore {
     }
 
     private func handleRealtimeRawEvent(_ type: String, json: String) {
-        if let event = prepareVoiceprintRealtimeEvent(rawType: type, rawJSON: json) {
+        let realtimeEvent = prepareVoiceprintRealtimeEvent(rawType: type, rawJSON: json)
+        if let event = realtimeEvent {
             enqueueVoiceprintRealtimeEvent(event)
             if type == "conversation.item.input_audio_transcription.completed",
                let itemID = event.itemID {
@@ -3352,6 +3482,7 @@ final class LiveSessionStore {
 
         switch type {
         case "input_audio_buffer.speech_started":
+            noteTimelineSpeechStarted(event: realtimeEvent)
             startRawAudioTrackSegmentIfNeeded()
             guard config.bargeInPolicy.stopsLocalPlaybackOnSpeechStart else { return }
             audioOutputPlayer.stop()
@@ -3360,10 +3491,26 @@ final class LiveSessionStore {
             append(diagnostics.outputAudioStatus)
             appendSystemMessage("Interrupted assistant playback")
         case "input_audio_buffer.speech_stopped":
+            noteTimelineSpeechStopped(atNs: Self.currentUptimeNanoseconds())
             stopRawAudioTrackSegmentIfNeeded()
         default:
             break
         }
+    }
+
+    private func noteTimelineSpeechStarted(event: LiveVoiceprintRealtimeEvent?) {
+        liveTimeline.noteSpeechStarted(
+            atNs: Self.currentUptimeNanoseconds(),
+            realtimeItemID: event?.itemID ?? event?.speechWindowID
+        )
+    }
+
+    private func noteTimelineSpeechStopped(atNs: UInt64) {
+        guard let snapshot = liveTimeline.noteSpeechStopped(atNs: atNs) else { return }
+        appendVerbose(
+            "Live turn timeline snapshot",
+            detail: Self.timelineSnapshotDebugDescription(snapshot)
+        )
     }
 
     private func prepareVoiceprintRealtimeEvent(rawType: String, rawJSON: String) -> LiveVoiceprintRealtimeEvent? {
@@ -5265,10 +5412,31 @@ final class LiveSessionStore {
         return String(id.prefix(8))
     }
 
+    nonisolated private static func timelineSnapshotDebugDescription(
+        _ snapshot: LiveTimelineTurnSnapshot
+    ) -> String {
+        let frameIDs = snapshot.visualFrameRefs.map(\.id).joined(separator: ",")
+        let durationMs = Double(snapshot.audioEndNs - snapshot.audioStartNs) / 1_000_000
+        return "turn=\(snapshot.turnID) speech=\(snapshot.speechWindowID) duration_ms=\(Int(durationMs.rounded())) frames=[\(frameIDs)]"
+    }
+
     nonisolated private static func currentUptimeNanoseconds() -> UInt64 {
         UInt64(DispatchTime.now().uptimeNanoseconds)
     }
 
+}
+
+private final class LiveOneShotFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+
+    func tryComplete() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed else { return false }
+        completed = true
+        return true
+    }
 }
 
 @MainActor

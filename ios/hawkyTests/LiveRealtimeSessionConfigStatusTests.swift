@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import hawky
 
@@ -25,6 +26,43 @@ import Testing
         #expect(status.connectedProviderStatus == "Session config failed")
         #expect(status.connectedMessage == "Session config failed")
     }
+}
+
+@MainActor
+private final class FrameFeederMockProvider: LiveSessionProvider {
+    private let sendDelayNs: UInt64
+    private let sendResult: Bool
+    private let stream: AsyncStream<LiveSessionEvent>
+
+    private(set) var sentFrames: [LiveJPEGFrame] = []
+
+    init(sendDelayNs: UInt64 = 0, sendResult: Bool = true) {
+        self.sendDelayNs = sendDelayNs
+        self.sendResult = sendResult
+        self.stream = AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+
+    func connect(config: LiveSessionConfig) async throws {}
+    func setAudioInputEnabled(_ enabled: Bool) async throws {}
+    func sendAudio(_ chunk: LiveAudioChunk) async throws {}
+    func streamAudio(_ chunk: LiveAudioChunk) async throws {}
+    func commitAudioStream() async throws {}
+
+    func sendFrame(_ frame: LiveJPEGFrame) async throws -> Bool {
+        sentFrames.append(frame)
+        if sendDelayNs > 0 {
+            try? await Task.sleep(nanoseconds: sendDelayNs)
+        }
+        return sendResult
+    }
+
+    func sendText(_ text: String) async throws {}
+    func sendContext(_ text: String, createResponse: Bool) async throws {}
+    func surfaceIntention(_ intentionId: String?, _ text: String, speak: Bool, whenBusy: SurfaceBusyPolicy, cautious: Bool) async throws {}
+    func events() -> AsyncStream<LiveSessionEvent> { stream }
+    func close() async {}
 }
 
 @Suite struct LiveRealtimeFastPathTests {
@@ -64,6 +102,112 @@ import Testing
 
         #expect(result.config.mediaPersistenceMode == .liveUpload)
         #expect(!result.deferredLiveUpload)
+    }
+}
+
+@Suite struct LiveTimelineStoreTests {
+    @Test func speechWindowSnapshotsNearestVisualFrames() {
+        let timeline = LiveTimelineStore()
+
+        let first = timeline.noteVisualFrame(
+            capturedAtNs: 1_000_000_000,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            byteCount: 10
+        )
+        let second = timeline.noteVisualFrame(
+            capturedAtNs: 1_800_000_000,
+            capturedAt: Date(timeIntervalSince1970: 2),
+            byteCount: 20
+        )
+        let speech = timeline.noteSpeechStarted(atNs: 1_500_000_000, realtimeItemID: "item_1")
+        let snapshot = timeline.noteSpeechStopped(atNs: 2_000_000_000)
+
+        #expect(speech.id == "ios_speech_1")
+        #expect(snapshot?.speechWindowID == "ios_speech_1")
+        #expect(snapshot?.realtimeItemID == "item_1")
+        #expect(snapshot?.visualFrameRefs.map(\.id) == [first.id, second.id])
+    }
+
+    @Test func realtimeSentAndTranscriptUpdateExistingSnapshot() {
+        let timeline = LiveTimelineStore()
+
+        let frame = timeline.noteVisualFrame(
+            capturedAtNs: 1_000,
+            capturedAt: Date(timeIntervalSince1970: 1),
+            byteCount: 10
+        )
+        _ = timeline.noteSpeechStarted(atNs: 900, realtimeItemID: "item_1")
+        _ = timeline.noteSpeechStopped(atNs: 1_100)
+
+        timeline.markVisualFrameSentToRealtime(id: frame.id, atNs: 1_200)
+        timeline.attachTranscript(itemID: "item_1", transcript: "look at this")
+
+        #expect(timeline.hasRealtimeVisualSent(within: 500, nowNs: 1_500))
+        #expect(timeline.turnSnapshots.last?.transcript == "look at this")
+        #expect(timeline.turnSnapshots.last?.visualFrameRefs.last?.sentToRealtimeAtNs == 1_200)
+    }
+}
+
+@Suite @MainActor
+struct RealtimeFrameFeederTests {
+    @Test func busyProviderKeepsOnlyLatestPendingFrame() async throws {
+        let feeder = RealtimeFrameFeeder(frameTTL: 10)
+        let provider = FrameFeederMockProvider(sendDelayNs: 40_000_000)
+
+        feeder.offer(LiveJPEGFrame(data: Data([1]), capturedAt: Date()), provider: provider, onError: { _ in })
+        feeder.offer(LiveJPEGFrame(data: Data([2]), capturedAt: Date()), provider: provider, onError: { _ in })
+        feeder.offer(LiveJPEGFrame(data: Data([3]), capturedAt: Date()), provider: provider, onError: { _ in })
+
+        await waitForFrameFeeder(provider: provider, feeder: feeder, expectedFrameCount: 2)
+
+        #expect(provider.sentFrames.map(\.data) == [Data([1]), Data([3])])
+        #expect(feeder.busyDropCount == 1)
+        #expect(!feeder.isBusy)
+    }
+
+    @Test func expiredFrameDropsWithoutStartingSend() {
+        let feeder = RealtimeFrameFeeder(frameTTL: 0.5)
+        let provider = FrameFeederMockProvider()
+
+        feeder.offer(
+            LiveJPEGFrame(data: Data([9]), capturedAt: Date().addingTimeInterval(-2)),
+            provider: provider,
+            onError: { _ in }
+        )
+
+        #expect(provider.sentFrames.isEmpty)
+        #expect(feeder.expiredDropCount == 1)
+        #expect(!feeder.isBusy)
+    }
+
+    @Test func providerDroppedFrameDoesNotAcknowledgeSent() async {
+        let feeder = RealtimeFrameFeeder(frameTTL: 10)
+        let provider = FrameFeederMockProvider(sendResult: false)
+        var acknowledgedFrames: [LiveJPEGFrame] = []
+
+        feeder.offer(
+            LiveJPEGFrame(data: Data([7]), capturedAt: Date()),
+            provider: provider,
+            onSent: { acknowledgedFrames.append($0) },
+            onError: { _ in }
+        )
+
+        await waitForFrameFeeder(provider: provider, feeder: feeder, expectedFrameCount: 1)
+
+        #expect(provider.sentFrames.map(\.data) == [Data([7])])
+        #expect(acknowledgedFrames.isEmpty)
+        #expect(!feeder.isBusy)
+    }
+
+    private func waitForFrameFeeder(
+        provider: FrameFeederMockProvider,
+        feeder: RealtimeFrameFeeder,
+        expectedFrameCount: Int
+    ) async {
+        for _ in 0..<50 {
+            if provider.sentFrames.count >= expectedFrameCount, !feeder.isBusy { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }
 
