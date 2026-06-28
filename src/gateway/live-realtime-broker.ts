@@ -27,6 +27,10 @@ export type LiveRealtimeClientSecretResponse = {
   error?: string;
 };
 
+export type LiveRealtimeBrokerOptions = {
+  quotaKey?: string;
+};
+
 export class LiveRealtimeBrokerError extends Error {
   readonly status: number;
 
@@ -37,8 +41,18 @@ export class LiveRealtimeBrokerError extends Error {
   }
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const realtimeMintQuotas = new Map<string, {
+  hourStart: number;
+  hourCount: number;
+  dayStart: number;
+  dayCount: number;
+}>();
+
 export async function mintOpenAIRealtimeClientSecret(
   params: LiveRealtimeClientSecretParams,
+  options: LiveRealtimeBrokerOptions = {},
 ): Promise<LiveRealtimeClientSecretResponse> {
   const cfg = loadConfig();
   // Prefer a caller-supplied "bring your own key" (hosted web demo) when it is
@@ -50,6 +64,9 @@ export async function mintOpenAIRealtimeClientSecret(
       "No OpenAI API key available. Add your own key in Settings (BYOK) or configure one on the gateway.",
       400,
     );
+  }
+  if (!byok) {
+    enforceRealtimeMintQuota(options.quotaKey ?? "unknown");
   }
 
   const model = sanitizeRealtimeModel(params.model);
@@ -103,6 +120,10 @@ export async function mintOpenAIRealtimeClientSecret(
     websocket_url: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,
     client_secret: payload,
   };
+}
+
+export function resetRealtimeMintQuotaForTests(): void {
+  realtimeMintQuotas.clear();
 }
 
 /**
@@ -160,8 +181,9 @@ function sanitizeToolChoice(raw: string | undefined): "auto" | "none" | "require
 }
 
 function sanitizeClientSecretTTL(raw: number | undefined): number {
-  if (!Number.isFinite(raw)) return 600;
-  return Math.min(Math.max(Math.round(raw!), 10), 7200);
+  const max = envInt("HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS", 600);
+  if (!Number.isFinite(raw)) return max;
+  return Math.min(Math.max(Math.round(raw!), 10), Math.min(Math.max(max, 10), 7200));
 }
 
 function extractOpenAIError(payload: unknown): string | null {
@@ -170,4 +192,41 @@ function extractOpenAIError(payload: unknown): string | null {
   if (!error || typeof error !== "object") return null;
   const message = (error as { message?: unknown }).message;
   return typeof message === "string" && message.trim() ? message : null;
+}
+
+function enforceRealtimeMintQuota(rawKey: string): void {
+  const perHour = envInt("HAWKY_REALTIME_MINTS_PER_HOUR", 12);
+  const perDay = envInt("HAWKY_REALTIME_MINTS_PER_DAY", 50);
+  if (perHour <= 0 && perDay <= 0) return;
+
+  const now = Date.now();
+  const key = rawKey.trim() || "unknown";
+  const entry = realtimeMintQuotas.get(key) ?? {
+    hourStart: now,
+    hourCount: 0,
+    dayStart: now,
+    dayCount: 0,
+  };
+  if (now - entry.hourStart >= HOUR_MS) {
+    entry.hourStart = now;
+    entry.hourCount = 0;
+  }
+  if (now - entry.dayStart >= DAY_MS) {
+    entry.dayStart = now;
+    entry.dayCount = 0;
+  }
+  if (perHour > 0 && entry.hourCount >= perHour) {
+    throw new LiveRealtimeBrokerError("Realtime gateway hourly limit reached.", 429);
+  }
+  if (perDay > 0 && entry.dayCount >= perDay) {
+    throw new LiveRealtimeBrokerError("Realtime gateway daily limit reached.", 429);
+  }
+  entry.hourCount += 1;
+  entry.dayCount += 1;
+  realtimeMintQuotas.set(key, entry);
+}
+
+function envInt(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(value) ? value : fallback;
 }
