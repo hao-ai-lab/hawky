@@ -131,6 +131,95 @@ export interface FrontmostAppResult {
 
 export type CommandResult = SystemRunResult | SystemWhichResult | ScreenshotResult | DeviceInfoResult | FrontmostAppResult;
 
+type CommandParams = SystemRunParams | SystemWhichParams | { timeoutMs?: number; display?: number } | Record<string, never>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requireParamsRecord(command: string, params: unknown): Record<string, unknown> {
+  if (!isRecord(params)) {
+    throw new Error(`${command} params must be an object`);
+  }
+  return params;
+}
+
+function optionalParamsRecord(command: string, params: unknown): Record<string, unknown> {
+  if (params === undefined || params === null) return {};
+  return requireParamsRecord(command, params);
+}
+
+function optionalString(command: string, params: Record<string, unknown>, key: string): string | undefined {
+  const value = params[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`${command}.${key} must be a string`);
+  }
+  return value;
+}
+
+function optionalPositiveInteger(
+  command: string,
+  params: Record<string, unknown>,
+  key: string,
+  max: number,
+): number | undefined {
+  const value = params[key];
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || (value as number) <= 0 || (value as number) > max) {
+    throw new Error(`${command}.${key} must be an integer from 1 to ${max}`);
+  }
+  return value as number;
+}
+
+function requireStringArray(command: string, params: Record<string, unknown>, key: string): string[] {
+  const value = params[key];
+  if (!Array.isArray(value)) {
+    throw new Error(`${command}.${key} must be an array of strings`);
+  }
+  if (!value.every((item) => typeof item === "string")) {
+    throw new Error(`${command}.${key} must be an array of strings`);
+  }
+  return value;
+}
+
+function validateCommandParams(command: string, params: unknown): CommandParams {
+  switch (command) {
+    case "system.run": {
+      const p = requireParamsRecord(command, params);
+      return {
+        command: requireStringArray(command, p, "command"),
+        cwd: optionalString(command, p, "cwd"),
+        timeoutMs: optionalPositiveInteger(command, p, "timeoutMs", 30 * 60_000),
+      };
+    }
+    case "system.which": {
+      const p = requireParamsRecord(command, params);
+      return {
+        bins: requireStringArray(command, p, "bins"),
+      };
+    }
+    case "screenshot": {
+      const p = optionalParamsRecord(command, params);
+      return {
+        timeoutMs: optionalPositiveInteger(command, p, "timeoutMs", 120_000),
+        display: optionalPositiveInteger(command, p, "display", 16),
+      };
+    }
+    case "frontmost.app": {
+      const p = optionalParamsRecord(command, params);
+      return {
+        timeoutMs: optionalPositiveInteger(command, p, "timeoutMs", 120_000),
+      };
+    }
+    case "device.info":
+      optionalParamsRecord(command, params);
+      return {};
+    default:
+      return {};
+  }
+}
+
 // -----------------------------------------------------------------------------
 // system.run — Execute a shell command
 // -----------------------------------------------------------------------------
@@ -603,5 +692,5 @@ export async function dispatchCommand(
   if (!handler) {
     throw new Error(`Unknown node command: ${command}`);
   }
-  return handler(params, signal);
+  return handler(validateCommandParams(command, params), signal);
 }
