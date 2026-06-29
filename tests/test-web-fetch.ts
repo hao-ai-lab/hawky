@@ -28,10 +28,10 @@ function ctx(overrides?: Partial<ToolContext>): ToolContext {
 }
 
 async function doFetch(
-  input: { url: string; extract_mode?: "markdown" | "text"; max_chars?: number },
+  input: Record<string, unknown>,
   overrides?: Partial<ToolContext>,
 ): Promise<ToolResult> {
-  return executeWebFetch(input, ctx(overrides));
+  return executeWebFetch(input as any, ctx(overrides));
 }
 
 function mockFetch(
@@ -395,6 +395,12 @@ describe("Errors and validation", () => {
     expect(r.content).toContain("Missing required parameter: url");
   });
 
+  test("non-string url returns a validation error", async () => {
+    const r = await doFetch({ url: 42 });
+    expect(r.type).toBe("error");
+    expect(r.content).toContain("Missing required parameter: url");
+  });
+
   test("invalid url returns error", async () => {
     const r = await doFetch({ url: "not a url at all !!!" });
     expect(r.type).toBe("error");
@@ -405,6 +411,28 @@ describe("Errors and validation", () => {
     const r = await doFetch({ url: "file:///tmp/secret.txt" });
     expect(r.type).toBe("error");
     expect(r.content).toContain("Invalid URL protocol");
+  });
+
+  test("invalid extract_mode returns a validation error before fetch", async () => {
+    mockFetch(async () => {
+      throw new Error("fetch should not be called");
+    });
+
+    const r = await doFetch({ url: "https://example.test/html", extract_mode: "html" });
+    expect(r.type).toBe("error");
+    expect(r.content).toContain("extract_mode");
+  });
+
+  test("invalid max_chars returns a validation error before fetch", async () => {
+    mockFetch(async () => {
+      throw new Error("fetch should not be called");
+    });
+
+    for (const max_chars of [Number.NaN, Number.POSITIVE_INFINITY, "120", 120.5]) {
+      const r = await doFetch({ url: "https://example.test/html", max_chars });
+      expect(r.type).toBe("error");
+      expect(r.content).toContain("max_chars");
+    }
   });
 
   test("network errors are surfaced", async () => {
@@ -513,6 +541,7 @@ describe("Tool definition and registry", () => {
     expect(webFetchToolDefinition.input_schema.properties.url).toBeDefined();
     expect(webFetchToolDefinition.input_schema.properties.extract_mode).toBeDefined();
     expect(webFetchToolDefinition.input_schema.properties.max_chars).toBeDefined();
+    expect(webFetchToolDefinition.input_schema.properties.extract_mode.enum).toEqual(["markdown", "text"]);
   });
 
   test("registry integration executes tool successfully", async () => {
