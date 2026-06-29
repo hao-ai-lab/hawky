@@ -31,6 +31,7 @@ import {
   type SearchResult,
   type SearchConfig,
   type ChunkRow,
+  type MemoryChunk,
   DEFAULT_SEARCH_CONFIG,
   DEFAULT_CHUNK_CONFIG,
   SNIPPET_MAX_CHARS,
@@ -429,76 +430,7 @@ export class MemoryIndex {
 
     const content = readFileSync(file.absPath, "utf-8");
     const chunks = chunkMarkdown(content, this.chunkConfig);
-    const model = this.provider?.model ?? "fts-only";
-    const now = Date.now();
-
-    // Remove old chunks for this file
-    this.removeFile(file.relPath);
-
-    // Generate embeddings (if provider available)
-    let embeddings: number[][] | null = null;
-    if (this.provider && chunks.length > 0) {
-      // Check cache first
-      const hashes = chunks.map((c) => c.hash);
-      const cached = getCachedEmbeddings(this.db, this.provider.id, model, hashes);
-      const uncachedIndices: number[] = [];
-      const uncachedTexts: string[] = [];
-
-      embeddings = new Array(chunks.length).fill(null);
-      for (let i = 0; i < chunks.length; i++) {
-        const cachedEmb = cached.get(chunks[i].hash);
-        if (cachedEmb) {
-          embeddings[i] = cachedEmb;
-        } else {
-          uncachedIndices.push(i);
-          uncachedTexts.push(chunks[i].text);
-        }
-      }
-
-      // Embed uncached chunks
-      if (uncachedTexts.length > 0) {
-        try {
-          const newEmbeddings = await this.provider.embed(uncachedTexts);
-          const cacheEntries: Array<{ hash: string; embedding: number[] }> = [];
-          for (let j = 0; j < uncachedIndices.length; j++) {
-            const idx = uncachedIndices[j];
-            embeddings[idx] = newEmbeddings[j];
-            cacheEntries.push({ hash: chunks[idx].hash, embedding: newEmbeddings[j] });
-          }
-          setCachedEmbeddings(this.db, this.provider.id, model, cacheEntries);
-        } catch (err) {
-          log.warn("embedding generation failed, indexing without vectors", {
-            file: file.relPath,
-            chunks: uncachedTexts.length,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          embeddings = null;
-        }
-      }
-    }
-
-    // Insert chunks
-    const insertChunk = this.db.query(
-      "INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    );
-    const insertFts = this.db.query(
-      "INSERT INTO chunks_fts (id, path, source, model, start_line, end_line, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    );
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const id = `${file.relPath}:${chunk.startLine}-${chunk.endLine}:${i}`;
-      const embeddingJson = embeddings?.[i] ? JSON.stringify(embeddings[i]) : "[]";
-
-      insertChunk.run(id, file.relPath, file.source, chunk.startLine, chunk.endLine, chunk.hash, model, chunk.text, embeddingJson, now);
-      insertFts.run(id, file.relPath, file.source, model, chunk.startLine, chunk.endLine, chunk.text);
-    }
-
-    // Update files table
-    this.db.run(
-      "INSERT OR REPLACE INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
-      [file.relPath, file.source, file.hash, file.mtime, file.size],
-    );
+    await this.indexChunksForFile(file, chunks);
   }
 
   /** Index a session JSONL file by extracting user+assistant text and chunking it. */
@@ -516,53 +448,17 @@ export class MemoryIndex {
     }
 
     const chunks = chunkMarkdown(result.text, this.chunkConfig);
+    await this.indexChunksForFile(file, chunks);
+  }
+
+  private async indexChunksForFile(file: WorkspaceFile, chunks: MemoryChunk[]): Promise<void> {
     const model = this.provider?.model ?? "fts-only";
     const now = Date.now();
 
-    // Remove old chunks for this file
     this.removeFile(file.relPath);
 
-    // Generate embeddings
-    let embeddings: number[][] | null = null;
-    if (this.provider && chunks.length > 0) {
-      const hashes = chunks.map((c) => c.hash);
-      const cached = getCachedEmbeddings(this.db, this.provider.id, model, hashes);
-      const uncachedIndices: number[] = [];
-      const uncachedTexts: string[] = [];
+    const embeddings = await this.embedChunks(file, chunks, model);
 
-      embeddings = new Array(chunks.length).fill(null);
-      for (let i = 0; i < chunks.length; i++) {
-        const cachedEmb = cached.get(chunks[i].hash);
-        if (cachedEmb) {
-          embeddings[i] = cachedEmb;
-        } else {
-          uncachedIndices.push(i);
-          uncachedTexts.push(chunks[i].text);
-        }
-      }
-
-      if (uncachedTexts.length > 0) {
-        try {
-          const newEmbeddings = await this.provider.embed(uncachedTexts);
-          const cacheEntries: Array<{ hash: string; embedding: number[] }> = [];
-          for (let j = 0; j < uncachedIndices.length; j++) {
-            const idx = uncachedIndices[j];
-            embeddings[idx] = newEmbeddings[j];
-            cacheEntries.push({ hash: chunks[idx].hash, embedding: newEmbeddings[j] });
-          }
-          setCachedEmbeddings(this.db, this.provider.id, model, cacheEntries);
-        } catch (err) {
-          log.warn("embedding generation failed for session file", {
-            file: file.relPath,
-            chunks: uncachedTexts.length,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          embeddings = null;
-        }
-      }
-    }
-
-    // Insert chunks
     const insertChunk = this.db.query(
       "INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
@@ -575,15 +471,61 @@ export class MemoryIndex {
       const id = `${file.relPath}:${chunk.startLine}-${chunk.endLine}:${i}`;
       const embeddingJson = embeddings?.[i] ? JSON.stringify(embeddings[i]) : "[]";
 
-      insertChunk.run(id, file.relPath, "sessions", chunk.startLine, chunk.endLine, chunk.hash, model, chunk.text, embeddingJson, now);
-      insertFts.run(id, file.relPath, "sessions", model, chunk.startLine, chunk.endLine, chunk.text);
+      insertChunk.run(id, file.relPath, file.source, chunk.startLine, chunk.endLine, chunk.hash, model, chunk.text, embeddingJson, now);
+      insertFts.run(id, file.relPath, file.source, model, chunk.startLine, chunk.endLine, chunk.text);
     }
 
-    // Update files table
     this.db.run(
       "INSERT OR REPLACE INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
-      [file.relPath, "sessions", file.hash, file.mtime, file.size],
+      [file.relPath, file.source, file.hash, file.mtime, file.size],
     );
+  }
+
+  private async embedChunks(
+    file: WorkspaceFile,
+    chunks: MemoryChunk[],
+    model: string,
+  ): Promise<number[][] | null> {
+    if (!this.provider || chunks.length === 0) return null;
+
+    const hashes = chunks.map((c) => c.hash);
+    const cached = getCachedEmbeddings(this.db, this.provider.id, model, hashes);
+    const uncachedIndices: number[] = [];
+    const uncachedTexts: string[] = [];
+
+    const embeddings = new Array<number[] | null>(chunks.length).fill(null);
+    for (let i = 0; i < chunks.length; i++) {
+      const cachedEmb = cached.get(chunks[i].hash);
+      if (cachedEmb) {
+        embeddings[i] = cachedEmb;
+      } else {
+        uncachedIndices.push(i);
+        uncachedTexts.push(chunks[i].text);
+      }
+    }
+
+    if (uncachedTexts.length === 0) {
+      return embeddings as number[][];
+    }
+
+    try {
+      const newEmbeddings = await this.provider.embed(uncachedTexts);
+      const cacheEntries: Array<{ hash: string; embedding: number[] }> = [];
+      for (let j = 0; j < uncachedIndices.length; j++) {
+        const idx = uncachedIndices[j];
+        embeddings[idx] = newEmbeddings[j];
+        cacheEntries.push({ hash: chunks[idx].hash, embedding: newEmbeddings[j] });
+      }
+      setCachedEmbeddings(this.db, this.provider.id, model, cacheEntries);
+      return embeddings as number[][];
+    } catch (err) {
+      log.warn("embedding generation failed, indexing without vectors", {
+        file: file.relPath,
+        chunks: uncachedTexts.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   /**
