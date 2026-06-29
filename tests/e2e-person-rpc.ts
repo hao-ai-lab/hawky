@@ -75,8 +75,6 @@ class E2ELegacyPersonRepository implements LegacyPersonRepository {
   readonly updates: Array<{
     personId: string;
     name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
   }> = [];
   readonly enrolls: Array<{
     imageBase64: string;
@@ -128,25 +126,14 @@ class E2ELegacyPersonRepository implements LegacyPersonRepository {
   async update(input: {
     personId: string;
     name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
   }) {
     this.updates.push(structuredClone(input));
     const existing = this.people.get(input.personId);
     if (!existing) return { ok: false as const, code: "NOT_FOUND" as const, error: "Missing legacy profile." };
 
-    const facts = Array.isArray(existing.facts) ? [...existing.facts] : [];
-    for (const fact of input.facts ?? []) {
-      if (!facts.includes(fact)) facts.push(fact);
-    }
-    const recaps = Array.isArray(existing.recaps) ? [...existing.recaps] : [];
-    if (input.recap) recaps.push({ summary: input.recap, at: "2026-06-27T12:00:00.000Z" });
-
     const next: LegacyDeepFaceProfile = {
       ...existing,
       name: input.name ?? existing.name,
-      facts,
-      recaps,
     };
     this.people.set(input.personId, next);
     return { ok: true as const, person: structuredClone(next) };
@@ -261,8 +248,6 @@ describe("E2E: person.* candidate review RPCs", () => {
         {
           personId: "p-unknown",
           name: "Morgan",
-          facts: null,
-          recap: null,
         },
       ]);
 

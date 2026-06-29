@@ -309,8 +309,6 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       {
         personId: "p-sarah",
         name: "Sarah Chen",
-        facts: null,
-        recap: null,
       },
     ]);
   });
@@ -643,8 +641,6 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       {
         personId: "p-unknown",
         name: "Morgan",
-        facts: null,
-        recap: null,
       },
     ]);
     const stored = store.get(candidateId!);
@@ -687,8 +683,6 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       {
         personId: "p-unknown",
         name: "Morgan",
-        facts: null,
-        recap: null,
       },
     ]);
 
@@ -751,8 +745,6 @@ function fakeLegacyPersonRepository(options: {
   update?: (input: {
     personId: string;
     name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
   }) => Record<string, unknown>;
   enroll?: (input: {
     imageBase64: string;
@@ -794,8 +786,8 @@ function fakeLegacyPersonRepository(options: {
       const person = options.update?.(input) ?? {
         id: input.personId,
         name: input.name ?? "Updated",
-        facts: input.facts ?? [],
-        recaps: input.recap ? [{ summary: input.recap }] : [],
+        facts: [],
+        recaps: [],
       };
       return { ok: true, person: person as LegacyDeepFaceProfile };
     },
