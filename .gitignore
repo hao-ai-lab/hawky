@@ -44,5 +44,6 @@ hawky-export-*.tar.gz
 .env.*
 !.env.example
 services/deepface/.venv/
+services/deepface/facedb/
 __pycache__/
 *.pyc
