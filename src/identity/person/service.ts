@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { allowedUsesForIdentitySignal } from "../core/index.js";
 import {
   buildFaceIdentitySignal,
@@ -27,6 +26,7 @@ import {
   type LegacyDeepFaceProfile,
 } from "./legacy-deepface.js";
 import { importLegacyDeepFaceProfiles } from "./migration.js";
+import { stableHash } from "./stable-hash.js";
 import type { PersonStore } from "./store.js";
 import { buildPersonTombstone } from "./tombstone.js";
 import type {
@@ -1227,23 +1227,6 @@ function uniqueNonEmptyStrings(values: string[]): string[] {
     out.push(text);
   }
   return out;
-}
-
-function stableHash(value: unknown): string {
-  return createHash("sha256").update(stableJson(value)).digest("hex").slice(0, 16);
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function isTerminalReview(state: string | undefined): boolean {
