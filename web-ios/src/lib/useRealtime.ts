@@ -448,6 +448,11 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   // True once the current response's assistant turn has been persisted (prevents
   // double-persist when both text.done and audio_transcript.done fire).
   const responsePersistedRef = useRef(false);
+  // True while a response is in flight (between response.created and
+  // response.done). Lets us only send response.cancel when there is actually
+  // something to cancel — otherwise the Realtime API errors with
+  // "Cancellation failed: no active response found".
+  const activeResponseRef = useRef(false);
   function streamAssistant(delta: string) {
     if (!delta) return;
     responseProducedTextRef.current = true;
@@ -748,6 +753,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       responseProducedTextRef.current = false;
       responsePersistedRef.current = false;
       assistantEntryIdRef.current = null;
+      activeResponseRef.current = true;
       return;
     }
 
@@ -809,6 +815,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       assistantEntryIdRef.current = null;
       responseProducedTextRef.current = false;
       responsePersistedRef.current = false;
+      activeResponseRef.current = false;
       return;
     }
 
@@ -831,9 +838,16 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       return;
     }
     if (type === "error") {
-      const message = ev.error?.message ?? raw;
-      setError(String(message));
-      push("warning", String(message));
+      const message = String(ev.error?.message ?? raw);
+      // A response.cancel that races a just-finished response is harmless — the
+      // model is already quiet, which is exactly what Stay Silent wants. Don't
+      // alarm the user with it.
+      if (ev.error?.code === "response_cancel_not_active" || /no active response found/i.test(message)) {
+        activeResponseRef.current = false;
+        return;
+      }
+      setError(message);
+      push("warning", message);
     }
   }
 
@@ -999,8 +1013,13 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         type: "session.update",
         session: { type: "realtime", audio: { input: { turn_detection: buildTurnDetection(settings, next, interrupt) } } },
       });
-      // While silent: cancel any in-flight response so it goes quiet immediately.
-      if (next) sendRealtime({ type: "response.cancel" });
+      // While silent: cancel any IN-FLIGHT response so it goes quiet immediately.
+      // Only cancel when one is actually active — otherwise the Realtime API
+      // errors with "Cancellation failed: no active response found".
+      if (next && activeResponseRef.current) {
+        sendRealtime({ type: "response.cancel" });
+        activeResponseRef.current = false;
+      }
       push("system", next ? "Stay Silent on — listening without replying." : "Stay Silent off.");
       return next;
     });

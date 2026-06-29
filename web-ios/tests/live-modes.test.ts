@@ -51,6 +51,18 @@ describe("Live modes", () => {
     expect(result.current.staySilent).toBe(false);
   });
 
+  it("toggling Stay Silent on with no active response never surfaces a cancellation error", () => {
+    // Regression: toggleStaySilent used to fire response.cancel unconditionally,
+    // and the Realtime API answers with "Cancellation failed: no active response
+    // found", which the error handler showed as a warning bubble + error banner.
+    const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
+    act(() => result.current.toggleStaySilent());
+    expect(result.current.staySilent).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.transcript.some((e) => e.kind === "warning")).toBe(false);
+    expect(result.current.transcript.some((e) => /cancellation failed/i.test(e.text))).toBe(false);
+  });
+
   it("toggling Cocktail Party flips state + uses on-demand recognition copy", () => {
     const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
     act(() => result.current.toggleCocktailParty());
