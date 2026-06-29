@@ -50,6 +50,21 @@ describe("bus — unsubscribe", () => {
     bus.publish("x", {});
     expect(got).toEqual([1]);
   });
+
+  test("unsubscribe during publish does not skip later matching subscribers", () => {
+    const bus = getBus();
+    const got: string[] = [];
+    const unsubscribeFirst = bus.subscribe("x", () => {
+      got.push("first");
+      unsubscribeFirst();
+    });
+    bus.subscribe("x", () => got.push("second"));
+
+    bus.publish("x", {});
+    bus.publish("x", {});
+
+    expect(got).toEqual(["first", "second", "second"]);
+  });
 });
 
 describe("bus — handler errors", () => {
