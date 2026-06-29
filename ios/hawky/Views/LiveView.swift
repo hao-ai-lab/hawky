@@ -1455,6 +1455,21 @@ private struct LiveMoreSheet: View {
                     )
                 }
                 .accessibilityIdentifier("live.moreSheet.peopleDatabase")
+
+                // Memory feature (#653): inspect the four-tier memory system
+                // and manually trigger distillation/consolidation. Surfaced
+                // directly under People Database so it's reachable without
+                // enabling Developer mode.
+                NavigationLink {
+                    LiveMemoryTestingView(store: store)
+                } label: {
+                    LiveMoreRow(
+                        title: "Memory",
+                        systemImage: "brain.head.profile",
+                        assetName: "LiveMoreIconMemory"
+                    )
+                }
+                .accessibilityIdentifier("live.moreSheet.memory")
             }
 
             if developerModeEnabled {
@@ -1470,19 +1485,6 @@ private struct LiveMoreSheet: View {
                     }
                     .rowPressAction()
                     .accessibilityIdentifier("live.moreSheet.mockLocation")
-
-                    // Memory feature (#653): inspect the four-tier memory system
-                    // and manually trigger distillation/consolidation.
-                    NavigationLink {
-                        LiveMemoryTestingView(store: store)
-                    } label: {
-                        LiveMoreRow(
-                            title: "Memory",
-                            systemImage: "brain.head.profile",
-                            assetName: "LiveMoreIconMemory"
-                        )
-                    }
-                    .accessibilityIdentifier("live.moreSheet.memory")
                 }
             }
         }
