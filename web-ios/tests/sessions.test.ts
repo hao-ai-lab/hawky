@@ -1,9 +1,21 @@
-import { describe, it, expect } from "vitest";
-import { cleanSessions, sessionDisplayName, sessionKeyFromId, type SessionEntry } from "../src/lib/session-store";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import {
+  cleanSessions,
+  sessionDisplayName,
+  sessionKeyFromId,
+  useSessionStore,
+  type SessionEntry,
+} from "../src/lib/session-store";
+import { useSocketStore } from "../src/lib/socket-store";
 
 function s(partial: Partial<SessionEntry> & { key: string }): SessionEntry {
   return { id: partial.key.replace(":", "/"), createdAt: "2026-06-21T00:00:00Z", messageCount: 1, ...partial };
 }
+
+beforeEach(() => {
+  useSessionStore.setState({ activeKey: "web:ios", sessions: [], loading: false });
+  useSocketStore.setState({ rpc: vi.fn(async () => ({ sessions: [] })) as any });
+});
 
 describe("cleanSessions", () => {
   it("hides realtime/cron/heartbeat channels", () => {
@@ -54,5 +66,24 @@ describe("sessionKeyFromId", () => {
   it("normalizes slash ids to colon keys", () => {
     expect(sessionKeyFromId("web/ios")).toBe("web:ios");
     expect(sessionKeyFromId("web:ios")).toBe("web:ios");
+  });
+});
+
+describe("useSessionStore.fetchSessions", () => {
+  it("preserves existing sessions when session.list fails", async () => {
+    const existing = [
+      s({ key: "web:existing", displayName: "Existing Chat", createdAt: "2026-06-22T00:00:00Z" }),
+    ];
+    useSessionStore.setState({ sessions: existing, loading: false });
+    useSocketStore.setState({
+      rpc: vi.fn(async () => {
+        throw new Error("gateway unavailable");
+      }) as any,
+    });
+
+    await useSessionStore.getState().fetchSessions();
+
+    expect(useSessionStore.getState().sessions).toEqual(existing);
+    expect(useSessionStore.getState().loading).toBe(false);
   });
 });

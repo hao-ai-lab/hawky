@@ -139,7 +139,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const all: SessionEntry[] = (res.sessions ?? []).map((s) => ({ ...s, key: sessionKeyFromId(s.id) }));
       set({ sessions: cleanSessions(all, get().activeKey), loading: false });
     } catch {
-      set({ sessions: [], loading: false });
+      set({ loading: false });
     }
   },
 
