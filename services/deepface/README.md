@@ -59,7 +59,7 @@ Notes:
 
 ## Storage
 
-Default DB root is `DEEPFACE_DB=./facedb`:
+Default DB root is `DEEPFACE_DB=services/deepface/facedb`:
 
 ```text
 facedb/
@@ -71,12 +71,12 @@ facedb/
 
 | Var | Default | Meaning |
 |---|---|---|
-| `DEEPFACE_DB` | `./facedb` | persistent profile/crop store |
+| `DEEPFACE_DB` | `services/deepface/facedb` | persistent profile/crop store |
 | `INSIGHTFACE_MODEL` | `buffalo_l` | InsightFace model pack |
 | `FACE_MATCH_THRESHOLD` | `0.35` | cosine similarity threshold |
 | `FACE_MIN_DET_SCORE` | `0.50` | detector confidence quality gate |
 | `FACE_MIN_PX` | `50` | min face bbox width in px |
-| `FACE_MAX_POSE_DEG` | `50` | max abs yaw/pitch/roll in degrees |
+| `FACE_MAX_POSE_DEG` | `50` | max abs yaw/pitch in degrees |
 | `HOST` / `PORT` | `127.0.0.1` / `8099` | bind address |
 
 ## Test

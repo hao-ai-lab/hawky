@@ -5,7 +5,7 @@ Engine: InsightFace (deepinsight/insightface) — SCRFD detector + ArcFace
 (buffalo_l). Chosen over the DeepFace wrapper because it (a) separates real faces
 far better on hard live-camera frames (verified: same-person cosine ~0.65 vs
 different ~0.10, a wide margin) and (b) exposes per-face QUALITY signals
-(det_score, bbox size, pose) so we can reject sideways/tiny/blurry crops before
+(det_score, bbox size, pitch/yaw) so we can reject looking-away/tiny/blurry crops before
 they pollute the DB. The service owns matching + the person DB; iOS sends a face
 crop and gets back an identity, enrolls new people, and updates profiles.
 
@@ -15,7 +15,7 @@ Pipeline per request:
   embeddings. A profile holds MULTIPLE embeddings (every confirmed match adds its
   frame), so a person becomes robust to angle/lighting over time.
 
-DB layout (DEEPFACE_DB, default ./facedb):
+DB layout (DEEPFACE_DB, default services/deepface/facedb):
   facedb/<person_id>/<uuid>.jpg   enrolled crops (for thumbnails)
   facedb/profiles.json            { id, name, embeddings[[float]], facts, recaps, ... }
 
@@ -46,12 +46,12 @@ MODEL_PACK = os.environ.get("INSIGHTFACE_MODEL", "buffalo_l")
 MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.35"))
 # Quality gate — reject crops that would produce a garbage embedding (the cause of
 # the duplicate "Unknown" profiles): low detector confidence, tiny face, or extreme
-# pose (sideways / looking away / upside-down). Tuned for LIVE camera frames (the
+# pose (sideways / looking away). Tuned for LIVE camera frames (the
 # client now sends the full frame, so InsightFace detects with full context): a
 # too-strict gate left the DB empty. Override via env to retune from real testing.
 MIN_DET_SCORE = float(os.environ.get("FACE_MIN_DET_SCORE", "0.50"))
 MIN_FACE_PX = int(os.environ.get("FACE_MIN_PX", "50"))          # min bbox width in px
-MAX_POSE_DEG = float(os.environ.get("FACE_MAX_POSE_DEG", "50")) # max |yaw|/|pitch|/|roll|
+MAX_POSE_DEG = float(os.environ.get("FACE_MAX_POSE_DEG", "50")) # max |yaw|/|pitch|
 
 _lock = threading.Lock()
 _app = None  # lazy InsightFace FaceAnalysis
