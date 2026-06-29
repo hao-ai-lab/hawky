@@ -44,7 +44,7 @@ jobs:
       - name: Unit tests
         run: |
           mkdir -p test-results
-          bun test --coverage --retry=2 --reporter=junit --reporter-outfile=test-results/unit.xml ./tests/test-*.ts ./tests/test-*.tsx
+          bun test --coverage --retry=2 --reporter=junit --reporter-outfile=test-results/unit.xml ./tests/test-*.ts ./tests/test-*.tsx ./tests/unit/*.test.ts
 
       - name: Integration tests
         run: bun test --coverage --reporter=junit --reporter-outfile=test-results/integration.xml ./tests/integration/*.ts
