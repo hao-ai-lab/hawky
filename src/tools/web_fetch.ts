@@ -21,8 +21,10 @@ import type {
 // 100K so long reference pages (e.g. a Wikipedia company article whose
 // financials table sits past the 50K mark) aren't cut off before the data.
 const DEFAULT_MAX_CHARS = 100_000;
+const MIN_MAX_CHARS = 100;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 2_000_000; // 2 MB max raw response
+const MAX_MAX_CHARS = MAX_RESPONSE_BYTES;
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 // -----------------------------------------------------------------------------
@@ -33,6 +35,22 @@ interface WebFetchInput {
   url: string;
   extract_mode?: "markdown" | "text";
   max_chars?: number;
+}
+
+type WebFetchExtractMode = NonNullable<WebFetchInput["extract_mode"]>;
+
+function parseExtractMode(value: unknown): WebFetchExtractMode | string {
+  if (value === undefined) return "markdown";
+  if (value === "markdown" || value === "text") return value;
+  return 'extract_mode must be "markdown" or "text"';
+}
+
+function parseMaxChars(value: unknown): number | string {
+  if (value === undefined) return DEFAULT_MAX_CHARS;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    return "max_chars must be a finite integer";
+  }
+  return Math.max(MIN_MAX_CHARS, Math.min(value, MAX_MAX_CHARS));
 }
 
 // -----------------------------------------------------------------------------
@@ -173,8 +191,8 @@ async function executeWebFetchInner(
   input: WebFetchInput,
   context: ToolContext,
 ): Promise<ToolResult> {
-  const { url, extract_mode, max_chars } = input;
-  const rawUrl = url?.trim();
+  const rawInput = input as unknown as Record<string, unknown>;
+  const url = rawInput.url;
 
   // --- Pre-abort check ---
   if (context.abort_signal.aborted) {
@@ -182,8 +200,19 @@ async function executeWebFetchInner(
   }
 
   // --- Validate URL ---
-  if (!rawUrl || typeof url !== "string") {
+  if (typeof url !== "string" || !url.trim()) {
     return { type: "error", content: "Missing required parameter: url" };
+  }
+  const rawUrl = url.trim();
+
+  const effectiveMode = parseExtractMode(rawInput.extract_mode);
+  if (effectiveMode !== "markdown" && effectiveMode !== "text") {
+    return { type: "error", content: effectiveMode };
+  }
+
+  const effectiveMaxChars = parseMaxChars(rawInput.max_chars);
+  if (typeof effectiveMaxChars === "string") {
+    return { type: "error", content: effectiveMaxChars };
   }
 
   let parsedUrl: URL;
@@ -204,9 +233,6 @@ async function executeWebFetchInner(
   if (parsedUrl.protocol === "http:") {
     parsedUrl = new URL(parsedUrl.toString().replace(/^http:/, "https:"));
   }
-
-  const effectiveMode = extract_mode ?? "markdown";
-  const effectiveMaxChars = Math.max(100, max_chars ?? DEFAULT_MAX_CHARS);
 
   // --- Fetch with timeout ---
   const controller = new AbortController();
@@ -346,11 +372,14 @@ export const webFetchToolDefinition: ToolDefinition<WebFetchInput> = {
       },
       extract_mode: {
         type: "string",
+        enum: ["markdown", "text"],
+        default: "markdown",
         description: 'Output format: "markdown" (default) or "text" (plain text, no markdown syntax).',
       },
       max_chars: {
-        type: "number",
-        description: "Maximum characters to return. Default: 50000.",
+        type: "integer",
+        default: DEFAULT_MAX_CHARS,
+        description: "Maximum characters to return. Default: 100000. Values below 100 are clamped to 100.",
       },
     },
     required: ["url"],
