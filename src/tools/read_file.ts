@@ -520,7 +520,7 @@ export const readFileToolDefinition: ToolDefinition<ReadFileInput> = {
   name: "read_file",
   description:
     "Read the contents of a file at the given path. Supports text files (with line numbers), " +
-    "images (PNG, JPG, GIF, WebP — returns base64), PDFs (text extraction with page ranges), " +
+    "images (PNG, JPG, GIF, WebP — returns base64), PDFs (native document blocks), " +
     "and Jupyter notebooks (.ipynb — formatted cells with outputs).",
   input_schema: {
     type: "object",
