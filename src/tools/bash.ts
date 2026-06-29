@@ -118,8 +118,6 @@ export async function executeBash(opts: BashExecOptions): Promise<BashExecResult
   // Read stdout and stderr concurrently with line buffering
   const stdoutLines: string[] = [];
   const stderrLines: string[] = [];
-  let stdoutChars = 0;
-  let stderrChars = 0;
   let truncated = false;
 
   async function readStream(
