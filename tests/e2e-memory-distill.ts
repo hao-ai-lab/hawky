@@ -21,6 +21,13 @@ import { registerMemoryMethods } from "../src/gateway/memory-methods.js";
 import type { ResponseFrame } from "../src/gateway/protocol.js";
 import type { HawkyConfig } from "../src/agent/types.js";
 import type { LLMProvider, LLMStreamEvent, LLMStreamRequest } from "../src/agent/provider.js";
+import {
+  buildIdentityCandidate,
+  buildPersonFact,
+  buildPersonProfile,
+} from "../src/identity/person/contracts.js";
+import { InMemoryPersonStore } from "../src/identity/person/store.js";
+import { InMemoryMemoryCandidateStore } from "../src/memory/candidate.js";
 import { setSessionsDir, resetSessionsDir } from "../src/storage/session.js";
 import { setWorkspaceDir, getWorkspaceDir, WorkspaceManager } from "../src/storage/workspace.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -109,6 +116,8 @@ let testDir: string;
 let sessionsDir: string;
 let wsDir: string;
 let prevWorkspace: string;
+let personStore: InMemoryPersonStore;
+let memoryCandidateStore: InMemoryMemoryCandidateStore;
 
 beforeEach(() => {
   testDir = join(tmpdir(), `hawky-e2e-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -121,6 +130,8 @@ beforeEach(() => {
   new WorkspaceManager(wsDir).init();
 
   stubProvider = null;
+  personStore = new InMemoryPersonStore();
+  memoryCandidateStore = new InMemoryMemoryCandidateStore();
   resetGatewayState();
   server = new GatewayServer();
   port = getTestPort();
@@ -129,6 +140,12 @@ beforeEach(() => {
   registerMemoryMethods(server, () => makeConfig(), {
     get provider() {
       return stubProvider ?? undefined;
+    },
+    get personStore() {
+      return personStore;
+    },
+    get memoryCandidateStore() {
+      return memoryCandidateStore;
     },
   } as any);
   server.start(port);
@@ -238,6 +255,73 @@ describe("memory-distill-pipeline", () => {
 
       const wsm = new WorkspaceManager(wsDir);
       expect(wsm.readFile(result.file)).toContain("coffee black");
+    } finally {
+      ws.close();
+    }
+  });
+
+  test("real-path daily distill uses bounded person snapshot and writes a review-only candidate", async () => {
+    seedRealtimeSession(sessionsDir, "realtime/live-person");
+    personStore.putProfile(buildPersonProfile({
+      id: "person_kevin",
+      displayName: "Kevin",
+      source: "manual",
+      sourceSession: { sessionKey: "realtime/live-person" },
+      confidence: 1,
+      review: { state: "confirmed", reviewer: "owner" },
+      allowedUses: { profileDisplay: true, memoryDistillRead: true },
+    }));
+    personStore.putFact(buildPersonFact({
+      id: "fact_kevin_updates",
+      personId: "person_kevin",
+      text: "Kevin prefers short updates.",
+      origin: "manual",
+      source: "manual",
+      sourceSession: { sessionKey: "realtime/older" },
+      confidence: 0.95,
+      review: { state: "confirmed", reviewer: "owner" },
+      allowedUses: { profileDisplay: true, memoryDistillRead: true },
+    }));
+    personStore.putFact(buildPersonFact({
+      id: "fact_unreviewed",
+      personId: "person_kevin",
+      text: "Kevin might like espresso.",
+      origin: "memory_distill",
+      source: "memory_distill",
+      sourceSession: { sessionKey: "realtime/live-person" },
+      confidence: 0.5,
+      review: { state: "unreviewed" },
+      allowedUses: { profileDisplay: true, memoryDistillRead: true },
+    }));
+    personStore.putCandidate(buildIdentityCandidate({
+      id: "cand_face_unknown",
+      candidateType: "unknown_face",
+      modalities: ["face"],
+      label: "unknown face",
+      source: "face_service",
+      sourceSession: { sessionKey: "realtime/live-person" },
+      confidence: 0.72,
+      review: { state: "unreviewed" },
+    }));
+    stubProvider = new StubProvider("- Kevin discussed coffee; unknown face needs review.\n");
+    const ws = await connect(port);
+    try {
+      const res = await sendRequest(ws, "memory.distill", { scope: "daily" });
+      expect(res.ok).toBe(true);
+      const result = res.payload as any;
+      expect(result.ok).toBe(true);
+      expect(result.memoryCandidates).toBe(1);
+      expect(result.quarantinedMemoryCandidates).toBe(1);
+
+      const prompt = stubProvider.calls[0].messages[0]?.content;
+      expect(prompt).toContain("BOUNDED PERSON SNAPSHOT");
+      expect(prompt).toContain("Kevin prefers short updates");
+      expect(prompt).not.toContain("espresso");
+
+      const candidates = memoryCandidateStore.list();
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0].allowedUses.durableMemory).toBe(false);
+      expect(candidates[0].quarantineReason).toBe("unconfirmed_identity_candidate");
     } finally {
       ws.close();
     }

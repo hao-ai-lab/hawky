@@ -20,6 +20,7 @@ import { join } from "node:path";
 import type { HawkyConfig } from "../agent/types.js";
 import { WorkspaceManager } from "../storage/workspace.js";
 import { distillMemory, latestDailyMtimeMs } from "./distill.js";
+import type { MemoryCandidateStore } from "./candidate.js";
 import { createSubsystemLogger } from "../logging/index.js";
 
 const log = createSubsystemLogger("memory/scheduler");
@@ -43,6 +44,8 @@ export interface MemorySchedulerOptions {
   workspace?: WorkspaceManager;
   /** Clock override (tests). */
   now?: () => number;
+  /** Review ledger used to filter non-durable daily entries before global consolidation. */
+  memoryCandidateStore?: MemoryCandidateStore;
 }
 
 export class MemoryScheduler {
@@ -50,6 +53,7 @@ export class MemoryScheduler {
   private readonly intervalMs: number;
   private readonly workspace: WorkspaceManager;
   private readonly now: () => number;
+  private readonly memoryCandidateStore?: MemoryCandidateStore;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
 
@@ -58,6 +62,7 @@ export class MemoryScheduler {
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.workspace = opts.workspace ?? new WorkspaceManager();
     this.now = opts.now ?? (() => Date.now());
+    this.memoryCandidateStore = opts.memoryCandidateStore;
   }
 
   /** Start the periodic timer. First tick fires after one full interval. */
@@ -119,7 +124,10 @@ export class MemoryScheduler {
         result = await distillMemory(
           this.getConfig(),
           { scope: "global" },
-          { workspace: this.workspace },
+          {
+            workspace: this.workspace,
+            memoryCandidateStore: this.memoryCandidateStore,
+          },
         );
       } catch (err) {
         // e.g. provider/auth misconfig — don't advance the watermark, retry next tick.

@@ -49,6 +49,7 @@ import { createProvider } from "./agent/provider-factory.js";
 import { WorkspaceManager, setWorkspaceDir } from "./storage/workspace.js";
 import { getSessionsDir } from "./storage/session.js";
 import { getGlobalMemoryIndex } from "./memory/global.js";
+import { FileMemoryCandidateStore } from "./memory/candidate.js";
 import { startSkillsWatcher } from "./skills/watcher.js";
 import { promptForLlmCredentials, promptForOpenAIKey } from "./storage/setup-prompt.js";
 import Anthropic from "@anthropic-ai/sdk";
@@ -1043,7 +1044,8 @@ async function main() {
 
       // Memory feature (#653): memory.snapshot + memory.distill. Closure over
       // gwConfig so distillation uses the live provider/key (re-set after /setup).
-      registerMemoryMethods(gateway, () => gwConfig);
+      const memoryCandidateStore = new FileMemoryCandidateStore();
+      registerMemoryMethods(gateway, () => gwConfig, { memoryCandidateStore });
 
       // Voiceprint identity annotations are applied as a session-scoped bundle.
       // Live scoring stays disabled unless explicitly configured server-side.
@@ -1058,7 +1060,10 @@ async function main() {
       // a daily log changed since the last run. Replaces the (now-disabled)
       // heartbeat consolidation. Session→daily distillation is triggered by iOS
       // on session end, not here.
-      const memoryScheduler = new MemoryScheduler({ getConfig: () => gwConfig });
+      const memoryScheduler = new MemoryScheduler({
+        getConfig: () => gwConfig,
+        memoryCandidateStore,
+      });
       memoryScheduler.start();
 
       // Slice 1 live-chunk firehose logger. Stub consumer: logs every

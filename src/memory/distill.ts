@@ -36,6 +36,18 @@ import { listSessions } from "../storage/session.js";
 import { extractSessionText } from "./session-extract.js";
 import { getPrompt } from "../prompts/index.js";
 import { createSubsystemLogger } from "../logging/index.js";
+import type { PersonStore } from "../identity/person/store.js";
+import {
+  buildMemoryCandidate,
+  type MemoryCandidate,
+  type MemoryCandidateStore,
+} from "./candidate.js";
+import {
+  buildPersonMemorySnapshot,
+  formatPersonMemorySnapshotForPrompt,
+  memoryCandidateSubjectsFromSnapshot,
+  type PersonMemorySnapshot,
+} from "./person-snapshot.js";
 
 const log = createSubsystemLogger("memory/distill");
 
@@ -108,6 +120,20 @@ export interface DistillResult {
   mocked: boolean;
   /** Human-readable note (e.g. "no transcript found"). */
   note?: string;
+  /** Number of reviewable memory candidates written to the candidate ledger. */
+  memoryCandidates?: number;
+  /** Number of memory candidates that must stay quarantined before durable memory. */
+  quarantinedMemoryCandidates?: number;
+  /** Number of daily-log entries withheld from global consolidation by review policy. */
+  skippedDailyEntries?: number;
+}
+
+export interface DistillOptions {
+  workspace?: WorkspaceManager;
+  now?: Date;
+  provider?: LLMProvider;
+  personStore?: PersonStore;
+  memoryCandidateStore?: MemoryCandidateStore;
 }
 
 // -----------------------------------------------------------------------------
@@ -189,6 +215,7 @@ async function distillDaily(
   workspace: WorkspaceManager,
   req: DistillRequest,
   now: Date,
+  options: Pick<DistillOptions, "personStore" | "memoryCandidateStore"> = {},
 ): Promise<DistillResult> {
   const dateStr = formatDate(now);
   const file = `memory/${dateStr}.md`;
@@ -205,6 +232,13 @@ async function distillDaily(
     };
   }
 
+  const personSnapshot = options.personStore
+    ? buildPersonMemorySnapshot(options.personStore, { sessionKey: sourceId ?? req.session_key })
+    : undefined;
+  const personSnapshotBlock = personSnapshot
+    ? formatPersonMemorySnapshotForPrompt(personSnapshot)
+    : "";
+
   let summary: string;
   if (req.mock) {
     summary =
@@ -216,7 +250,8 @@ async function distillDaily(
       engine.model,
       getPrompt("memory.distill.daily.system"),
       `Summarize this realtime session into a daily-log entry.\n\n` +
-        `----- TRANSCRIPT -----\n${text}`,
+        `----- TRANSCRIPT -----\n${text}` +
+        (personSnapshotBlock ? `\n\n${personSnapshotBlock}` : ""),
       MAX_DAILY_OUTPUT_TOKENS,
     );
     if (!summary) {
@@ -231,12 +266,28 @@ async function distillDaily(
     }
   }
 
+  const memoryCandidateStats = req.mock
+    ? {}
+    : writeDistilledMemoryCandidate({
+        store: options.memoryCandidateStore,
+        text: summary,
+        sourceId: sourceId ?? req.session_key,
+        snapshot: personSnapshot,
+        now,
+      });
+
   // Append as a timestamped daily-log entry (creates the file with a header).
   workspace.appendToDaily(summary, now);
   const written = workspace.readFile(file) ?? summary;
-
   log.info("daily distillation complete", { file, source: sourceId, mocked: Boolean(req.mock), chars: summary.length });
-  return { ok: true, scope: "daily", file, preview: preview(written), mocked: Boolean(req.mock) };
+  return {
+    ok: true,
+    scope: "daily",
+    file,
+    preview: preview(written),
+    mocked: Boolean(req.mock),
+    ...memoryCandidateStats,
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -247,19 +298,36 @@ async function distillGlobal(
   engine: DistillEngine,
   workspace: WorkspaceManager,
   req: DistillRequest,
+  options: Pick<DistillOptions, "memoryCandidateStore"> = {},
 ): Promise<DistillResult> {
   const file = "MEMORY.md";
   const existing = (workspace.readFile(file) ?? "").slice(0, MAX_GLOBAL_CHARS);
+  const blockedDailyTexts = buildBlockedDailyTextSet(options.memoryCandidateStore);
 
   // Feed the last few daily logs back in for consolidation.
   const recentLogs = workspace.listDailyLogs().slice(-5);
   const dailyBlocks: string[] = [];
+  let skippedDailyEntries = 0;
   for (const logName of recentLogs) {
     const content = workspace.readFile(`memory/${logName}`);
-    if (content?.trim()) dailyBlocks.push(`### ${logName}\n${content.trim()}`);
+    if (!content?.trim()) continue;
+    const filtered = filterDailyLogForGlobal(content, blockedDailyTexts);
+    skippedDailyEntries += filtered.skippedEntries;
+    if (filtered.content.trim()) dailyBlocks.push(`### ${logName}\n${filtered.content.trim()}`);
   }
 
   if (dailyBlocks.length === 0) {
+    if (recentLogs.length > 0 && skippedDailyEntries > 0) {
+      return {
+        ok: false,
+        scope: "global",
+        file,
+        preview: preview(existing),
+        mocked: Boolean(req.mock),
+        note: "No globally promotable daily log entries found; MEMORY.md left unchanged.",
+        skippedDailyEntries,
+      };
+    }
     return {
       ok: false,
       scope: "global",
@@ -303,10 +371,18 @@ async function distillGlobal(
   log.info("global consolidation complete", {
     file,
     dailyLogs: dailyBlocks.length,
+    skippedDailyEntries,
     mocked: Boolean(req.mock),
     chars: consolidated.length,
   });
-  return { ok: true, scope: "global", file, preview: preview(consolidated), mocked: Boolean(req.mock) };
+  return {
+    ok: true,
+    scope: "global",
+    file,
+    preview: preview(consolidated),
+    mocked: Boolean(req.mock),
+    ...(skippedDailyEntries > 0 ? { skippedDailyEntries } : {}),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -316,7 +392,7 @@ async function distillGlobal(
 export async function distillMemory(
   config: HawkyConfig,
   req: DistillRequest,
-  options?: { workspace?: WorkspaceManager; now?: Date; provider?: LLMProvider },
+  options?: DistillOptions,
 ): Promise<DistillResult> {
   const workspace = options?.workspace ?? new WorkspaceManager();
   const now = options?.now ?? new Date();
@@ -337,9 +413,9 @@ export async function distillMemory(
   };
 
   if (req.scope === "global") {
-    return distillGlobal(engine, workspace, req);
+    return distillGlobal(engine, workspace, req, options);
   }
-  return distillDaily(engine, workspace, req, now);
+  return distillDaily(engine, workspace, req, now, options);
 }
 
 // -----------------------------------------------------------------------------
@@ -350,6 +426,8 @@ export interface SweepOptions {
   workspace?: WorkspaceManager;
   now?: Date;
   provider?: LLMProvider;
+  personStore?: PersonStore;
+  memoryCandidateStore?: MemoryCandidateStore;
   /** Skip sessions with fewer than this many messages (stubs). Default 4. */
   minMessages?: number;
   /** Skip sessions whose transcript is shorter than this. Default 200 chars. */
@@ -427,7 +505,13 @@ export async function distillAllSessions(
     const r = await distillMemory(
       config,
       { scope: "daily", session_key: session.id, mock },
-      { workspace, now, provider: options?.provider },
+      {
+        workspace,
+        now,
+        provider: options?.provider,
+        personStore: options?.personStore,
+        memoryCandidateStore: options?.memoryCandidateStore,
+      },
     );
     if (r.ok) result.distilled++;
     else result.failed++;
@@ -438,7 +522,12 @@ export async function distillAllSessions(
     const g = await distillMemory(
       config,
       { scope: "global", mock },
-      { workspace, now, provider: options?.provider },
+      {
+        workspace,
+        now,
+        provider: options?.provider,
+        memoryCandidateStore: options?.memoryCandidateStore,
+      },
     );
     result.consolidated = g.ok;
   }
@@ -521,6 +610,124 @@ function formatDate(d: Date): string {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function buildBlockedDailyTextSet(store?: MemoryCandidateStore): Set<string> {
+  const blocked = new Set<string>();
+  if (!store) return blocked;
+  for (const candidate of store.list()) {
+    if (candidate.metadata.distillScope !== "daily") continue;
+    if (!candidateRequiresReviewBeforeGlobal(candidate)) continue;
+    blocked.add(candidate.text.trim());
+  }
+  return blocked;
+}
+
+function candidateRequiresReviewBeforeGlobal(candidate: MemoryCandidate): boolean {
+  const personDerived = candidate.quarantineReason !== undefined
+    || candidate.subjects.some((subject) => subject.type === "confirmed_person")
+    || candidate.subjects.some((subject) => subject.type === "person_candidate")
+    || Number(candidate.metadata.personSnapshotPeople ?? 0) > 0
+    || Number(candidate.metadata.personSnapshotCandidates ?? 0) > 0;
+  return personDerived && !candidateCanBeConsolidated(candidate);
+}
+
+function candidateCanBeConsolidated(candidate: MemoryCandidate): boolean {
+  return candidate.review.state === "confirmed"
+    && candidate.allowedUses.durableMemory
+    && candidate.quarantineReason === undefined;
+}
+
+function filterDailyLogForGlobal(
+  content: string,
+  blockedTexts: Set<string>,
+): { content: string; skippedEntries: number } {
+  const trimmed = content.trim();
+  if (!trimmed || blockedTexts.size === 0) return { content: trimmed, skippedEntries: 0 };
+
+  const parsed = parseDailyLogEntries(trimmed);
+  if (parsed.entries.length === 0) return { content: trimmed, skippedEntries: 0 };
+
+  const kept = parsed.entries.filter((entry) => !blockedTexts.has(entry.text.trim()));
+  const skippedEntries = parsed.entries.length - kept.length;
+  if (skippedEntries === 0) return { content: trimmed, skippedEntries };
+  if (kept.length === 0) return { content: "", skippedEntries };
+
+  const lines = [...parsed.preamble];
+  for (const entry of kept) {
+    const entryLines = entry.text.split("\n");
+    lines.push(`[${entry.time}] ${entryLines[0] ?? ""}`);
+    lines.push(...entryLines.slice(1));
+  }
+  return { content: lines.join("\n").trim(), skippedEntries };
+}
+
+function parseDailyLogEntries(content: string): {
+  preamble: string[];
+  entries: Array<{ time: string; text: string }>;
+} {
+  const preamble: string[] = [];
+  const entries: Array<{ time: string; text: string }> = [];
+  let current: { time: string; lines: string[] } | undefined;
+
+  const pushCurrent = () => {
+    if (!current) return;
+    entries.push({ time: current.time, text: current.lines.join("\n").trimEnd() });
+    current = undefined;
+  };
+
+  for (const line of content.split("\n")) {
+    const match = /^\[(\d{2}:\d{2})\]\s?(.*)$/.exec(line);
+    if (match) {
+      pushCurrent();
+      current = { time: match[1], lines: [match[2] ?? ""] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+    else preamble.push(line);
+  }
+  pushCurrent();
+  return { preamble, entries };
+}
+
+function writeDistilledMemoryCandidate(input: {
+  store?: MemoryCandidateStore;
+  text: string;
+  sourceId?: string | null;
+  snapshot?: PersonMemorySnapshot;
+  now: Date;
+}): Pick<DistillResult, "memoryCandidates" | "quarantinedMemoryCandidates"> {
+  if (!input.store) return {};
+  const sourceSession = input.sourceId ? { sessionKey: input.sourceId } : undefined;
+  const hasQuarantinedIdentity = (input.snapshot?.candidates.length ?? 0) > 0;
+  input.store.put(buildMemoryCandidate({
+    text: input.text,
+    createdAt: input.now.toISOString(),
+    updatedAt: input.now.toISOString(),
+    sourceSession,
+    evidenceRefs: sourceSession
+      ? [{ type: "transcript", sessionKey: sourceSession.sessionKey }]
+      : [{ type: "tool_result", id: "memory.distill" }],
+    subjects: input.snapshot ? memoryCandidateSubjectsFromSnapshot(input.snapshot) : [{ type: "unknown" }],
+    confidence: hasQuarantinedIdentity ? 0.5 : 0.7,
+    review: { state: "unreviewed" },
+    quarantineReason: hasQuarantinedIdentity ? "unconfirmed_identity_candidate" : undefined,
+    allowedUses: {
+      reviewDisplay: true,
+      memorySearch: false,
+      contextExport: false,
+      durableMemory: false,
+    },
+    metadata: {
+      distillScope: "daily",
+      personSnapshotPeople: input.snapshot?.people.length ?? 0,
+      personSnapshotCandidates: input.snapshot?.candidates.length ?? 0,
+    },
+  }));
+  return {
+    memoryCandidates: 1,
+    quarantinedMemoryCandidates: hasQuarantinedIdentity ? 1 : 0,
+  };
 }
 
 function sessionIdAliases(id: string): string[] {

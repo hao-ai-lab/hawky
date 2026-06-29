@@ -22,6 +22,9 @@ import { tmpdir } from "node:os";
 import { WorkspaceManager } from "../src/storage/workspace.js";
 import { setSessionsDir, resetSessionsDir } from "../src/storage/session.js";
 import { distillMemory, readMemorySnapshot, resolveDistillModel, DEFAULT_DISTILL_MODEL } from "../src/memory/distill.js";
+import { buildMemoryCandidate, InMemoryMemoryCandidateStore } from "../src/memory/candidate.js";
+import { buildIdentityCandidate, buildPersonFact, buildPersonProfile } from "../src/identity/person/contracts.js";
+import { InMemoryPersonStore } from "../src/identity/person/store.js";
 import type { HawkyConfig } from "../src/agent/types.js";
 import type { LLMProvider, LLMStreamEvent, LLMStreamRequest } from "../src/agent/provider.js";
 
@@ -107,6 +110,21 @@ describe("distillMemory: daily (mock)", () => {
     expect(written).toContain("(mock)");
     // Daily log has the date header from appendToDaily.
     expect(written).toContain(`# ${DATE_STR}`);
+  });
+
+  test("does not write memory candidates from mock summaries", async () => {
+    seedRealtimeSession("realtime/sess-1", "Remember I prefer dark mode.", "Got it — dark mode noted.");
+    const memoryCandidateStore = new InMemoryMemoryCandidateStore();
+
+    const result = await distillMemory(
+      STUB_CONFIG,
+      { scope: "daily", mock: true },
+      { workspace: ws, now: NOW, memoryCandidateStore },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.memoryCandidates).toBeUndefined();
+    expect(memoryCandidateStore.list()).toEqual([]);
   });
 
   test("targets a specific session_key when provided", async () => {
@@ -220,6 +238,89 @@ describe("distillMemory: daily (real LLM path, stub provider)", () => {
     // Nothing should have been written.
     expect(ws.readFile(`memory/${DATE_STR}.md`)).toBeNull();
   });
+
+  test("passes a bounded person snapshot without unreviewed facts to the daily prompt", async () => {
+    seedRealtimeSession("realtime/person", "Kevin said the deploy is done.", "Noted.");
+    const personStore = new InMemoryPersonStore();
+    personStore.putProfile(buildPersonProfile({
+      id: "person_kevin",
+      displayName: "Kevin",
+      source: "manual",
+      sourceSession: { sessionKey: "realtime/person" },
+      confidence: 1,
+      review: { state: "confirmed", reviewer: "owner" },
+      allowedUses: { profileDisplay: true, memoryDistillRead: true },
+    }));
+    personStore.putFact(buildPersonFact({
+      id: "fact_kevin_updates",
+      personId: "person_kevin",
+      text: "Kevin prefers short updates.",
+      origin: "manual",
+      source: "manual",
+      sourceSession: { sessionKey: "realtime/older" },
+      confidence: 0.95,
+      review: { state: "confirmed", reviewer: "owner" },
+      allowedUses: { profileDisplay: true, memoryDistillRead: true },
+    }));
+    personStore.putFact(buildPersonFact({
+      id: "fact_unreviewed",
+      personId: "person_kevin",
+      text: "Kevin might like espresso.",
+      origin: "memory_distill",
+      source: "memory_distill",
+      sourceSession: { sessionKey: "realtime/person" },
+      confidence: 0.5,
+      review: { state: "unreviewed" },
+      allowedUses: { profileDisplay: true, memoryDistillRead: true },
+    }));
+    const provider = new StubProvider(["- Kevin said the deploy is done."]);
+
+    const result = await distillMemory(
+      STUB_CONFIG,
+      { scope: "daily", session_key: "realtime/person" },
+      { workspace: ws, now: NOW, provider, personStore },
+    );
+
+    expect(result.ok).toBe(true);
+    const userMsg = provider.calls[0].messages[0]?.content as string;
+    expect(userMsg).toContain("BOUNDED PERSON SNAPSHOT");
+    expect(userMsg).toContain("Kevin prefers short updates");
+    expect(userMsg).not.toContain("espresso");
+  });
+
+  test("writes a quarantined MemoryCandidate when unconfirmed identity candidates touched the session", async () => {
+    seedRealtimeSession("realtime/person", "This unknown face might be Kevin.", "I will keep it for review.");
+    const personStore = new InMemoryPersonStore();
+    personStore.putCandidate(buildIdentityCandidate({
+      id: "cand_face_unknown",
+      candidateType: "unknown_face",
+      modalities: ["face"],
+      label: "unknown face",
+      source: "face_service",
+      sourceSession: { sessionKey: "realtime/person" },
+      confidence: 0.72,
+      review: { state: "unreviewed" },
+    }));
+    const memoryCandidateStore = new InMemoryMemoryCandidateStore();
+    const provider = new StubProvider(["- Unknown face was present; identity needs review."]);
+
+    const result = await distillMemory(
+      STUB_CONFIG,
+      { scope: "daily", session_key: "realtime/person" },
+      { workspace: ws, now: NOW, provider, personStore, memoryCandidateStore },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.memoryCandidates).toBe(1);
+    expect(result.quarantinedMemoryCandidates).toBe(1);
+    const candidates = memoryCandidateStore.list();
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].quarantineReason).toBe("unconfirmed_identity_candidate");
+    expect(candidates[0].allowedUses.durableMemory).toBe(false);
+    expect(candidates[0].subjects).toEqual([
+      { type: "person_candidate", id: "cand_face_unknown", label: "unknown face" },
+    ]);
+  });
 });
 
 describe("distillMemory: global (real LLM path, stub provider)", () => {
@@ -250,6 +351,96 @@ describe("distillMemory: global (real LLM path, stub provider)", () => {
     expect(result.ok).toBe(false);
     expect(result.note).toMatch(/empty output/i);
     expect(ws.readFile("MEMORY.md")).toContain("keep me");
+  });
+
+  test("keeps quarantined daily summaries out of global consolidation", async () => {
+    seedRealtimeSession("realtime/person", "This unknown face might be Kevin.", "I will keep it for review.");
+    const personStore = new InMemoryPersonStore();
+    personStore.putCandidate(buildIdentityCandidate({
+      id: "cand_face_unknown",
+      candidateType: "unknown_face",
+      modalities: ["face"],
+      label: "unknown face",
+      source: "face_service",
+      sourceSession: { sessionKey: "realtime/person" },
+      confidence: 0.72,
+      review: { state: "unreviewed" },
+    }));
+    const memoryCandidateStore = new InMemoryMemoryCandidateStore();
+    const dailyProvider = new StubProvider(["- Unknown face might be Kevin."]);
+
+    const daily = await distillMemory(
+      STUB_CONFIG,
+      { scope: "daily", session_key: "realtime/person" },
+      { workspace: ws, now: NOW, provider: dailyProvider, personStore, memoryCandidateStore },
+    );
+    expect(daily.ok).toBe(true);
+    expect(daily.quarantinedMemoryCandidates).toBe(1);
+    expect(ws.readFile(`memory/${DATE_STR}.md`)).toContain("Unknown face might be Kevin");
+
+    const globalProvider = new StubProvider(["# MEMORY\n\n- Unknown face might be Kevin.\n"]);
+    const global = await distillMemory(
+      STUB_CONFIG,
+      { scope: "global" },
+      { workspace: ws, now: NOW, provider: globalProvider, memoryCandidateStore },
+    );
+
+    expect(global.ok).toBe(false);
+    expect(global.note).toMatch(/No globally promotable daily log entries/i);
+    expect(global.skippedDailyEntries).toBe(1);
+    expect(globalProvider.calls).toHaveLength(0);
+    expect(ws.readFile("MEMORY.md")).not.toContain("Unknown face might be Kevin");
+  });
+
+  test("blocks confirmed-person daily summaries until candidate review allows durable memory", async () => {
+    ws.writeFile("memory/2026-06-15.md", "# 2026-06-15\n\n[09:00] Kevin prefers short updates.\n");
+    const memoryCandidateStore = new InMemoryMemoryCandidateStore();
+    memoryCandidateStore.put(buildMemoryCandidate({
+      text: "Kevin prefers short updates.",
+      sourceSession: { sessionKey: "realtime/person" },
+      subjects: [{ type: "confirmed_person", id: "person_kevin", label: "Kevin" }],
+      metadata: { distillScope: "daily", personSnapshotPeople: 1 },
+    }));
+    const provider = new StubProvider(["# MEMORY\n\n- Kevin prefers short updates.\n"]);
+
+    const result = await distillMemory(
+      STUB_CONFIG,
+      { scope: "global" },
+      { workspace: ws, now: NOW, provider, memoryCandidateStore },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.skippedDailyEntries).toBe(1);
+    expect(provider.calls).toHaveLength(0);
+    expect(ws.readFile("MEMORY.md")).not.toContain("Kevin prefers short updates");
+  });
+
+  test("filters quarantined entries while consolidating eligible daily entries", async () => {
+    ws.writeFile(
+      "memory/2026-06-15.md",
+      "# 2026-06-15\n\n[09:00] Safe project update.\n[10:00] Unknown face might be Kevin.\n",
+    );
+    const memoryCandidateStore = new InMemoryMemoryCandidateStore();
+    memoryCandidateStore.put(buildMemoryCandidate({
+      text: "Unknown face might be Kevin.",
+      sourceSession: { sessionKey: "realtime/person" },
+      subjects: [{ type: "person_candidate", id: "cand_face_unknown", label: "unknown face" }],
+      quarantineReason: "unconfirmed_identity_candidate",
+      metadata: { distillScope: "daily" },
+    }));
+    const provider = new StubProvider(["# MEMORY\n\n- Safe project update.\n"]);
+
+    const result = await distillMemory(
+      STUB_CONFIG,
+      { scope: "global" },
+      { workspace: ws, now: NOW, provider, memoryCandidateStore },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.skippedDailyEntries).toBe(1);
+    const userMsg = provider.calls[0].messages[0]?.content as string;
+    expect(userMsg).toContain("Safe project update");
+    expect(userMsg).not.toContain("Unknown face might be Kevin");
   });
 });
 

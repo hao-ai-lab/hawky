@@ -15,6 +15,7 @@ import { WorkspaceManager } from "../src/storage/workspace.js";
 import { setSessionsDir, resetSessionsDir } from "../src/storage/session.js";
 import { distillAllSessions } from "../src/memory/distill.js";
 import { MemoryScheduler } from "../src/memory/scheduler.js";
+import { buildMemoryCandidate, InMemoryMemoryCandidateStore } from "../src/memory/candidate.js";
 import type { HawkyConfig } from "../src/agent/types.js";
 import type { LLMProvider, LLMStreamEvent, LLMStreamRequest } from "../src/agent/provider.js";
 
@@ -110,6 +111,32 @@ describe("MemoryScheduler.tick — change guard", () => {
     const r = await sched.tick();
     expect(r.reason).not.toMatch(/no change/i);
     expect(r.reason).not.toMatch(/no daily logs/i);
+  });
+
+  test("does not advance the watermark for review-blocked daily entries", async () => {
+    ws.writeFile("MEMORY.md", "# MEMORY\n\n- keep me\n");
+    ws.writeFile("memory/2026-06-16.md", "# 2026-06-16\n\n[12:00] Unknown face might be Kevin.\n");
+    const memoryCandidateStore = new InMemoryMemoryCandidateStore();
+    memoryCandidateStore.put(buildMemoryCandidate({
+      text: "Unknown face might be Kevin.",
+      sourceSession: { sessionKey: "realtime/person" },
+      subjects: [{ type: "person_candidate", id: "cand_face_unknown", label: "unknown face" }],
+      quarantineReason: "unconfirmed_identity_candidate",
+      metadata: { distillScope: "daily" },
+    }));
+
+    const sched = new MemoryScheduler({
+      getConfig: () => STUB_CONFIG,
+      workspace: ws,
+      memoryCandidateStore,
+    });
+    const r = await sched.tick();
+
+    expect(r.ran).toBe(false);
+    expect(r.reason).toMatch(/No globally promotable daily log entries/i);
+    expect(ws.readFile("MEMORY.md")).toContain("keep me");
+    expect(ws.readFile("MEMORY.md")).not.toContain("Unknown face");
+    expect(ws.readFile("memory/.consolidation-state.json")).toBeNull();
   });
 });
 

@@ -28,6 +28,14 @@ import {
   DISTILL_SCOPES,
   type DistillScope,
 } from "../memory/distill.js";
+import {
+  FileMemoryCandidateStore,
+  type MemoryCandidateStore,
+} from "../memory/candidate.js";
+import {
+  FilePersonStore,
+  type PersonStore,
+} from "../identity/person/index.js";
 import { createSubsystemLogger } from "../logging/index.js";
 
 const log = createSubsystemLogger("gateway/memory-methods");
@@ -39,6 +47,17 @@ export interface MemoryMethodsOptions {
    * stub to exercise the full path without a network call.
    */
   provider?: LLMProvider;
+  /**
+   * Store used to build the bounded, session-scoped person snapshot for memory
+   * distillation. Production uses the durable person store; tests can inject an
+   * isolated in-memory store.
+   */
+  personStore?: PersonStore;
+  /**
+   * Review ledger for distillation output. Candidates are reviewable but not
+   * durable-memory eligible until explicitly confirmed by a later review flow.
+   */
+  memoryCandidateStore?: MemoryCandidateStore;
 }
 
 /**
@@ -52,6 +71,11 @@ export function registerMemoryMethods(
   getConfig: () => HawkyConfig,
   options?: MemoryMethodsOptions,
 ): void {
+  const stores = () => ({
+    personStore: options?.personStore ?? getDefaultMemoryDistillStores().personStore,
+    memoryCandidateStore: options?.memoryCandidateStore ?? getDefaultMemoryDistillStores().memoryCandidateStore,
+  });
+
   server.registerMethod("memory.snapshot", (_conn, params) => {
     const p = params as { daily_limit?: unknown } | undefined;
     const dailyLimit =
@@ -83,7 +107,10 @@ export function registerMemoryMethods(
       const result = await distillMemory(
         getConfig(),
         { session_key: sessionKey, scope, mock },
-        options?.provider ? { provider: options.provider } : undefined,
+        {
+          provider: options?.provider,
+          ...stores(),
+        },
       );
       log.info("memory.distill", {
         scope,
@@ -111,4 +138,20 @@ export function registerMemoryMethods(
       };
     }
   });
+}
+
+let defaultMemoryDistillStores: {
+  personStore: PersonStore;
+  memoryCandidateStore: MemoryCandidateStore;
+} | undefined;
+
+function getDefaultMemoryDistillStores(): {
+  personStore: PersonStore;
+  memoryCandidateStore: MemoryCandidateStore;
+} {
+  defaultMemoryDistillStores ??= {
+    personStore: new FilePersonStore(),
+    memoryCandidateStore: new FileMemoryCandidateStore(),
+  };
+  return defaultMemoryDistillStores;
 }
