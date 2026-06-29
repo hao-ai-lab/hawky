@@ -23,7 +23,7 @@ Desktop                                  Mobile
 |---|---|---|
 | **Live** | FaceTime-style realtime voice + camera, transcript, mic/camera/silent/cocktail toggles | `live.openaiClientSecret`, `frontend.boot_context` |
 | **Chat** | Backend-agent chat + session switcher, streaming | `chat.send`, `session.list/history`, `agent.*` events |
-| **People** | Face-recognition database (names, facts, recaps) | `people.list` |
+| **People** | Confirmed person profiles (names, facts, recaps) | `people.list` |
 | **Memory** | 4-tier memory viewer/editor (SOUL/IDENTITY/MEMORY/daily) | `workspace.list/read/write` |
 | **Recordings** | On-device recordings notice (iPhone-only library) | — |
 | **Notifications** | Push availability + heartbeat trigger | `push.vapidKey`, `heartbeat.trigger` |

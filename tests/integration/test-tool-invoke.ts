@@ -288,8 +288,9 @@ describe("tool.invoke — validation", () => {
   });
 });
 
-// Cocktail Party Mode (#627): face_identify/enroll/update/people are directly invocable;
-// the DeepFace service is mocked via global.fetch so iOS reaches it via tool.invoke.
+// Cocktail Party Mode (#627): face_identify/enroll/update/people are directly invocable
+// as face-index compatibility tools. They must not expose or write person facts/recaps;
+// person.* owns person profiles and facts.
 describe("tool.invoke — face recognition (#627)", () => {
   const realFetch = globalThis.fetch;
   afterEach(() => {
@@ -304,9 +305,14 @@ describe("tool.invoke — face recognition (#627)", () => {
     }) as any;
   }
 
-  test("face_identify is directly invocable and returns the matched person", async () => {
+  test("face_identify is directly invocable and returns a sanitized face profile", async () => {
     mockService({
-      "/identify": { ok: true, found: true, person: { id: "p1", name: "Sarah", facts: [], recaps: [] }, similarity: 0.86 },
+      "/identify": {
+        ok: true,
+        found: true,
+        person: { id: "p1", name: "Sarah", facts: ["works at Acme"], recaps: [{ summary: "hidden" }] },
+        similarity: 0.86,
+      },
     });
     const { server, invoke } = createMockServer();
     registerToolMethods(server);
@@ -317,6 +323,9 @@ describe("tool.invoke — face recognition (#627)", () => {
     expect(res.ok).toBe(true);
     expect(res.result.metadata.found).toBe(true);
     expect(res.result.metadata.person.name).toBe("Sarah");
+    expect(res.result.metadata.person.facts).toBeUndefined();
+    expect(res.result.metadata.person.recaps).toBeUndefined();
+    expect(res.result.metadata.face_profile).toEqual(res.result.metadata.person);
     expect(res.result.metadata.similarity).toBe(0.86);
     expect(res.result.metadata.distance).toBeUndefined();
   });
@@ -330,8 +339,21 @@ describe("tool.invoke — face recognition (#627)", () => {
     expect(res.result.metadata.found).toBe(false);
   });
 
-  test("face_enroll returns the new person", async () => {
-    mockService({ "/enroll": { ok: true, person: { id: "p9", name: "Ben", facts: [], recaps: [] } } });
+  test("face_identify rejects successful responses that omit the matched profile", async () => {
+    mockService({ "/identify": { ok: true, found: true, similarity: 0.86 } });
+    const { server, invoke } = createMockServer();
+    registerToolMethods(server);
+    const res = (await invoke("tool.invoke", {
+      tool_name: "face_identify",
+      args: { image_base64: "abc" },
+    })) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("malformed face profile");
+    expect(res.error).toContain("/identify person");
+  });
+
+  test("face_enroll returns the new sanitized face profile", async () => {
+    mockService({ "/enroll": { ok: true, person: { id: "p9", name: "Ben", facts: ["hidden"], recaps: [{ summary: "hidden" }] } } });
     const { server, invoke } = createMockServer();
     registerToolMethods(server);
     const res = (await invoke("tool.invoke", {
@@ -340,9 +362,27 @@ describe("tool.invoke — face recognition (#627)", () => {
     })) as any;
     expect(res.ok).toBe(true);
     expect(res.result.metadata.person.name).toBe("Ben");
+    expect(res.result.metadata.person.facts).toBeUndefined();
+    expect(res.result.metadata.person.recaps).toBeUndefined();
+    expect(res.result.metadata.face_profile).toEqual(res.result.metadata.person);
   });
 
-  test("face_update mutates the profile", async () => {
+  test("face_enroll rejects successful responses with an empty profile id", async () => {
+    mockService({ "/enroll": { ok: true, person: { name: "Ben" } } });
+    const { server, invoke } = createMockServer();
+    registerToolMethods(server);
+    const res = (await invoke("tool.invoke", {
+      tool_name: "face_enroll",
+      args: { image_base64: "abc", name: "Ben" },
+    })) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("malformed face profile");
+    expect(res.error).toContain("missing id");
+  });
+
+  test("face_update refuses person facts and recaps", async () => {
+    expect(faceUpdateToolDefinition.input_schema.required).toEqual(["person_id", "name"]);
+
     mockService({ "/update": { ok: true, person: { id: "p1", name: "Sarah", facts: ["works at Acme"], recaps: [] } } });
     const { server, invoke } = createMockServer();
     registerToolMethods(server);
@@ -350,16 +390,37 @@ describe("tool.invoke — face recognition (#627)", () => {
       tool_name: "face_update",
       args: { person_id: "p1", facts: ["works at Acme"] },
     })) as any;
-    expect(res.ok).toBe(true);
-    expect(res.result.metadata.person.facts).toContain("works at Acme");
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("person facts or recaps");
   });
 
-  test("face_people lists known people", async () => {
+  test("face_update only sends a legacy face label", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url: any, init?: RequestInit) => {
+      requestBody = typeof init?.body === "string" ? JSON.parse(init.body) : {};
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, person: { id: "p1", name: "Sarah", facts: ["hidden"], recaps: [{ summary: "hidden" }] } }),
+      } as any;
+    }) as any;
+    const { server, invoke } = createMockServer();
+    registerToolMethods(server);
+    const res = (await invoke("tool.invoke", {
+      tool_name: "face_update",
+      args: { person_id: "p1", name: "Sarah" },
+    })) as any;
+    expect(res.ok).toBe(true);
+    expect(requestBody).toEqual({ person_id: "p1", name: "Sarah", facts: null, recap: null });
+    expect(res.result.metadata.person).toEqual({ id: "p1", name: "Sarah" });
+  });
+
+  test("face_people lists sanitized face profiles", async () => {
     mockService({
       "/people": {
         ok: true,
         people: [
-          { id: "p1", name: "Sarah", facts: [], recaps: [] },
+          { id: "p1", name: "Sarah", facts: ["hidden"], recaps: [{ summary: "hidden" }] },
           { id: "p2", name: "Ben", facts: [], recaps: [] },
         ],
       },
@@ -371,12 +432,36 @@ describe("tool.invoke — face recognition (#627)", () => {
       args: {},
     })) as any;
     expect(res.ok).toBe(true);
-    expect(res.result.content).toBe("2 known people.");
+    expect(res.result.content).toBe("2 face profiles.");
     expect(res.result.metadata.people.length).toBe(2);
     expect(res.result.metadata.people[0].name).toBe("Sarah");
+    expect(res.result.metadata.people[0].facts).toBeUndefined();
+    expect(res.result.metadata.people[0].recaps).toBeUndefined();
+    expect(res.result.metadata.face_profiles).toEqual(res.result.metadata.people);
   });
 
-  test("face_clear clears the people database", async () => {
+  test("face_people rejects malformed profiles instead of returning empty ids", async () => {
+    mockService({
+      "/people": {
+        ok: true,
+        people: [
+          { id: "p1", name: "Sarah" },
+          { name: "Missing Id" },
+        ],
+      },
+    });
+    const { server, invoke } = createMockServer();
+    registerToolMethods(server);
+    const res = (await invoke("tool.invoke", {
+      tool_name: "face_people",
+      args: {},
+    })) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("malformed face profile");
+    expect(res.error).toContain("/people people[1]");
+  });
+
+  test("face_clear clears the legacy face index", async () => {
     mockService({ "/clear": { ok: true, removed: 2 } });
     const { server, invoke } = createMockServer();
     registerToolMethods(server);
@@ -385,7 +470,7 @@ describe("tool.invoke — face recognition (#627)", () => {
       args: {},
     })) as any;
     expect(res.ok).toBe(true);
-    expect(res.result.content).toBe("Cleared 2 people.");
+    expect(res.result.content).toBe("Cleared 2 face profiles.");
     expect(res.result.metadata.removed).toBe(2);
   });
 

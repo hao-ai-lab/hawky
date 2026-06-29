@@ -1006,8 +1006,8 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     });
   }, [settings, sendRealtime]);
 
-  // Cocktail Party: instruct the realtime model to recognize & recall people
-  // from the face database on demand. Pushed live via instructions update.
+  // Cocktail Party: instruct the realtime model to recognize faces through
+  // person.* and recall confirmed person profiles on demand.
   const toggleCocktailParty = useCallback(() => {
     setCocktailParty((prev) => {
       const next = !prev;

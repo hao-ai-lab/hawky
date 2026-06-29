@@ -1,10 +1,9 @@
 // =============================================================================
 // People Screen — iOS People Database (Cocktail Party) for web-ios.
 //
-// Mirrors LivePeopleDatabaseView: a scrollable list of people, each row a
-// 56x56 thumbnail + name + facts bullets + last recap. Pull-to-refresh maps to
-// a Refresh button. Reads people.list; renders a clean empty / "service not
-// running" state when the DeepFace service is unavailable.
+// Mirrors LivePeopleDatabaseView: a scrollable list of confirmed people, each row
+// a 56x56 thumbnail + name + facts bullets + last recap. Pull-to-refresh maps to
+// a Refresh button. Reads people.list through the gateway person service.
 // =============================================================================
 
 import { useCallback, useEffect, useState } from "react";
