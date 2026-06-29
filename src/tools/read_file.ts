@@ -11,7 +11,6 @@ import type {
   ToolDefinition,
   ToolContext,
   ToolResult,
-  ContentBlock,
 } from "../agent/types.js";
 
 // -----------------------------------------------------------------------------
@@ -123,9 +122,6 @@ const MIME_MAP: Record<string, string> = {
   ".bmp": "image/bmp",
   ".ico": "image/x-icon",
 };
-
-/** Max pixels for Claude vision (recommended ~1.2M pixels) */
-const MAX_IMAGE_PIXELS = 1_200_000;
 
 async function readImageFile(resolved: string, filePath: string): Promise<ToolResult> {
   const ext = extname(resolved).toLowerCase();
