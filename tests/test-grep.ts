@@ -166,6 +166,14 @@ describe("Basic matching", () => {
     expect(r.content).toContain("src/utils.ts");
     expect((r as any).metadata?.count).toBe(2);
   });
+
+  test("inline sticky flag resets for each line", async () => {
+    const r = await grep({ pattern: "(?y).*TODO" });
+    expect(r.type).toBe("text");
+    expect(r.content).toContain("src/app.ts");
+    expect(r.content).toContain("src/utils.ts");
+    expect((r as any).metadata?.count).toBe(2);
+  });
 });
 
 // =============================================================================
