@@ -13,24 +13,15 @@
 //   face_people   → POST /people      ()                     → {face_profiles}
 // =============================================================================
 
-import { loadConfig } from "../storage/config.js";
 import type { ToolDefinition, ToolContext, ToolResult } from "../agent/types.js";
+import {
+  DeepFaceFaceSignalProvider,
+  resolveDeepFaceURL,
+  type FaceProviderFailure,
+} from "../identity/face/index.js";
 
-const DEFAULT_DEEPFACE_URL = "http://127.0.0.1:8099";
 const REQUEST_TIMEOUT_MS = 20_000;
-
-export function resolveDeepFaceURL(): string {
-  const fromEnv = process.env.DEEPFACE_URL?.trim();
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-  try {
-    const cfg = loadConfig() as { api_urls?: { deepface?: string } };
-    const fromCfg = cfg.api_urls?.deepface?.trim();
-    if (fromCfg) return fromCfg.replace(/\/$/, "");
-  } catch {
-    /* config unavailable */
-  }
-  return DEFAULT_DEEPFACE_URL;
-}
+const faceProvider = new DeepFaceFaceSignalProvider();
 
 /** POST JSON to a DeepFace endpoint, returning the parsed body or an error result. */
 async function callService(
@@ -84,12 +75,12 @@ interface IdentifyInput { image_base64: string }
 export async function executeFaceIdentify(input: IdentifyInput, context: ToolContext): Promise<ToolResult> {
   const image = typeof input.image_base64 === "string" ? input.image_base64.trim() : "";
   if (!image) return { type: "error", content: "Missing required parameter: image_base64" };
-  const r = await callService("/identify", { image_base64: image }, context);
-  if (!r.ok) return r.result;
-  if (!r.data.found) {
+  const r = await faceProvider.identifyFrame({ imageBase64: image, abortSignal: context.abort_signal });
+  if (!r.ok) return faceProviderFailureResult(r);
+  if (!r.found) {
     return { type: "text", content: "No known person matched this face.", metadata: { found: false } };
   }
-  const parsed = sanitizeFaceProfile(r.data.person, "/identify person");
+  const parsed = sanitizeFaceProfile(r.profile, "/identify person");
   if (!parsed.ok) return parsed.result;
   const p = parsed.profile;
   return {
@@ -99,7 +90,7 @@ export async function executeFaceIdentify(input: IdentifyInput, context: ToolCon
       found: true,
       person: p,
       face_profile: p,
-      similarity: r.data.similarity ?? null,
+      similarity: r.similarity ?? null,
     },
   };
 }
@@ -126,13 +117,14 @@ interface EnrollInput { image_base64: string; name?: string; person_id?: string 
 export async function executeFaceEnroll(input: EnrollInput, context: ToolContext): Promise<ToolResult> {
   const image = typeof input.image_base64 === "string" ? input.image_base64.trim() : "";
   if (!image) return { type: "error", content: "Missing required parameter: image_base64" };
-  const r = await callService(
-    "/enroll",
-    { image_base64: image, name: input.name ?? "Unknown", person_id: input.person_id ?? null },
-    context,
-  );
-  if (!r.ok) return r.result;
-  const parsed = sanitizeFaceProfile(r.data.person, "/enroll person");
+  const r = await faceProvider.enrollOrLinkTemplate({
+    imageBase64: image,
+    label: input.name ?? "Unknown",
+    profileId: input.person_id ?? null,
+    abortSignal: context.abort_signal,
+  });
+  if (!r.ok) return faceProviderFailureResult(r);
+  const parsed = sanitizeFaceProfile(r.profile, "/enroll person");
   if (!parsed.ok) return parsed.result;
   const p = parsed.profile;
   return { type: "text", content: `Enrolled ${p.name}.`, metadata: { person: p, face_profile: p } };
@@ -177,13 +169,13 @@ export async function executeFaceUpdate(input: UpdateInput, context: ToolContext
       content: "face_update only supports legacy face-profile labels; use person.update_profile for person data.",
     };
   }
-  const r = await callService(
-    "/update",
-    { person_id: id, name, facts: null, recap: null },
-    context,
-  );
-  if (!r.ok) return r.result;
-  const parsed = sanitizeFaceProfile(r.data.person, "/update person");
+  const r = await faceProvider.updateFaceProfileLabel({
+    profileId: id,
+    label: name,
+    abortSignal: context.abort_signal,
+  });
+  if (!r.ok) return faceProviderFailureResult(r);
+  const parsed = sanitizeFaceProfile(r.profile, "/update person");
   if (!parsed.ok) return parsed.result;
   const p = parsed.profile;
   return { type: "text", content: `Updated face profile ${p.name}.`, metadata: { person: p, face_profile: p } };
@@ -210,13 +202,10 @@ export const faceUpdateToolDefinition: ToolDefinition<UpdateInput> = {
 // face_people
 // -----------------------------------------------------------------------------
 export async function executeFacePeople(_input: Record<string, never>, context: ToolContext): Promise<ToolResult> {
-  const r = await callService("/people", {}, context);
-  if (!r.ok) return r.result;
-  if (!Array.isArray(r.data.people)) {
-    return malformedFaceProfileResult("/people people must be an array");
-  }
+  const r = await faceProvider.listFaceProfiles({ abortSignal: context.abort_signal });
+  if (!r.ok) return faceProviderFailureResult(r);
   const people: Record<string, unknown>[] = [];
-  for (const [index, raw] of r.data.people.entries()) {
+  for (const [index, raw] of r.profiles.entries()) {
     const parsed = sanitizeFaceProfile(raw, `/people people[${index}]`);
     if (!parsed.ok) return parsed.result;
     people.push(parsed.profile);
@@ -266,6 +255,13 @@ function malformedFaceProfileResult(message: string): ToolResult {
   };
 }
 
+function faceProviderFailureResult(failure: FaceProviderFailure): ToolResult {
+  return {
+    type: "error",
+    content: failure.error,
+  };
+}
+
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -274,9 +270,9 @@ function stringOrUndefined(value: unknown): string | undefined {
 // face_clear — wipe the whole legacy face index
 // -----------------------------------------------------------------------------
 export async function executeFaceClear(_input: Record<string, never>, context: ToolContext): Promise<ToolResult> {
-  const r = await callService("/clear", {}, context);
-  if (!r.ok) return r.result;
-  return { type: "text", content: `Cleared ${r.data.removed ?? 0} face profiles.`, metadata: { removed: r.data.removed ?? 0 } };
+  const r = await faceProvider.clearIndex({ abortSignal: context.abort_signal });
+  if (!r.ok) return faceProviderFailureResult(r);
+  return { type: "text", content: `Cleared ${r.removed ?? 0} face profiles.`, metadata: { removed: r.removed ?? 0 } };
 }
 
 export const faceClearToolDefinition: ToolDefinition = {

@@ -461,6 +461,19 @@ describe("tool.invoke — face recognition (#627)", () => {
     expect(res.error).toContain("/people people[1]");
   });
 
+  test("face_people rejects malformed people payloads instead of fabricating an empty list", async () => {
+    mockService({ "/people": { ok: true, people: { id: "not-an-array" } } });
+    const { server, invoke } = createMockServer();
+    registerToolMethods(server);
+    const res = (await invoke("tool.invoke", {
+      tool_name: "face_people",
+      args: {},
+    })) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("malformed face profile");
+    expect(res.error).toContain("/people people must be an array");
+  });
+
   test("face_clear clears the legacy face index", async () => {
     mockService({ "/clear": { ok: true, removed: 2 } });
     const { server, invoke } = createMockServer();

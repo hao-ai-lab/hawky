@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { allowedUsesForIdentitySignal } from "../core/index.js";
+import type { FaceIndexProfile } from "../face/index.js";
 import {
   buildFaceIdentitySignal,
   buildIdentityCandidate,
@@ -16,17 +17,9 @@ import {
 } from "./contracts.js";
 import type { EvidenceRef, IsoTime, RecordId } from "../core/index.js";
 
-export interface LegacyDeepFaceProfile {
-  id?: unknown;
-  name?: unknown;
+export interface LegacyDeepFaceProfile extends FaceIndexProfile {
   facts?: unknown;
   recaps?: unknown;
-  created_at?: unknown;
-  last_seen_at?: unknown;
-  thumbnail?: unknown;
-  embeddings?: unknown;
-  embedding?: unknown;
-  [key: string]: unknown;
 }
 
 export interface NormalizedLegacyDeepFaceProfile {

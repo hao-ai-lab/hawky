@@ -20,9 +20,9 @@ import {
   PERSON_MODEL_TOOL_NAMES,
   PERSON_RPC_METHODS,
   type LegacyDeepFaceProfile,
-  type LegacyPersonRepository,
   personToolForName,
 } from "../src/identity/person/index.js";
+import type { FaceSignalProvider } from "../src/identity/face/index.js";
 
 const RAW_PEOPLE = [
   {
@@ -211,6 +211,54 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     }
   });
 
+  test("PersonService consumes face signal provider methods instead of person repository methods", async () => {
+    const calls: string[] = [];
+    const service = new PersonService({
+      async identifyFrame() {
+        calls.push("identifyFrame");
+        return {
+          ok: true,
+          found: true,
+          profile: RAW_PEOPLE[1],
+          similarity: 0.87,
+        };
+      },
+      async listFaceProfiles() {
+        calls.push("listFaceProfiles");
+        return { ok: true, profiles: RAW_PEOPLE };
+      },
+      async enrollOrLinkTemplate() {
+        calls.push("enrollOrLinkTemplate");
+        throw new Error("unexpected enroll");
+      },
+      async updateFaceProfileLabel(input) {
+        calls.push(`updateFaceProfileLabel:${input.profileId}:${input.label}`);
+        return { ok: true, profile: { ...RAW_PEOPLE[1], name: input.label ?? "Morgan" } };
+      },
+    } satisfies FaceSignalProvider, new InMemoryPersonCandidateReviewStore(), {
+      personStore: new InMemoryPersonStore(),
+      now: () => "2026-06-27T12:00:00.000Z",
+    });
+
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    const identified = await identifyCurrentFrame({ image_base64: "frame" }, service);
+    expect(identified.found).toBe(false);
+
+    await confirmCandidate({
+      candidate_id: candidateId,
+      name: "Morgan",
+    }, service);
+
+    expect(calls).toEqual([
+      "listFaceProfiles",
+      "identifyFrame",
+      "updateFaceProfileLabel:p-unknown:Morgan",
+    ]);
+  });
+
   test("person.update_profile syncs only the display name through the DeepFace compatibility endpoint", async () => {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     restore = stubDeepFaceFetch((path, body) => {
@@ -273,13 +321,13 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const reviewStore = new InMemoryPersonCandidateReviewStore();
     const personStore = new InMemoryPersonStore();
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       update: (input) => {
         updates.push(input);
         return {
           ...RAW_PEOPLE[0],
-          name: input.name ?? "Sarah",
+          name: input.label ?? "Sarah",
           facts: ["legacy should not be canonical"],
           recaps: [],
         };
@@ -307,10 +355,8 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     expect(personStore.listFacts("p-sarah").map((fact) => fact.text)).toContain("studies robotics");
     expect(updates).toEqual([
       {
-        personId: "p-sarah",
-        name: "Sarah Chen",
-        facts: null,
-        recap: null,
+        profileId: "p-sarah",
+        label: "Sarah Chen",
       },
     ]);
   });
@@ -319,7 +365,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const reviewStore = new InMemoryPersonCandidateReviewStore();
     const personStore = new InMemoryPersonStore();
     let legacyClears = 0;
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       clear: () => {
         legacyClears += 1;
@@ -371,7 +417,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const reviewStore = new InMemoryPersonCandidateReviewStore();
     const personStore = new InMemoryPersonStore();
     let legacyClears = 0;
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       clear: () => {
         legacyClears += 1;
@@ -461,7 +507,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const store = new InMemoryPersonCandidateReviewStore();
     const enrolls: Array<Record<string, unknown>> = [];
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       identify: {
         found: true,
@@ -470,11 +516,11 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       },
       enroll: (input) => {
         enrolls.push(input);
-        return { id: "p-should-not-enroll", name: input.name, facts: [], recaps: [] };
+        return { id: "p-should-not-enroll", name: input.label, facts: [], recaps: [] };
       },
       update: (input) => {
         updates.push(input);
-        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+        return { ...RAW_PEOPLE[1], name: input.label ?? "Morgan" };
       },
     }), store);
 
@@ -490,11 +536,11 @@ describe("person.* gateway methods over legacy DeepFace", () => {
   test("person.update_profile refuses direct writes to an unconfirmed candidate profile id", async () => {
     const store = new InMemoryPersonCandidateReviewStore();
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       update: (input) => {
         updates.push(input);
-        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+        return { ...RAW_PEOPLE[1], name: input.label ?? "Morgan" };
       },
     }), store);
 
@@ -509,7 +555,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
   test("person.update_profile refuses to re-enroll a rejected frame-matched candidate", async () => {
     const store = new InMemoryPersonCandidateReviewStore();
     const enrolls: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       identify: {
         found: true,
@@ -518,7 +564,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       },
       enroll: (input) => {
         enrolls.push(input);
-        return { id: "p-should-not-enroll", name: input.name, facts: [], recaps: [] };
+        return { id: "p-should-not-enroll", name: input.label, facts: [], recaps: [] };
       },
     }), store);
     const listed = await listPeople({ include_candidates: true }, service);
@@ -540,11 +586,11 @@ describe("person.* gateway methods over legacy DeepFace", () => {
   test("person.update_profile refuses direct writes to a rejected candidate profile id", async () => {
     const store = new InMemoryPersonCandidateReviewStore();
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       update: (input) => {
         updates.push(input);
-        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+        return { ...RAW_PEOPLE[1], name: input.label ?? "Morgan" };
       },
     }), store);
     const listed = await listPeople({ include_candidates: true }, service);
@@ -567,7 +613,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const reviewStore = new InMemoryPersonCandidateReviewStore();
     const personStore = new InMemoryPersonStore();
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       identify: {
         found: true,
@@ -576,7 +622,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       },
       update: (input) => {
         updates.push(input);
-        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+        return { ...RAW_PEOPLE[1], name: input.label ?? "Morgan" };
       },
     }), reviewStore, {
       personStore,
@@ -611,7 +657,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
   test("person.confirm_candidate promotes a legacy Unknown candidate through the person service boundary", async () => {
     const store = new InMemoryPersonCandidateReviewStore();
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       update: (input) => {
         updates.push(input);
@@ -641,10 +687,8 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     expect(result.candidate.allowedUses.profilePromotion).toBe(true);
     expect(updates).toEqual([
       {
-        personId: "p-unknown",
-        name: "Morgan",
-        facts: null,
-        recap: null,
+        profileId: "p-unknown",
+        label: "Morgan",
       },
     ]);
     const stored = store.get(candidateId!);
@@ -657,7 +701,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     const reviewStore = new InMemoryPersonCandidateReviewStore();
     const personStore = new InMemoryPersonStore();
     const updates: Array<Record<string, unknown>> = [];
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       identify: {
         found: true,
@@ -685,10 +729,8 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     expect(confirmed.person?.name).toBe("Morgan");
     expect(updates).toEqual([
       {
-        personId: "p-unknown",
-        name: "Morgan",
-        facts: null,
-        recap: null,
+        profileId: "p-unknown",
+        label: "Morgan",
       },
     ]);
 
@@ -709,7 +751,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
 
   test("person.reject_candidate suppresses a legacy Unknown candidate from future list and identify results", async () => {
     const store = new InMemoryPersonCandidateReviewStore();
-    const service = new PersonService(fakeLegacyPersonRepository({
+    const service = new PersonService(fakeFaceSignalProvider({
       people: RAW_PEOPLE,
       identify: {
         found: true,
@@ -745,61 +787,59 @@ describe("person.* gateway methods over legacy DeepFace", () => {
   });
 });
 
-function fakeLegacyPersonRepository(options: {
+function fakeFaceSignalProvider(options: {
   people?: unknown[];
   identify?: { found: false } | { found: true; person: LegacyDeepFaceProfile; similarity?: number };
   update?: (input: {
-    personId: string;
-    name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
+    profileId: string;
+    label: string;
   }) => Record<string, unknown>;
   enroll?: (input: {
     imageBase64: string;
-    name: string;
-    personId?: string | null;
+    label: string;
+    profileId?: string | null;
   }) => Record<string, unknown>;
   clear?: () => { removed?: number } | { ok: false; error: string };
-}): LegacyPersonRepository {
+}): FaceSignalProvider {
   return {
-    async identify() {
+    async identifyFrame() {
       const identify = options.identify;
       if (!identify || !identify.found) return { ok: true, found: false };
       return {
         ok: true,
         found: true,
-        person: identify.person,
+        profile: identify.person,
         similarity: identify.similarity,
       };
     },
-    async listPeople() {
-      return { ok: true, people: options.people ?? [] };
+    async listFaceProfiles() {
+      return { ok: true, profiles: options.people ?? [] };
     },
-    async enroll(input) {
+    async enrollOrLinkTemplate(input) {
       const person = options.enroll?.(input);
       if (person) {
-        return { ok: true, person: person as LegacyDeepFaceProfile };
+        return { ok: true, profile: person as LegacyDeepFaceProfile };
       }
       return {
         ok: true,
-        person: {
+        profile: {
           id: "p-enrolled",
-          name: input.name,
+          name: input.label,
           facts: [],
           recaps: [],
         },
       };
     },
-    async update(input) {
+    async updateFaceProfileLabel(input) {
       const person = options.update?.(input) ?? {
-        id: input.personId,
-        name: input.name ?? "Updated",
-        facts: input.facts ?? [],
-        recaps: input.recap ? [{ summary: input.recap }] : [],
+        id: input.profileId,
+        name: input.label ?? "Updated",
+        facts: [],
+        recaps: [],
       };
-      return { ok: true, person: person as LegacyDeepFaceProfile };
+      return { ok: true, profile: person as LegacyDeepFaceProfile };
     },
-    async clearPeople() {
+    async clearIndex() {
       const result = options.clear?.();
       if (result && "ok" in result && result.ok === false) {
         return { ok: false, error: result.error };
