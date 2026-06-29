@@ -453,6 +453,13 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   // something to cancel — otherwise the Realtime API errors with
   // "Cancellation failed: no active response found".
   const activeResponseRef = useRef(false);
+  // Stay Silent capture window (#671): while silent, the model listens but does
+  // not reply, so we record the user's transcribed speech + how many camera
+  // frames went by. On release we hand this window back to the model and force
+  // one spoken recap of what happened. Mirrors the iOS LiveSessionStore flow.
+  const staySilentRef = useRef(false);
+  const silenceTranscriptRef = useRef<string[]>([]);
+  const silenceFrameCountRef = useRef(0);
   function streamAssistant(delta: string) {
     if (!delta) return;
     responseProducedTextRef.current = true;
@@ -513,6 +520,10 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     if (audioElRef.current) audioElRef.current.srcObject = null;
     setSpeaking(false);
     setSafetyOn(false);
+    setStaySilent(false);
+    staySilentRef.current = false;
+    silenceTranscriptRef.current = [];
+    silenceFrameCountRef.current = 0;
   }, []);
 
   // Tear down on unmount.
@@ -726,6 +737,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       type: "conversation.item.create",
       item: { type: "message", role: "user", content: [{ type: "input_image", image_url: canvas.toDataURL("image/jpeg", 0.7) }] },
     });
+    if (staySilentRef.current) silenceFrameCountRef.current += 1;
   }
 
   // Stable identity so the memoized composer (which owns the draft) is fully
@@ -831,6 +843,12 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       // the order reads correctly (user question, then assistant answer).
       insertUserBeforeAssistant(ev.transcript);
       persistTurn("user", ev.transcript);
+      // While Stay Silent is on, record what was said so we can recap it on
+      // release. The transcript can land just after toggle-off (server VAD +
+      // transcription are async), so the release path settles briefly first.
+      if (staySilentRef.current && ev.transcript.trim()) {
+        silenceTranscriptRef.current.push(ev.transcript.trim());
+      }
       return;
     }
     if (type === "response.function_call_arguments.done") {
@@ -1002,28 +1020,75 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     });
   }, []);
 
+  // Build the recap context handed back to the model on Stay Silent release.
+  // Mirrors the iOS captureSilenceWindowRecap payload.
+  function captureSilenceWindowRecap(): string {
+    const turns = silenceTranscriptRef.current;
+    const lines = turns.length ? turns.map((t) => `user: ${t}`).join("\n") : "(No speech was captured)";
+    const visual = silenceFrameCountRef.current > 0
+      ? " I also saw the live camera feed — use it if it helps give context to the recap."
+      : "";
+    return `Here's what I captured:\n${lines}${visual}`;
+  }
+
+  // On Stay Silent release: inject the captured window as user context, then force
+  // exactly one recap turn so the model speaks a summary of what happened while it
+  // was listening. The user's last utterance is often still being transcribed when
+  // they tap off (server VAD + transcription are async), so settle briefly first.
+  function requestSilenceReleaseSummary() {
+    const recap = captureSilenceWindowRecap();
+    sendRealtime({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: `Give me a concise recap of what we just talked about while you were quiet:\n\n${recap}` }],
+      },
+    });
+    sendRealtime({
+      type: "response.create",
+      response: {
+        output_modalities: [micOn ? "audio" : "text"],
+        instructions:
+          "Give a natural one-sentence-to-paragraph recap of what was just discussed while you were silent. " +
+          "Lead with the key point, mention any follow-ups, and skip technical details. If no speech was captured, say so briefly.",
+      },
+    });
+  }
+
   // Stay Silent: the model LISTENS without replying. Re-sends turn_detection
   // (create_response) to the LIVE session so toggling works mid-conversation —
-  // not just at connect time.
+  // not just at connect time. On release, recap what was heard (#671).
   const toggleStaySilent = useCallback(() => {
     setStaySilent((prev) => {
       const next = !prev;
       const interrupt = settings.bargeIn !== "let_finish";
+      staySilentRef.current = next;
       sendRealtime({
         type: "session.update",
         session: { type: "realtime", audio: { input: { turn_detection: buildTurnDetection(settings, next, interrupt) } } },
       });
-      // While silent: cancel any IN-FLIGHT response so it goes quiet immediately.
-      // Only cancel when one is actually active — otherwise the Realtime API
-      // errors with "Cancellation failed: no active response found".
-      if (next && activeResponseRef.current) {
-        sendRealtime({ type: "response.cancel" });
-        activeResponseRef.current = false;
+      if (next) {
+        // Entering silence: start a fresh capture window and cancel any IN-FLIGHT
+        // response so the model goes quiet immediately. Only cancel when one is
+        // actually active — otherwise the Realtime API errors with
+        // "Cancellation failed: no active response found".
+        silenceTranscriptRef.current = [];
+        silenceFrameCountRef.current = 0;
+        if (activeResponseRef.current) {
+          sendRealtime({ type: "response.cancel" });
+          activeResponseRef.current = false;
+        }
+        push("system", "Stay Silent on — listening without replying.");
+      } else {
+        // Leaving silence: settle for trailing speech/transcription, then recap.
+        push("system", "Stay Silent off — summarizing what happened.");
+        setTimeout(() => requestSilenceReleaseSummary(), 1200);
       }
-      push("system", next ? "Stay Silent on — listening without replying." : "Stay Silent off.");
       return next;
     });
-  }, [settings, sendRealtime]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, sendRealtime, micOn]);
 
   // Cocktail Party: instruct the realtime model to recognize & recall people
   // from the face database on demand. Pushed live via instructions update.
