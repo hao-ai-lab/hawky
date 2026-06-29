@@ -206,6 +206,26 @@ describe("read_file tool", () => {
     expect(result.content).toContain(">= 1");
   });
 
+  test("fractional offset returns error", async () => {
+    const result = await readFile({
+      file_path: join(tmpDir, "simple.txt"),
+      offset: 1.5,
+    });
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("Offset must be a positive integer");
+  });
+
+  test("invalid limits return errors instead of empty or surprising ranges", async () => {
+    for (const limit of [0, -1, 1.5, Number.NaN, "2"] as any[]) {
+      const result = await readFile({
+        file_path: join(tmpDir, "simple.txt"),
+        limit,
+      } as any);
+      expect(result.type).toBe("error");
+      expect(result.content).toContain("Limit must be a positive integer");
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Default limit truncation with continuation message
   // ---------------------------------------------------------------------------
