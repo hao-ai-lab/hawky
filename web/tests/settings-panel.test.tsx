@@ -60,7 +60,7 @@ beforeEach(() => {
 describe("SettingsPanel heartbeat model dropdown", () => {
   it("preserves a user's deprecated heartbeat model as a custom option", async () => {
     mockRpc({ heartbeat: { ...baseConfig().heartbeat, model: "claude-sonnet-4-5" } });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     await waitFor(() => {
       expect(screen.getByText("claude-sonnet-4-5 (custom)")).toBeInTheDocument();
@@ -69,7 +69,7 @@ describe("SettingsPanel heartbeat model dropdown", () => {
 
   it("does not add a custom option when heartbeat model is a known ID", async () => {
     mockRpc({ heartbeat: { ...baseConfig().heartbeat, model: "claude-sonnet-4-6" } });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     await waitFor(() => {
       expect(screen.queryByText(/\(custom\)/)).not.toBeInTheDocument();
@@ -78,7 +78,7 @@ describe("SettingsPanel heartbeat model dropdown", () => {
 
   it("does not add a custom option when heartbeat override is empty (same as default)", async () => {
     mockRpc({ heartbeat: { ...baseConfig().heartbeat, model: null } });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     await waitFor(() => {
       expect(screen.queryByText(/\(custom\)/)).not.toBeInTheDocument();
@@ -93,7 +93,7 @@ describe("SettingsPanel heartbeat model dropdown", () => {
 describe("SettingsPanel unified model dropdown", () => {
   it("shows all Claude + GPT-5 models when both keys are set", async () => {
     mockRpc({ has_anthropic_key: true, has_openai_key: true });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
     await waitFor(() => {
       expect(screen.getAllByRole("option", { name: "claude-opus-4-7" }).length).toBeGreaterThan(0);
       expect(screen.getByRole("option", { name: "gpt-5.5" })).toBeInTheDocument();
@@ -107,7 +107,7 @@ describe("SettingsPanel unified model dropdown", () => {
 
   it("shows only Claude models when only anthropic key is set", async () => {
     mockRpc({ has_anthropic_key: true, has_openai_key: false });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
     await waitFor(() => {
       expect(screen.getAllByRole("option", { name: "claude-opus-4-7" }).length).toBeGreaterThan(0);
       expect(screen.queryByRole("option", { name: "gpt-5.5" })).not.toBeInTheDocument();
@@ -116,7 +116,7 @@ describe("SettingsPanel unified model dropdown", () => {
 
   it("shows only GPT-5 models when only openai key is set", async () => {
     mockRpc({ has_anthropic_key: false, has_openai_key: true, model: "gpt-5.5" });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
     await waitFor(() => {
       const mainSelect = screen.getAllByRole("combobox")[0];
       expect(mainSelect.querySelector("option[value='gpt-5.5']")).toBeTruthy();
@@ -131,7 +131,7 @@ describe("SettingsPanel unified model dropdown", () => {
       provider: "vertex",
       vertex: { project_id: "my-project" },
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
     await waitFor(() => {
       expect(screen.getAllByRole("option", { name: "claude-opus-4-7" }).length).toBeGreaterThan(0);
       expect(screen.queryByRole("option", { name: "gpt-5.5" })).not.toBeInTheDocument();
@@ -145,7 +145,7 @@ describe("SettingsPanel unified model dropdown", () => {
       provider: "anthropic",
       vertex: { project_id: "" },
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
     await waitFor(() => {
       expect(screen.getByText(/Configure an API key/)).toBeInTheDocument();
     });
@@ -158,7 +158,7 @@ describe("SettingsPanel unified model dropdown", () => {
       provider: "openai",
       model: "gpt-5.5",
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     const select = await waitFor(() => screen.getAllByRole("combobox")[0]);
     await waitFor(() => {
@@ -187,7 +187,7 @@ describe("SettingsPanel unified model dropdown", () => {
       vertex: { project_id: "my-project" },
       model: "gpt-5.5",
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     const select = await waitFor(() => screen.getAllByRole("combobox")[0]);
     await waitFor(() => {
@@ -217,7 +217,7 @@ describe("SettingsPanel unified model dropdown", () => {
       provider: "anthropic",
       model: "claude-opus-4-7",
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     const select = await waitFor(() => screen.getAllByRole("combobox")[0]);
     await waitFor(() => {
@@ -251,7 +251,7 @@ describe("SettingsPanel unified model dropdown", () => {
         },
       },
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     const select = await waitFor(() => screen.getAllByRole("combobox")[0]);
     fireEvent.change(select, { target: { value: "compat:local-b" } });
@@ -279,7 +279,7 @@ describe("SettingsPanel unified model dropdown", () => {
       model: "gpt-5.5",
       openai_base_url: "",
     });
-    render(<SettingsPanel onClose={() => {}} />);
+    render(<SettingsPanel />);
 
     const input = await waitFor(() => screen.getByPlaceholderText("https://api.openai.com/v1"));
     fireEvent.change(input, { target: { value: "http://localhost:8000/v1" } });
