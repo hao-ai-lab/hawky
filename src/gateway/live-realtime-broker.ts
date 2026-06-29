@@ -50,27 +50,85 @@ const realtimeMintQuotas = new Map<string, {
   dayCount: number;
 }>();
 
+type RealtimeApiKeySelection = {
+  apiKey: string;
+  byokApiKey: string;
+};
+
+type RealtimeClientSecretRequest = {
+  model: string;
+  body: {
+    session: Record<string, unknown>;
+    expires_after: {
+      anchor: "created_at";
+      seconds: number;
+    };
+  };
+};
+
 export async function mintOpenAIRealtimeClientSecret(
   params: LiveRealtimeClientSecretParams,
   options: LiveRealtimeBrokerOptions = {},
 ): Promise<LiveRealtimeClientSecretResponse> {
   const cfg = loadConfig();
-  // Prefer a caller-supplied "bring your own key" (hosted web demo) when it is
-  // well-formed; otherwise fall back to the gateway's configured key.
-  const byok = sanitizeByokKey(params.byok_api_key);
-  const apiKey = byok || process.env.OPENAI_API_KEY || cfg.api_keys?.openai || "";
-  if (!apiKey) {
+  const keySelection = selectRealtimeApiKey(params, cfg.api_keys?.openai);
+  if (!keySelection.apiKey) {
     throw new LiveRealtimeBrokerError(
       "No OpenAI API key available. Add your own key in Settings (BYOK) or configure one on the gateway.",
       400,
     );
   }
-  if (!byok) {
+  if (!keySelection.byokApiKey) {
     enforceRealtimeMintQuota(options.quotaKey ?? "unknown");
   }
 
+  const request = buildRealtimeClientSecretRequest(params);
+
+  const upstream = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${keySelection.apiKey}`,
+      "Content-Type": "application/json",
+      "OpenAI-Safety-Identifier": "hawky-live-lab",
+    },
+    body: JSON.stringify(request.body),
+  });
+
+  const payload = await upstream.json().catch(() => null);
+  if (!upstream.ok) {
+    const message = extractOpenAIError(payload) ?? `OpenAI returned HTTP ${upstream.status}`;
+    throw new LiveRealtimeBrokerError(message, upstream.status);
+  }
+
+  return {
+    ok: true,
+    model: request.model,
+    websocket_url: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(request.model)}`,
+    client_secret: payload,
+  };
+}
+
+export function resetRealtimeMintQuotaForTests(): void {
+  realtimeMintQuotas.clear();
+}
+
+function selectRealtimeApiKey(
+  params: LiveRealtimeClientSecretParams,
+  configuredKey: string | undefined,
+): RealtimeApiKeySelection {
+  // Prefer a caller-supplied "bring your own key" (hosted web demo) when it is
+  // well-formed; otherwise fall back to the gateway's configured key.
+  const byok = sanitizeByokKey(params.byok_api_key);
+  return {
+    apiKey: byok || process.env.OPENAI_API_KEY || configuredKey || "",
+    byokApiKey: byok,
+  };
+}
+
+function buildRealtimeClientSecretRequest(
+  params: LiveRealtimeClientSecretParams,
+): RealtimeClientSecretRequest {
   const model = sanitizeRealtimeModel(params.model);
-  const expiresAfterSeconds = sanitizeClientSecretTTL(params.expires_after_seconds);
   const session: Record<string, unknown> = {
     type: "realtime",
     model,
@@ -92,38 +150,16 @@ export async function mintOpenAIRealtimeClientSecret(
   session.tool_choice = sanitizeToolChoice(params.tool_choice);
   session.parallel_tool_calls = params.parallel_tool_calls !== false;
 
-  const upstream = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "OpenAI-Safety-Identifier": "hawky-live-lab",
-    },
-    body: JSON.stringify({
+  return {
+    model,
+    body: {
       session,
       expires_after: {
         anchor: "created_at",
-        seconds: expiresAfterSeconds,
+        seconds: sanitizeClientSecretTTL(params.expires_after_seconds),
       },
-    }),
-  });
-
-  const payload = await upstream.json().catch(() => null);
-  if (!upstream.ok) {
-    const message = extractOpenAIError(payload) ?? `OpenAI returned HTTP ${upstream.status}`;
-    throw new LiveRealtimeBrokerError(message, upstream.status);
-  }
-
-  return {
-    ok: true,
-    model,
-    websocket_url: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,
-    client_secret: payload,
+    },
   };
-}
-
-export function resetRealtimeMintQuotaForTests(): void {
-  realtimeMintQuotas.clear();
 }
 
 /**

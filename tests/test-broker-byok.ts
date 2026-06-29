@@ -26,17 +26,18 @@ const FAKE_OPENAI_RESPONSE = JSON.stringify({
  * Authorization header so tests can assert which key was used. Returns the
  * captured-state object plus a restore fn.
  */
-function stubMintFetch(): { captured: { authorization: string | null }; restore: () => void } {
+function stubMintFetch(): { captured: { authorization: string | null; body: any | null }; restore: () => void } {
   const realFetch = globalThis.fetch;
   const prevKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = GATEWAY_KEY;
-  const captured: { authorization: string | null } = { authorization: null };
+  const captured: { authorization: string | null; body: any | null } = { authorization: null, body: null };
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.includes("api.openai.com")) {
       const headers = new Headers(init?.headers);
       captured.authorization = headers.get("Authorization");
+      captured.body = JSON.parse(String(init?.body ?? "{}"));
       return new Response(FAKE_OPENAI_RESPONSE, {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -92,6 +93,35 @@ describe("broker BYOK", () => {
     const serialized = JSON.stringify(res);
     expect(serialized).not.toContain(BYOK_KEY);
     expect(serialized).not.toContain(GATEWAY_KEY);
+  });
+
+  test("sanitizes the upstream session payload", async () => {
+    await mintOpenAIRealtimeClientSecret({
+      model: "not-a-realtime-model",
+      instructions: "custom live prompt",
+      reasoning_effort: "HIGH",
+      max_response_output_tokens: 128,
+      tool_choice: "required",
+      parallel_tool_calls: false,
+      expires_after_seconds: 9,
+    });
+
+    expect(stub.captured.body).toMatchObject({
+      session: {
+        type: "realtime",
+        model: "gpt-realtime-2",
+        instructions: "custom live prompt",
+        audio: { output: { voice: "alloy" } },
+        reasoning: { effort: "high" },
+        tool_choice: "required",
+        parallel_tool_calls: false,
+      },
+      expires_after: {
+        anchor: "created_at",
+        seconds: 10,
+      },
+    });
+    expect(stub.captured.body.session).not.toHaveProperty("max_response_output_tokens");
   });
 
   test("limits gateway-key mints per quota identity", async () => {
