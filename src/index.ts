@@ -1017,9 +1017,9 @@ async function main() {
       registerMediaMethods(gateway);
       registerVisionMethods(gateway);
 
-      // people.list — read-only People Database for the web demo (#681).
-      // Reads the DeepFace person DB; degrades gracefully when the service is
-      // not running so the demo renders an empty state instead of erroring.
+      // people.list/person.* — person service over the face-match backend (#681).
+      // Degrades gracefully when the face backend is not running so the demo renders
+      // an empty/local state instead of erroring.
       registerPeopleMethods(gateway);
       registerPersonMethods(gateway);
 

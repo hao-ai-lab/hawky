@@ -10,7 +10,9 @@ import {
   buildPersonCandidateReviewRecord,
   buildFaceIdentitySignal,
   buildPersonFact,
+  FilePersonStore,
   FilePersonCandidateReviewStore,
+  importLegacyDeepFaceProfiles,
   normalizeLegacyDeepFaceProfile,
   personFactCanBeReadByMemoryDistill,
 } from "../src/identity/person/index.js";
@@ -196,6 +198,40 @@ describe("person identity contracts", () => {
       expect(record?.review.state).toBe("rejected");
       expect(record?.review.reason).toBe("not someone to remember");
       expect(record?.metadata.source).toBe("test");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("imports legacy DeepFace people into a durable TypeScript person store", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hawky-person-store-"));
+    try {
+      const store = new FilePersonStore(dir);
+      const result = importLegacyDeepFaceProfiles(store, [
+        {
+          id: "p-sarah",
+          name: "Sarah",
+          facts: ["climber", "climber"],
+          recaps: [{ summary: "Met at the robotics lab.", at: now }],
+        },
+        {
+          id: "p-unknown",
+          name: "Unknown",
+          facts: ["should stay quarantined"],
+        },
+      ], { now });
+
+      expect(result.importedProfiles).toBe(1);
+      expect(result.importedFacts).toBe(1);
+      expect(result.importedRecaps).toBe(1);
+      expect(result.importedCandidates).toBe(1);
+
+      const reloaded = new FilePersonStore(dir);
+      expect(reloaded.getProfile("p-sarah")?.displayName).toBe("Sarah");
+      expect(reloaded.listFacts("p-sarah").map((fact) => fact.text)).toEqual(["climber"]);
+      expect(reloaded.listFacts("p-sarah")[0]?.origin).toBe("legacy_unverified");
+      expect(reloaded.listCandidates()[0]?.metadata.deepfaceProfileId).toBe("p-unknown");
+      expect(reloaded.getProfile("p-unknown")).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -1,13 +1,14 @@
 // =============================================================================
-// person.* RPC methods — model-facing person contract over the legacy DeepFace DB.
+// person.* RPC methods — model-facing person contract over the face backend.
 //
-// This is the logical split before service split: gateway owns the person-shaped
-// contract and normalization while DeepFace remains the compatibility backend.
+// Gateway/PersonService own the person-shaped contract and normalization while
+// DeepFace remains a compatibility backend for face matching/enrollment.
 // =============================================================================
 
 import { createSubsystemLogger } from "../logging/index.js";
 import {
   FilePersonCandidateReviewStore,
+  FilePersonStore,
   PersonService,
   PersonServiceError,
   type LegacyDeepFaceProfile,
@@ -16,6 +17,7 @@ import {
   type PersonListResult,
   type PersonRecallResult,
   type PersonCandidateReviewResult,
+  type PersonClearResult,
   type PersonUpdateProfileResult,
 } from "../identity/person/index.js";
 import { resolveDeepFaceURL } from "../tools/face_recognize.js";
@@ -46,6 +48,9 @@ export function registerPersonMethods(server: GatewayServer, service?: PersonSer
   });
   server.registerMethod("person.reject_candidate", async (_conn, params) => {
     return rejectCandidate(params, service ?? getDefaultPersonService());
+  });
+  server.registerMethod("person.clear", async (_conn, params) => {
+    return clearPeople(params, service ?? getDefaultPersonService());
   });
 }
 
@@ -101,6 +106,7 @@ export async function updatePersonProfile(
       imageBase64: optionalStringParam(p.image_base64),
       facts: stringArrayParam(p.facts),
       recap: optionalStringParam(p.recap),
+      sessionKey: optionalStringParam(p.session_key),
       includeStructured: shouldIncludeStructured(p),
     });
   } catch (error) {
@@ -143,6 +149,20 @@ export async function rejectCandidate(
   }
 }
 
+export async function clearPeople(
+  params: unknown = {},
+  service = getDefaultPersonService(),
+): Promise<PersonClearResult> {
+  if (params !== undefined && params !== null && (typeof params !== "object" || Array.isArray(params))) {
+    throw new MethodError("INVALID_REQUEST", "params must be an object.");
+  }
+  try {
+    return await service.clearPeople();
+  } catch (error) {
+    throw personMethodError(error);
+  }
+}
+
 function shouldIncludeStructured(params: Record<string, unknown>): boolean {
   return params.include_structured === true;
 }
@@ -151,8 +171,13 @@ export function getDefaultPersonService(): PersonService {
   defaultService ??= new PersonService(
     new DeepFaceLegacyPersonRepository(),
     new FilePersonCandidateReviewStore(),
+    { personStore: new FilePersonStore() },
   );
   return defaultService;
+}
+
+export function resetDefaultPersonServiceForTests(): void {
+  defaultService = undefined;
 }
 
 class DeepFaceLegacyPersonRepository implements LegacyPersonRepository {
@@ -197,10 +222,19 @@ class DeepFaceLegacyPersonRepository implements LegacyPersonRepository {
     const result = await callDeepFace("/update", {
       person_id: input.personId,
       name: input.name ?? null,
-      facts: input.facts && input.facts.length > 0 ? input.facts : null,
-      recap: input.recap ?? null,
+      facts: null,
+      recap: null,
     });
     return writeResult(result, "DeepFace update response omitted person.");
+  }
+
+  async clearPeople() {
+    const result = await callDeepFace("/clear", {});
+    if (!result.ok) return result;
+    return {
+      ok: true as const,
+      removed: numberOrUndefined(result.data.removed) ?? 0,
+    };
   }
 }
 
