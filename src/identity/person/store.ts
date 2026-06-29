@@ -60,6 +60,17 @@ export interface PersonStoreClearResult {
   tombstones: number;
 }
 
+type PersonStoreRecord =
+  | PersonProfile
+  | PersonFact
+  | PersonRecap
+  | IdentityCandidate
+  | PersonTombstone;
+
+function clonePersonStoreRecord<T extends PersonStoreRecord>(record: T): T {
+  return JSON.parse(JSON.stringify(record)) as T;
+}
+
 export class InMemoryPersonStore implements PersonStore {
   private profiles = new Map<string, PersonProfile>();
   private facts = new Map<string, PersonFact>();
@@ -68,75 +79,87 @@ export class InMemoryPersonStore implements PersonStore {
   private tombstones = new Map<string, PersonTombstone>();
 
   getProfile(id: string): PersonProfile | undefined {
-    return this.profiles.get(id);
+    const profile = this.profiles.get(id);
+    return profile ? clonePersonStoreRecord(profile) : undefined;
   }
 
   listProfiles(): PersonProfile[] {
-    return [...this.profiles.values()];
+    return [...this.profiles.values()].map(clonePersonStoreRecord);
   }
 
   putProfile(profile: PersonProfile): PersonProfile {
     assertPersonProfile(profile);
-    this.profiles.set(profile.id, profile);
-    return profile;
+    const stored = clonePersonStoreRecord(profile);
+    this.profiles.set(stored.id, stored);
+    return clonePersonStoreRecord(stored);
   }
 
   getFact(id: string): PersonFact | undefined {
-    return this.facts.get(id);
+    const fact = this.facts.get(id);
+    return fact ? clonePersonStoreRecord(fact) : undefined;
   }
 
   listFacts(personId?: string): PersonFact[] {
     const facts = [...this.facts.values()];
-    return personId ? facts.filter((fact) => fact.personId === personId) : facts;
+    const matches = personId ? facts.filter((fact) => fact.personId === personId) : facts;
+    return matches.map(clonePersonStoreRecord);
   }
 
   putFact(fact: PersonFact): PersonFact {
     assertPersonFact(fact);
-    this.facts.set(fact.id, fact);
-    return fact;
+    const stored = clonePersonStoreRecord(fact);
+    this.facts.set(stored.id, stored);
+    return clonePersonStoreRecord(stored);
   }
 
   getRecap(id: string): PersonRecap | undefined {
-    return this.recaps.get(id);
+    const recap = this.recaps.get(id);
+    return recap ? clonePersonStoreRecord(recap) : undefined;
   }
 
   listRecaps(personId?: string): PersonRecap[] {
     const recaps = [...this.recaps.values()];
-    return personId ? recaps.filter((recap) => recap.personId === personId) : recaps;
+    const matches = personId ? recaps.filter((recap) => recap.personId === personId) : recaps;
+    return matches.map(clonePersonStoreRecord);
   }
 
   putRecap(recap: PersonRecap): PersonRecap {
     assertPersonRecap(recap);
-    this.recaps.set(recap.id, recap);
-    return recap;
+    const stored = clonePersonStoreRecord(recap);
+    this.recaps.set(stored.id, stored);
+    return clonePersonStoreRecord(stored);
   }
 
   getCandidate(id: string): IdentityCandidate | undefined {
-    return this.candidates.get(id);
+    const candidate = this.candidates.get(id);
+    return candidate ? clonePersonStoreRecord(candidate) : undefined;
   }
 
   listCandidates(): IdentityCandidate[] {
-    return [...this.candidates.values()];
+    return [...this.candidates.values()].map(clonePersonStoreRecord);
   }
 
   putCandidate(candidate: IdentityCandidate): IdentityCandidate {
     assertIdentityCandidate(candidate);
-    this.candidates.set(candidate.id, candidate);
-    return candidate;
+    const stored = clonePersonStoreRecord(candidate);
+    this.candidates.set(stored.id, stored);
+    return clonePersonStoreRecord(stored);
   }
 
   getTombstone(subjectId: string): PersonTombstone | undefined {
-    return this.tombstones.get(subjectId);
+    const tombstone = this.tombstones.get(subjectId);
+    return tombstone ? clonePersonStoreRecord(tombstone) : undefined;
   }
 
   listTombstones(): PersonTombstone[] {
-    return [...this.tombstones.values()];
+    return [...this.tombstones.values()].map(clonePersonStoreRecord);
   }
 
   putTombstone(tombstone: PersonTombstone): PersonTombstone {
     assertPersonTombstone(tombstone);
-    this.tombstones.set(tombstone.subjectId, tombstone);
-    return tombstone;
+    const stored = clonePersonStoreRecord(tombstone);
+    this.tombstones.set(stored.subjectId, stored);
+    return clonePersonStoreRecord(stored);
   }
 
   clear(): PersonStoreClearResult {
