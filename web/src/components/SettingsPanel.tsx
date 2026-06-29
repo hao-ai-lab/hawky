@@ -292,11 +292,9 @@ function ByokSection() {
 // -----------------------------------------------------------------------------
 
 export function SettingsPanel({
-  onClose,
   liveLabEnabled = false,
   onLiveLabEnabledChange = () => {},
 }: {
-  onClose: () => void;
   liveLabEnabled?: boolean;
   onLiveLabEnabledChange?: (enabled: boolean) => void;
 }) {

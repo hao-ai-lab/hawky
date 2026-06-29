@@ -158,7 +158,6 @@ function ChannelItem({
   hasUnread,
   onClick,
   onContextMenu,
-  onRenameStart,
   isRenaming,
   renameValue,
   onRenameChange,
@@ -171,7 +170,6 @@ function ChannelItem({
   hasUnread: boolean;
   onClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
-  onRenameStart?: () => void;
   isRenaming: boolean;
   renameValue: string;
   onRenameChange: (v: string) => void;
@@ -226,11 +224,6 @@ function ChannelItem({
         </span>
       )}
 
-      {false && session.isSystem && (
-        <span className="text-[10px] text-muted dark:text-muted-dark uppercase tracking-wider">
-          watch
-        </span>
-      )}
       {unread === -1 ? (
         /* Permission prompt waiting — amber attention badge */
         <span className="w-2.5 h-2.5 rounded-full bg-amber-500" title="Needs attention" />
