@@ -394,7 +394,6 @@ export function ChatView() {
   }, [rpc, activeKey, forking, switchSession]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
 
   // --- Scroll position memory per channel. No auto-scroll ever. ---
@@ -748,8 +747,6 @@ export function ChatView() {
         {/* Inline dialogs */}
         <PermissionDialog />
         <AskUserDialog />
-
-        <div ref={bottomRef} />
       </div>
 
       {/* Scroll to bottom — centered, white circle with border like Claude.ai */}
