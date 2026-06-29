@@ -403,6 +403,25 @@ describe("Event emission", () => {
     expect(event.options).toContain("B");
     expect(event.multi_select).toBe(true);
   });
+
+  test("emit failure cleans up pending request", async () => {
+    let capturedId = "";
+    const context = ctx({
+      session_id: "session-emit-failure",
+      emit: (evt: StreamEvent) => {
+        if (evt.type === "ask_user_request") {
+          capturedId = evt.id;
+        }
+        throw new Error("emit failed");
+      },
+    });
+
+    const result = await executeAskUser({ question: "test?" }, context);
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("emit failed");
+    expect(hasPendingAskUser(capturedId)).toBe(false);
+    expect(getPendingAskUserForSession("session-emit-failure")).toBeNull();
+  });
 });
 
 // =============================================================================
