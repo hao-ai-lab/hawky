@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { useSessionStore, type AgentStatus } from "../store/session-store";
+import { useSessionStore } from "../store/session-store";
 import { useSocketStore } from "../store/socket-store";
 import { SlashMenu } from "./SlashMenu";
 import {
