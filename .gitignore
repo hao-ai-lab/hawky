@@ -23,6 +23,10 @@ ARCHITECTURE.md
 .claude/*
 !.claude/skills/
 .claude/skills/*
+!.claude/skills/commit/
+!.claude/skills/commit/**
+!.claude/skills/release/
+!.claude/skills/release/**
 !.claude/skills/ios-app-test/
 .claude/skills/ios-app-test/*
 !.claude/skills/ios-app-test/SKILL.md
@@ -42,4 +46,3 @@ hawky-export-*.tar.gz
 services/deepface/.venv/
 __pycache__/
 *.pyc
-services/deepface/.venv/
