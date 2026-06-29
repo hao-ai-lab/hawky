@@ -1122,7 +1122,14 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
             "turn_detection": turnDetection,
             "noise_reduction": Self.pipecatNoiseReductionPayload(config: config)
         ]
-        if config.inputTranscriptionEnabled {
+        // Stay Silent works by transcribing what was said while the model held
+        // the floor and summarizing it on release. That requires ASR — so when
+        // `silent` is true we keep transcription on even if the user disabled
+        // the "User transcript" toggle. Without this, a silent window captures
+        // no speech ("(No speech was captured)") and the recap has nothing to
+        // summarize. This honors the documented invariant that transcription
+        // stays active in silent mode (see buildSessionConfig docs above).
+        if config.inputTranscriptionEnabled || silent {
             let transcriptionModel = config.inputTranscriptionModel.trimmingCharacters(in: .whitespacesAndNewlines)
             inputAudioConfig["transcription"] = .object([
                 "model": .string(transcriptionModel.isEmpty ? "gpt-4o-mini-transcribe" : transcriptionModel)
