@@ -98,16 +98,6 @@ def _passes_quality(face) -> FaceQuality:
     return FaceQuality(True)
 
 
-def _best_face(img):
-    """Return (face, quality) for the highest-confidence face, or (None, reason).
-    Picks by det_score (NOT bbox size — a large mis-detection scores low)."""
-    faces = _engine().get(img)
-    if not faces:
-        return None, FaceQuality(False, "no face detected")
-    face = max(faces, key=lambda f: f.det_score)
-    return face, _passes_quality(face)
-
-
 def _embedding(img) -> tuple[list[float] | None, str]:
     """Quality-gated embedding for the best face. Returns (embedding|None, reason)."""
     h, w = (img.shape[0], img.shape[1]) if hasattr(img, "shape") else (0, 0)
