@@ -172,7 +172,7 @@ async function executeGrepInner(
     let effectivePattern = pattern;
     const flagMatch = pattern.match(/^\(\?([gimsuy]+)\)/);
     if (flagMatch) {
-      flags = flagMatch[1];
+      flags = flagMatch[1].replace(/g/g, "");
       effectivePattern = pattern.slice(flagMatch[0].length);
     }
     regex = new RegExp(effectivePattern, flags);
