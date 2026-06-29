@@ -16,6 +16,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "hawky": "bun run src/index.ts",
     "dev": "bun run src/index.ts",
     "gateway": "bun run src/index.ts gateway",
     "build": "bun build src/index.ts --outdir dist --target bun",
