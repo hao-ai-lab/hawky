@@ -241,6 +241,9 @@ async function executeGrepInner(
     for (let i = 0; i < lines.length; i++) {
       if (matches.length >= effectiveLimit) break;
 
+      if (regex.global || regex.sticky) {
+        regex.lastIndex = 0;
+      }
       if (regex.test(lines[i])) {
         // Gather context lines
         const beforeStart = Math.max(0, i - ctxLines);
