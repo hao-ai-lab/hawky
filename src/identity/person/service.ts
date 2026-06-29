@@ -87,8 +87,6 @@ export interface LegacyPersonRepository {
   update(input: {
     personId: string;
     name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
   }): Promise<LegacyWriteResult>;
   clearPeople?(): Promise<LegacyClearResult>;
 }
@@ -328,8 +326,6 @@ export class PersonService {
     const result = await this.legacy.update({
       personId,
       name: input.name ?? null,
-      facts: null,
-      recap: null,
     });
     if (!result.ok) {
       throw new PersonServiceError(result.code ?? "UNAVAILABLE", result.error);
@@ -375,8 +371,6 @@ export class PersonService {
     const updated = await this.legacy.update({
       personId: legacyProfileId,
       name: input.name,
-      facts: null,
-      recap: null,
     });
     if (!updated.ok) {
       throw new PersonServiceError(updated.code ?? "UNAVAILABLE", updated.error);
@@ -1123,8 +1117,6 @@ export class PersonService {
     await this.legacy.update({
       personId: legacyProfileId,
       name: input.name,
-      facts: null,
-      recap: null,
     }).catch(() => undefined);
   }
 

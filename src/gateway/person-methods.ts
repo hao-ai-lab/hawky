@@ -218,7 +218,7 @@ class DeepFaceLegacyPersonRepository implements LegacyPersonRepository {
     return writeResult(result, "DeepFace enroll response omitted person.");
   }
 
-  async update(input: { personId: string; name?: string | null; facts?: string[] | null; recap?: string | null }) {
+  async update(input: { personId: string; name?: string | null }) {
     const result = await callDeepFace("/update", {
       person_id: input.personId,
       name: input.name ?? null,
