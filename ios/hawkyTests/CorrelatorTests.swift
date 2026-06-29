@@ -4,11 +4,6 @@ import Foundation
 
 @Suite struct CorrelatorTests {
     private func makeResponse(id: String, ok: Bool = true) -> ResponseFrame {
-        let data = try! JSONEncoder().encode([
-            "type": "res",
-            "id": id,
-            "ok": "\(ok)"
-        ])
         // Build proper ResponseFrame via JSON decode.
         let json = #"{"type":"res","id":"\#(id)","ok":\#(ok)}"#
         return try! JSONDecoder().decode(ResponseFrame.self, from: Data(json.utf8))
