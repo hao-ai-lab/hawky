@@ -23,6 +23,7 @@ export const PERSON_RPC_METHODS = [
   "person.update_profile",
   "person.confirm_candidate",
   "person.reject_candidate",
+  "person.clear",
 ] as const;
 export type PersonRpcMethod = (typeof PERSON_RPC_METHODS)[number];
 
@@ -179,6 +180,20 @@ export interface PersonUpdateProfileResult {
 export type PersonCandidateReviewResult =
   | { ok: false; error: string }
   | { ok: true; candidate: IdentityCandidate; person?: PersonToolPerson };
+
+export interface PersonClearResult {
+  ok: true;
+  cleared: {
+    profiles: number;
+    facts: number;
+    recaps: number;
+    candidates: number;
+    tombstones: number;
+    candidate_reviews: number;
+    legacy_face_profiles?: number;
+  };
+  legacy?: { ok: true; removed: number } | { ok: false; error: string };
+}
 
 export function personToolForName(name: PersonModelToolName): PersonModelToolDefinition {
   const tool = PERSON_MODEL_TOOLS.find((candidate) => candidate.name === name);

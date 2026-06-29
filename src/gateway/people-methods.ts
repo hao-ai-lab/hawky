@@ -1,5 +1,5 @@
 // =============================================================================
-// people.list — legacy People Database RPC for the web demo and iOS People tab.
+// people.list — compatibility People RPC for the web demo and iOS People tab.
 //
 // Keep the public method name for existing clients, but delegate to PersonService
 // so this list uses the same person-layer normalization and candidate-review

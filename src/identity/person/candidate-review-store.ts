@@ -41,6 +41,7 @@ export interface PersonCandidateReviewStore {
   get(candidateId: string): PersonCandidateReviewRecord | undefined;
   list(): PersonCandidateReviewRecord[];
   put(record: PersonCandidateReviewRecord): PersonCandidateReviewRecord;
+  clear(): number;
 }
 
 export class InMemoryPersonCandidateReviewStore implements PersonCandidateReviewStore {
@@ -58,6 +59,12 @@ export class InMemoryPersonCandidateReviewStore implements PersonCandidateReview
     assertPersonCandidateReviewRecord(record);
     this.records.set(record.candidateId, record);
     return record;
+  }
+
+  clear(): number {
+    const removed = this.records.size;
+    this.records.clear();
+    return removed;
   }
 }
 
@@ -85,6 +92,16 @@ export class FilePersonCandidateReviewStore implements PersonCandidateReviewStor
     }
     this.save(file);
     return record;
+  }
+
+  clear(): number {
+    const removed = this.load().records.length;
+    this.save({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      records: [],
+    });
+    return removed;
   }
 
   private load(): PersonCandidateReviewStoreFile {

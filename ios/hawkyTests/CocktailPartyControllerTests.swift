@@ -238,6 +238,7 @@ import Testing
         let people = await bridge.listPeople(sessionKey: "session-a")
         let confirmed = await bridge.confirmIdentityCandidate(candidateId: "cand-alice", name: "Alice", personId: nil, reason: "user verified", sessionKey: "session-a")
         let rejected = await bridge.rejectIdentityCandidate(candidateId: "cand-bob", reason: "not them", sessionKey: "session-a")
+        let cleared = await bridge.clearPeople(sessionKey: "session-a")
 
         #expect(identified?.id == "p-alice")
         #expect(enrolled?.name == "Alice")
@@ -245,6 +246,7 @@ import Testing
         #expect(people.map(\.id) == ["p-alice"])
         #expect(confirmed?.id == "p-alice")
         #expect(rejected == true)
+        #expect(cleared == true)
 
         let frames = recorder.sentFrames()
         #expect(frames.map(\.method) == [
@@ -254,8 +256,9 @@ import Testing
             "person.list",
             "person.confirm_candidate",
             "person.reject_candidate",
+            "person.clear",
         ])
-        #expect(recorder.connectPlatforms() == Array(repeating: "ios-live-rpc", count: 6))
+        #expect(recorder.connectPlatforms() == Array(repeating: "ios-live-rpc", count: 7))
 
         #expect(stringParam(frames[0], "image_base64") == "frame-a")
         #expect(stringParam(frames[0], "session_key") == "session-a")
@@ -273,6 +276,7 @@ import Testing
         #expect(stringParam(frames[4], "name") == "Alice")
         #expect(stringParam(frames[4], "reason") == "user verified")
         #expect(stringParam(frames[5], "candidate_id") == "cand-bob")
+        #expect(stringParam(frames[6], "session_key") == "session-a")
         #expect(stringParam(frames[5], "reason") == "not them")
     }
 
@@ -662,6 +666,8 @@ private final class RecordingGatewayTransportStore: @unchecked Sendable {
             return .object(["ok": .bool(true), "candidate": Self.candidate(), "person": Self.person()])
         case "person.reject_candidate":
             return .object(["ok": .bool(true), "candidate": Self.candidate(reviewState: "rejected")])
+        case "person.clear":
+            return .object(["ok": .bool(true), "cleared": .object([:])])
         case "tool.invoke":
             return .object(["result": .object(["metadata": .object(["person": Self.person()])])])
         default:
