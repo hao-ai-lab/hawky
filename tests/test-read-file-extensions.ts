@@ -124,6 +124,22 @@ describe("read_file: notebooks", () => {
     expect(result.content).toContain("Showing cells 2-2 of 4");
   });
 
+  it("returns error for invalid notebook offset or limit", async () => {
+    const badOffset = await executeReadFile(
+      { file_path: "test-notebook.ipynb", offset: 1.5 },
+      makeContext(),
+    );
+    expect(badOffset.type).toBe("error");
+    expect(badOffset.content).toContain("Offset must be a positive integer");
+
+    const badLimit = await executeReadFile(
+      { file_path: "test-notebook.ipynb", limit: 0 },
+      makeContext(),
+    );
+    expect(badLimit.type).toBe("error");
+    expect(badLimit.content).toContain("Limit must be a positive integer");
+  });
+
   it("returns error for invalid notebook JSON", async () => {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const tmpDir = join(FIXTURES, "tmp-notebook-test");

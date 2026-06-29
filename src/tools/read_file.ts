@@ -92,6 +92,19 @@ function lineNumWidth(max_line: number): number {
   return Math.max(String(max_line).length, 4); // minimum 4 chars wide
 }
 
+function validatePositiveIntegerParam(name: "Offset" | "Limit", value: unknown): ToolResult | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    return { type: "error", content: `${name} must be a positive integer >= 1.` };
+  }
+  return undefined;
+}
+
+function validateReadWindow(offset: unknown, limit: unknown): ToolResult | undefined {
+  return validatePositiveIntegerParam("Offset", offset)
+    ?? validatePositiveIntegerParam("Limit", limit);
+}
+
 // -----------------------------------------------------------------------------
 // Core read logic (exported for testing)
 // -----------------------------------------------------------------------------
@@ -233,10 +246,10 @@ async function readNotebookFile(
     ?? "python";
 
   // Apply offset/limit to cells (1-based)
+  const windowError = validateReadWindow(offset, limit);
+  if (windowError) return windowError;
+
   const effectiveOffset = offset ?? 1;
-  if (effectiveOffset < 1) {
-    return { type: "error", content: "Offset must be >= 1 (1-based cell numbering)." };
-  }
   if (effectiveOffset > cells.length) {
     return {
       type: "text",
@@ -459,10 +472,10 @@ async function executeReadFileInner(
   const total_lines = all_lines.length;
 
   // --- Validate offset ---
+  const windowError = validateReadWindow(offset, limit);
+  if (windowError) return windowError;
+
   const effective_offset = offset ?? 1; // default: start from line 1
-  if (effective_offset < 1) {
-    return { type: "error", content: "Offset must be >= 1 (1-based line numbering)." };
-  }
   if (effective_offset > total_lines) {
     return {
       type: "text",
