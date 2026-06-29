@@ -35,14 +35,14 @@ export interface AsrPipelineDeps {
 }
 
 /** Emit asr.<id>.partial for all but the last segment, then asr.<id>.final. */
-export function emitTranscriptEvents(
+export async function emitTranscriptEvents(
   transcript: Transcript,
   transcribeWallclockMs: number,
   mediaDurationMs: number,
   nodeId: string,
   capturedStartIso: string,
   wavPath?: string,
-): void {
+): Promise<void> {
   const bus = getBus();
   const { media_id, segments, backend, model, lang } = transcript;
 
@@ -99,13 +99,15 @@ export function emitTranscriptEvents(
       media_duration_ms: mediaDurationMs,
       completed_at_iso: new Date().toISOString(),
     };
-    writeTranscriptSidecar(sidecar).catch((err) => {
+    try {
+      await writeTranscriptSidecar(sidecar);
+    } catch (err) {
       log.warn("transcript sidecar write failed", {
         media_id,
         wav_path: wavPath,
         error: err instanceof Error ? err.message : String(err),
       });
-    });
+    }
   }
 
   bus.publish("asr.final", finalEvt);
@@ -169,7 +171,7 @@ export function registerAsrPipeline(deps: AsrPipelineDeps): () => void {
       );
       if (!transcript) return; // policy already logged / dead-lettered
 
-      emitTranscriptEvents(
+      await emitTranscriptEvents(
         transcript,
         Date.now() - start,
         event.duration_ms,
