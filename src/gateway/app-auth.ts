@@ -387,43 +387,43 @@ export class AppAuth {
     h1 { margin: 0 0 10px; font-size: 28px; font-weight: 650; }
     p { margin: 0 0 22px; color: #a7aaa4; line-height: 1.45; }
     form { display: grid; gap: 12px; }
-    section { margin-top: 18px; padding-top: 18px; border-top: 1px solid #30352f; }
-    section h2 { margin: 0 0 8px; font-size: 18px; font-weight: 650; }
     label { display: grid; gap: 6px; color: #d7d8d2; font-size: 13px; }
     input { height: 44px; border: 1px solid #30352f; border-radius: 8px; padding: 0 12px; background: #171b18; color: #fff; font: inherit; }
     button, .button { height: 44px; border: 0; border-radius: 8px; background: #f5f3ee; color: #101310; font-weight: 650; cursor: pointer; display: grid; place-items: center; text-decoration: none; font: inherit; }
-    .button.secondary { background: #252a26; color: #f5f3ee; border: 1px solid #3a403a; }
+    button.secondary, .button.secondary { background: #252a26; color: #f5f3ee; border: 1px solid #3a403a; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+    .actions button:only-child { grid-column: 1 / -1; }
     .muted { color: #888d86; font-size: 12px; margin-top: 14px; }
     .error { padding: 10px 12px; border: 1px solid #6f2e2e; border-radius: 8px; background: #301919; color: #ffd8d8; margin-bottom: 14px; }
     .notice { padding: 10px 12px; border: 1px solid #335d3d; border-radius: 8px; background: #172619; color: #d9f7df; margin-bottom: 14px; }
+    .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .58); }
+    .modal { width: min(390px, 100%); border: 1px solid #335d3d; border-radius: 14px; background: #151a16; padding: 22px; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
+    .modal h2 { margin: 0 0 8px; font-size: 20px; }
+    .modal p { margin-bottom: 18px; }
   </style>
 </head>
 <body>
   <main>
     <h1>Hawky</h1>
     <p>Sign in to create a device token for this browser.</p>
-    ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
     ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
     <form method="post" action="/auth/login">
       <input type="hidden" name="return_url" value="${escapeHtml(safeReturn)}" />
       <label>Email <input name="email" type="email" autocomplete="email" required /></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
-      <button type="submit">Sign in</button>
+      ${this.registrationCode ? `<label>Invite code <input name="registration_code" type="password" autocomplete="off" /></label>` : ""}
+      <div class="actions">
+        <button type="submit">Sign in</button>
+        ${allowRegister ? `<button type="submit" class="secondary" formaction="/auth/register">Sign up</button>` : ""}
+      </div>
     </form>
-    ${allowRegister ? `
-      <section aria-labelledby="signup-h">
-        <h2 id="signup-h">Sign up</h2>
-        <p>New accounts are reviewed by an admin before sign-in is enabled.</p>
-        <form method="post" action="/auth/register">
-          <input type="hidden" name="return_url" value="${escapeHtml(safeReturn)}" />
-          <label>Email <input name="email" type="email" autocomplete="email" required /></label>
-          <label>Password <input name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD_LENGTH}" maxlength="${MAX_PASSWORD_LENGTH}" required /></label>
-          ${this.registrationCode ? `<label>Invite code <input name="registration_code" type="password" autocomplete="off" /></label>` : ""}
-          <button type="submit" class="button secondary">Sign up</button>
-        </form>
-      </section>
-    ` : ""}
-    <p class="muted">Registration is ${allowRegister ? "open by admin approval" : "closed"} on this gateway.</p>
+    ${message ? `<div class="modal-backdrop" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+        <h2 id="approval-title">Sign-up received</h2>
+        <p>${escapeHtml(message)}</p>
+        <a class="button" href="/auth/login?return_url=${encodeURIComponent(safeReturn)}">OK</a>
+      </div>
+    </div>` : ""}
   </main>
 </body>
 </html>`;
@@ -434,19 +434,7 @@ export class AppAuth {
     if (!this.canRegister()) {
       return this.loginPage(safeReturn, "Registration is closed.");
     }
-    return this.shellPage("Sign up", `
-      <p>Sign up for Hawky. An admin reviews new accounts before sign-in is enabled.</p>
-      ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
-      ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-      <form method="post" action="/auth/register">
-        <input type="hidden" name="return_url" value="${escapeHtml(safeReturn)}" />
-        <label>Email <input name="email" type="email" autocomplete="email" required /></label>
-        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD_LENGTH}" maxlength="${MAX_PASSWORD_LENGTH}" required /></label>
-        ${this.registrationCode ? `<label>Invite code <input name="registration_code" type="password" autocomplete="off" /></label>` : ""}
-        <button type="submit">Sign up</button>
-      </form>
-      <p class="muted"><a href="/auth/login?return_url=${encodeURIComponent(safeReturn)}">Back to sign in</a></p>
-    `);
+    return this.loginPage(safeReturn, error, message);
   }
 
   adminPage(admin: AppAuthUser, message = "", error = ""): string {

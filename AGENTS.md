@@ -125,6 +125,10 @@ should stay on explicit tests and deterministic policy.
 4. Open a PR using the title and body format above.
 5. Releases go through the `release` skill.
 
+## Website copy and typography
+
+- Do not use all-caps, forced uppercase transforms, or letter-spaced labels in the website UI. Prefer normal sentence/title case with `letter-spacing: 0`.
+
 ## Skills
 
 - `.claude/skills/commit/` — enforce co-author trailers, block AI co-authors.
