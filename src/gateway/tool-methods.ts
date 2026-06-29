@@ -60,8 +60,8 @@ const log = createSubsystemLogger("gateway/tool-methods");
 const toolInvokeTools = [
   memoryAppendToolDefinition,
   channelSendToolDefinition,
-  // Cocktail Party Mode (#627): DeepFace owns matching. iOS sends a face crop and
-  // gets back an identity (identify), enrolls new people, and updates profiles.
+  // Cocktail Party Mode (#627): face-index compatibility only. Person profiles,
+  // facts, recaps, and candidates belong behind person.* RPCs.
   faceIdentifyToolDefinition,
   faceEnrollToolDefinition,
   faceUpdateToolDefinition,

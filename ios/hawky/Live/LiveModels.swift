@@ -725,9 +725,8 @@ struct LiveSessionConfig: Equatable {
     /// explicitly turn on the voice identity side-channel.
     var voiceprintRealtimeEnabled: Bool = false
     /// Cocktail Party Mode (#627): when on, the Live session runs on-device face
-    /// detection on each camera frame, matches against the local person DB, and
-    /// proactively recalls known people / enrolls new ones. Off by default; needs
-    /// the camera + Hawky bridge (DeepFace embeddings) to do anything.
+    /// detection/cropping and asks the gateway person service for on-demand
+    /// identify/update flows. Off by default; needs the camera + Hawky bridge.
     var cocktailPartyEnabled: Bool = false
     /// "Respond only when I talk": when on, VAD auto-response is disabled
     /// (create_response:false) for the whole session — the model replies only after

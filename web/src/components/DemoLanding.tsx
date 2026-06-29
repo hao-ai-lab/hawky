@@ -37,7 +37,7 @@ const FEATURES: Feature[] = [
   },
   {
     title: "People",
-    body: "Browse the face-recognition people database — names, learned facts, and last recaps (Cocktail Party).",
+    body: "Browse confirmed person profiles — names, learned facts, and last recaps from Cocktail Party mode.",
     cta: "Open People",
     onClick: (p) => p.onOpenPeople(),
   },

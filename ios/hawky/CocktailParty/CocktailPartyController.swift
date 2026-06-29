@@ -4,10 +4,10 @@ import Foundation
 // CocktailPartyController — Live-session glue for Cocktail Party Mode (#627).
 //
 // Owns the per-session CocktailPartyRecognizer and turns RecognitionEvents into
-// actions: known person → inject silent context; new person → inject context telling
-// the model to learn + name them (via update_person_profile). DeepFace owns the DB,
-// so there is no on-device store here. Side effects are injected closures so this
-// stays decoupled + testable.
+// actions: known person → inject silent context; new face → inject context telling
+// the model to use the person tools after user verification. PersonService owns
+// profiles/facts; iOS has no on-device person store. Side effects are injected
+// closures so this stays decoupled + testable.
 // =============================================================================
 
 @MainActor

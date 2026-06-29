@@ -527,8 +527,8 @@ private struct SummarizeSilenceTool: LiveTool {
 
 // MARK: - Cocktail Party Mode person tools (#627)
 //
-// DeepFace owns the person DB; these tools reach it via the Hawky bridge's face
-// methods (which call the gateway face tools). Gated on cocktailPartyActive.
+// PersonService owns profiles/facts/candidates; DeepFace is only the face-match
+// compatibility backend behind the gateway. Gated on cocktailPartyActive.
 
 private enum PeopleToolSupport {
     static func bridgeAndKey(_ context: LiveToolContext) -> (LiveGatewayBridge, String)? {
@@ -625,7 +625,7 @@ private struct IdentifyPersonTool: LiveTool {
     }
 }
 
-/// List everyone in the face database.
+/// List confirmed people and reviewable candidates from the person service.
 private struct ListPeopleTool: LiveTool {
     let name = "list_people"
     var definition: [String: Any] {
