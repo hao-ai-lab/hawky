@@ -568,6 +568,30 @@ describe("executeTools", () => {
     expect(results[1].name).toBe("fast");
   });
 
+  test("mixed denied and approved results maintain input order", async () => {
+    registry.register(makeTool("read_file", "auto_approve"));
+    const cache = new PermissionCache();
+    const { emit } = collectEvents();
+
+    const results = await executeTools(
+      [
+        makeCall("t1", "missing_tool", { value: "denied-first" }),
+        makeCall("t2", "read_file", { value: "approved-second" }),
+      ],
+      registry,
+      makeContext(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results.map((r) => r.tool_use_id)).toEqual(["t1", "t2"]);
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("Unknown tool");
+    expect(results[1].result.content).toBe("read_file:approved-second");
+  });
+
   test("abort signal cancels execution before phase 1", async () => {
     const ac = new AbortController();
     let toolExecuted = false;
