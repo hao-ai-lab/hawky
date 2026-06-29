@@ -76,6 +76,14 @@ describe("Node Commands", () => {
       expect((result as any).exitCode).toBe(1);
       expect((result as any).stderr).toContain("empty command");
     });
+
+    test("rejects malformed command params before spawning", async () => {
+      await expect(dispatchCommand("system.run", {})).rejects.toThrow("system.run.command");
+      await expect(dispatchCommand("system.run", { command: "echo hi" })).rejects.toThrow("array of strings");
+      await expect(dispatchCommand("system.run", { command: ["echo", 1] })).rejects.toThrow("array of strings");
+      await expect(dispatchCommand("system.run", { command: ["echo"], cwd: 42 })).rejects.toThrow("system.run.cwd");
+      await expect(dispatchCommand("system.run", { command: ["echo"], timeoutMs: 0 })).rejects.toThrow("system.run.timeoutMs");
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -107,6 +115,12 @@ describe("Node Commands", () => {
       expect(bins.ls).toBeTruthy();
       expect(bins.nonexistent_xyz).toBeNull();
     });
+
+    test("rejects malformed bins params", async () => {
+      await expect(dispatchCommand("system.which", {})).rejects.toThrow("system.which.bins");
+      await expect(dispatchCommand("system.which", { bins: "bash" })).rejects.toThrow("array of strings");
+      await expect(dispatchCommand("system.which", { bins: ["bash", 1] })).rejects.toThrow("array of strings");
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -116,6 +130,13 @@ describe("Node Commands", () => {
   describe("dispatch", () => {
     test("throws for unknown command", async () => {
       await expect(dispatchCommand("unknown.cmd", {})).rejects.toThrow("Unknown node command");
+    });
+
+    test("validates optional command params", async () => {
+      await expect(dispatchCommand("screenshot", { timeoutMs: -1 })).rejects.toThrow("screenshot.timeoutMs");
+      await expect(dispatchCommand("screenshot", { display: 1.5 })).rejects.toThrow("screenshot.display");
+      await expect(dispatchCommand("frontmost.app", { timeoutMs: "soon" })).rejects.toThrow("frontmost.app.timeoutMs");
+      await expect(dispatchCommand("device.info", [])).rejects.toThrow("device.info params");
     });
   });
 });
