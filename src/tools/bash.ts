@@ -91,27 +91,35 @@ export async function executeBash(opts: BashExecOptions): Promise<BashExecResult
 
   let timedOut = false;
   let killed = false;
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearForceKillTimer = () => {
+    if (forceKillTimer !== null) {
+      clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+    }
+  };
+
+  const terminate = () => {
+    if (killed) return;
+    killed = true;
+    proc.kill("SIGTERM");
+    clearForceKillTimer();
+    // Force kill after 2s grace period
+    forceKillTimer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch {}
+    }, 2000);
+  };
 
   // Timeout handler
   const timer = setTimeout(() => {
     timedOut = true;
-    killed = true;
-    proc.kill("SIGTERM");
-    // Force kill after 2s grace period
-    setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch {}
-    }, 2000);
+    terminate();
   }, timeoutMs);
 
   // Abort handler
   const onAbort = () => {
-    if (!killed) {
-      killed = true;
-      proc.kill("SIGTERM");
-      setTimeout(() => {
-        try { proc.kill("SIGKILL"); } catch {}
-      }, 2000);
-    }
+    terminate();
   };
   opts.abort_signal.addEventListener("abort", onAbort, { once: true });
 
@@ -178,24 +186,27 @@ export async function executeBash(opts: BashExecOptions): Promise<BashExecResult
   const stdoutCharCounter = { value: 0 };
   const stderrCharCounter = { value: 0 };
 
-  // Read both streams concurrently, then wait for process exit
-  await Promise.all([
-    readStream(proc.stdout, stdoutLines, "stdout", stdoutCharCounter),
-    readStream(proc.stderr, stderrLines, "stderr", stderrCharCounter),
-  ]);
+  try {
+    // Read both streams concurrently, then wait for process exit
+    await Promise.all([
+      readStream(proc.stdout, stdoutLines, "stdout", stdoutCharCounter),
+      readStream(proc.stderr, stderrLines, "stderr", stderrCharCounter),
+    ]);
 
-  const exitCode = await proc.exited;
+    const exitCode = await proc.exited;
 
-  clearTimeout(timer);
-  opts.abort_signal.removeEventListener("abort", onAbort);
-
-  return {
-    stdout: stdoutLines.join("\n"),
-    stderr: stderrLines.join("\n"),
-    exit_code: killed ? null : exitCode,
-    timed_out: timedOut,
-    truncated,
-  };
+    return {
+      stdout: stdoutLines.join("\n"),
+      stderr: stderrLines.join("\n"),
+      exit_code: killed ? null : exitCode,
+      timed_out: timedOut,
+      truncated,
+    };
+  } finally {
+    clearTimeout(timer);
+    clearForceKillTimer();
+    opts.abort_signal.removeEventListener("abort", onAbort);
+  }
 }
 
 // -----------------------------------------------------------------------------
