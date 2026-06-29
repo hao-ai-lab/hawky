@@ -686,13 +686,13 @@ final class LiveSessionStore {
 
     // MARK: - Cocktail Party Mode (#627)
 
-    /// The bridge + session key the person tools use to reach the DeepFace service.
+    /// The bridge + session key the person tools use to reach PersonService.
     /// Set while Cocktail Party Mode is active so list/recall/update tools work.
     private var cocktailPartySessionKey: String?
 
     /// Stand up the face-recognition controller for this session when the mode is on
-    /// and the Hawky bridge (needed to reach DeepFace) is available. Wires silent
-    /// context injection back to the realtime provider. DeepFace owns the person DB;
+    /// and the Hawky bridge (needed to reach the gateway person service) is
+    /// available. Wires silent context injection back to the realtime provider.
     /// iOS only detects/crops faces and relays.
     private func setupCocktailPartyIfNeeded(config: LiveSessionConfig, provider: LiveSessionProvider) {
         cocktailParty = nil

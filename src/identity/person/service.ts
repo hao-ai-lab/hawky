@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { FaceSignalProvider } from "../face/index.js";
 import { allowedUsesForIdentitySignal } from "../core/index.js";
 import {
   buildFaceIdentitySignal,
@@ -57,42 +58,6 @@ export class PersonServiceError extends Error {
   }
 }
 
-export type LegacyFailure = { ok: false; error: string; code?: PersonServiceErrorCode };
-
-export type LegacyIdentifyResult =
-  | { ok: true; found: false }
-  | { ok: true; found: true; person: LegacyDeepFaceProfile; similarity?: number }
-  | LegacyFailure;
-
-export type LegacyPeopleResult =
-  | { ok: true; people: unknown[] }
-  | LegacyFailure;
-
-export type LegacyWriteResult =
-  | { ok: true; person: LegacyDeepFaceProfile }
-  | LegacyFailure;
-
-export type LegacyClearResult =
-  | { ok: true; removed?: number }
-  | LegacyFailure;
-
-export interface LegacyPersonRepository {
-  identify(imageBase64: string): Promise<LegacyIdentifyResult>;
-  listPeople(): Promise<LegacyPeopleResult>;
-  enroll(input: {
-    imageBase64: string;
-    name: string;
-    personId?: string | null;
-  }): Promise<LegacyWriteResult>;
-  update(input: {
-    personId: string;
-    name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
-  }): Promise<LegacyWriteResult>;
-  clearPeople?(): Promise<LegacyClearResult>;
-}
-
 export interface PersonServiceOptions {
   now?: () => string;
   personStore?: PersonStore;
@@ -103,7 +68,7 @@ export class PersonService {
   private readonly personStore?: PersonStore;
 
   constructor(
-    private readonly legacy: LegacyPersonRepository,
+    private readonly faceProvider: FaceSignalProvider,
     private readonly candidateReviews: PersonCandidateReviewStore,
     options: PersonServiceOptions = {},
   ) {
@@ -116,7 +81,10 @@ export class PersonService {
     sessionKey?: string;
     includeStructured?: boolean;
   }): Promise<PersonIdentifyResult> {
-    const result = await this.legacy.identify(input.imageBase64);
+    const result = await this.faceProvider.identifyFrame({
+      imageBase64: input.imageBase64,
+      sessionKey: input.sessionKey,
+    });
     if (!result.ok) {
       throw new PersonServiceError(result.code ?? "UNAVAILABLE", result.error);
     }
@@ -131,15 +99,15 @@ export class PersonService {
 
     const confidence = numberOr(result.similarity, 0.5);
     if (this.personStore) {
-      importLegacyDeepFaceProfiles(this.personStore, [result.person], {
+      importLegacyDeepFaceProfiles(this.personStore, [result.profile], {
         defaultConfidence: confidence,
       });
     }
-    const person = deepFaceProfileToPersonToolPerson(result.person, {
+    const person = deepFaceProfileToPersonToolPerson(result.profile, {
       includeStructured: input.includeStructured,
     });
     if (!person) {
-      const normalized = normalizeLegacyDeepFaceProfile(result.person, {
+      const normalized = normalizeLegacyDeepFaceProfile(result.profile, {
         defaultConfidence: confidence,
       });
       if (normalized.candidate) {
@@ -211,16 +179,16 @@ export class PersonService {
     includeStructured?: boolean;
     includeCandidates?: boolean;
   } = {}): Promise<PersonListResult> {
-    const result = await this.legacy.listPeople();
+    const result = await this.faceProvider.listFaceProfiles();
     if (this.personStore) {
       if (result.ok) {
-        importLegacyDeepFaceProfiles(this.personStore, result.people, {
+        importLegacyDeepFaceProfiles(this.personStore, result.profiles, {
           now: this.now(),
         });
         return {
           ok: true,
           available: true,
-          people: this.peopleFromStore(input.includeStructured, legacyThumbnailsById(result.people)),
+          people: this.peopleFromStore(input.includeStructured, legacyThumbnailsById(result.profiles)),
           ...(input.includeCandidates ? { candidates: this.identityCandidatesFromStore() } : {}),
         };
       }
@@ -247,10 +215,10 @@ export class PersonService {
     return {
       ok: true,
       available: true,
-      people: deepFaceProfilesToPersonToolPeople(result.people, {
+      people: deepFaceProfilesToPersonToolPeople(result.profiles, {
         includeStructured: input.includeStructured,
       }),
-      ...(input.includeCandidates ? { candidates: this.identityCandidatesFromLegacyPeople(result.people) } : {}),
+      ...(input.includeCandidates ? { candidates: this.identityCandidatesFromLegacyPeople(result.profiles) } : {}),
     };
   }
 
@@ -303,15 +271,16 @@ export class PersonService {
       }
       personId = await this.profileIdForFrameUpdate(input.imageBase64, input.includeStructured);
       if (!personId) {
-        const enrolled = await this.legacy.enroll({
+        const enrolled = await this.faceProvider.enrollOrLinkTemplate({
           imageBase64: input.imageBase64,
-          name: input.name,
-          personId: null,
+          label: input.name,
+          profileId: null,
+          sessionKey: input.sessionKey,
         });
         if (!enrolled.ok) {
           throw new PersonServiceError(enrolled.code ?? "UNAVAILABLE", enrolled.error);
         }
-        const enrolledId = stringOrUndefined(enrolled.person.id);
+        const enrolledId = stringOrUndefined(enrolled.profile.id);
         if (!enrolledId) {
           throw new PersonServiceError("INVALID_RESPONSE", "DeepFace enroll response omitted person id.");
         }
@@ -319,24 +288,26 @@ export class PersonService {
         if (facts.length === 0 && !input.recap) {
           return {
             ok: true,
-            person: this.personOrThrow(enrolled.person, input.includeStructured, "Enrolled profile did not become a named person."),
+            person: this.personOrThrow(enrolled.profile, input.includeStructured, "Enrolled profile did not become a named person."),
           };
         }
       }
     }
 
-    const result = await this.legacy.update({
-      personId,
-      name: input.name ?? null,
-      facts: null,
-      recap: null,
+    const label = input.name;
+    if (!label) {
+      throw new PersonServiceError("INVALID_REQUEST", "name is required for legacy face label updates.");
+    }
+    const result = await this.faceProvider.updateFaceProfileLabel({
+      profileId: personId,
+      label,
     });
     if (!result.ok) {
       throw new PersonServiceError(result.code ?? "UNAVAILABLE", result.error);
     }
     return {
       ok: true,
-      person: this.personOrThrow(result.person, input.includeStructured, "Updated legacy profile is still an unknown candidate."),
+      person: this.personOrThrow(result.profile, input.includeStructured, "Updated legacy profile is still an unknown candidate."),
     };
   }
 
@@ -372,17 +343,15 @@ export class PersonService {
       );
     }
 
-    const updated = await this.legacy.update({
-      personId: legacyProfileId,
-      name: input.name,
-      facts: null,
-      recap: null,
+    const updated = await this.faceProvider.updateFaceProfileLabel({
+      profileId: legacyProfileId,
+      label: input.name,
     });
     if (!updated.ok) {
       throw new PersonServiceError(updated.code ?? "UNAVAILABLE", updated.error);
     }
     const person = this.personOrThrow(
-      updated.person,
+      updated.profile,
       input.includeStructured,
       "Confirmed candidate did not become a named person.",
     );
@@ -446,8 +415,8 @@ export class PersonService {
 
   async clearPeople(): Promise<PersonClearResult> {
     let legacy: PersonClearResult["legacy"] | undefined;
-    if (this.legacy.clearPeople) {
-      const result = await this.legacy.clearPeople().catch((error) => ({
+    if (this.faceProvider.clearIndex) {
+      const result = await this.faceProvider.clearIndex().catch((error) => ({
         ok: false as const,
         error: error instanceof Error ? error.message : String(error),
       }));
@@ -501,7 +470,7 @@ export class PersonService {
       }
     }
 
-    const result = await this.legacy.listPeople();
+    const result = await this.faceProvider.listFaceProfiles();
     if (!result.ok) {
       if (this.personStore) {
         throw new PersonServiceError("NOT_FOUND", "Person profile was not found in the local person store.");
@@ -509,10 +478,10 @@ export class PersonService {
       throw new PersonServiceError(result.code ?? "UNAVAILABLE", result.error);
     }
     if (this.personStore) {
-      importLegacyDeepFaceProfiles(this.personStore, result.people, { now: this.now() });
+      importLegacyDeepFaceProfiles(this.personStore, result.profiles, { now: this.now() });
     }
 
-    for (const raw of result.people) {
+    for (const raw of result.profiles) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
       const normalized = normalizeLegacyDeepFaceProfile(raw as LegacyDeepFaceProfile);
       if (normalized.legacyProfileId !== personId && normalized.candidate?.id !== personId) continue;
@@ -532,7 +501,7 @@ export class PersonService {
     imageBase64: string,
     includeStructured: boolean | undefined,
   ): Promise<string | undefined> {
-    const identified = await this.legacy.identify(imageBase64);
+    const identified = await this.faceProvider.identifyFrame({ imageBase64 });
     if (!identified.ok) {
       throw new PersonServiceError(identified.code ?? "UNAVAILABLE", identified.error);
     }
@@ -540,18 +509,18 @@ export class PersonService {
       return undefined;
     }
     if (this.personStore) {
-      importLegacyDeepFaceProfiles(this.personStore, [identified.person], {
+      importLegacyDeepFaceProfiles(this.personStore, [identified.profile], {
         defaultConfidence: numberOr(identified.similarity, 0.5),
       });
     }
 
-    const person = deepFaceProfileToPersonToolPerson(identified.person, { includeStructured });
+    const person = deepFaceProfileToPersonToolPerson(identified.profile, { includeStructured });
     if (person) {
       this.assertNoTombstone(person.id, "This frame matches a rejected, suppressed, or deleted person profile and cannot be updated.");
       return person.id;
     }
 
-    const normalized = normalizeLegacyDeepFaceProfile(identified.person, {
+    const normalized = normalizeLegacyDeepFaceProfile(identified.profile, {
       defaultConfidence: numberOr(identified.similarity, 0.5),
     });
     const candidate = normalized.candidate;
@@ -615,14 +584,14 @@ export class PersonService {
       return { candidate: stored };
     }
 
-    const result = await this.legacy.listPeople();
+    const result = await this.faceProvider.listFaceProfiles();
     if (!result.ok) {
       throw new PersonServiceError(result.code ?? "UNAVAILABLE", result.error);
     }
     if (this.personStore) {
-      importLegacyDeepFaceProfiles(this.personStore, result.people, { now: this.now() });
+      importLegacyDeepFaceProfiles(this.personStore, result.profiles, { now: this.now() });
     }
-    const candidate = this.identityCandidatesFromLegacyPeople(result.people)
+    const candidate = this.identityCandidatesFromLegacyPeople(result.profiles)
       .find((item) => item.id === candidateId);
     if (!candidate) {
       throw new PersonServiceError("NOT_FOUND", "Identity candidate was not found.");
@@ -725,16 +694,17 @@ export class PersonService {
       }
       personId = await this.profileIdForFrameUpdate(input.imageBase64, input.includeStructured);
       if (!personId) {
-        const enrolled = await this.legacy.enroll({
+        const enrolled = await this.faceProvider.enrollOrLinkTemplate({
           imageBase64: input.imageBase64,
-          name: input.name,
-          personId: null,
+          label: input.name,
+          profileId: null,
+          sessionKey: input.sessionKey,
         });
         if (!enrolled.ok) {
           throw new PersonServiceError(enrolled.code ?? "UNAVAILABLE", enrolled.error);
         }
-        importLegacyDeepFaceProfiles(store, [enrolled.person], { now: this.now() });
-        const enrolledId = stringOrUndefined(enrolled.person.id);
+        importLegacyDeepFaceProfiles(store, [enrolled.profile], { now: this.now() });
+        const enrolledId = stringOrUndefined(enrolled.profile.id);
         if (!enrolledId) {
           throw new PersonServiceError("INVALID_RESPONSE", "DeepFace enroll response omitted person id.");
         }
@@ -1120,11 +1090,9 @@ export class PersonService {
     const legacyProfileId = legacyProfileIdFromProfile(profile);
     if (!legacyProfileId) return;
     if (!input.name || input.name.trim().length === 0) return;
-    await this.legacy.update({
-      personId: legacyProfileId,
-      name: input.name,
-      facts: null,
-      recap: null,
+    await this.faceProvider.updateFaceProfileLabel({
+      profileId: legacyProfileId,
+      label: input.name,
     }).catch(() => undefined);
   }
 

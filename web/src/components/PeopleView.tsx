@@ -2,8 +2,8 @@
 // People View — read-only People Database viewer (web demo, #681).
 //
 // Web parity for the iOS "People" tab (LivePeopleDatabaseView, Cocktail Party
-// #627). Reads the server-side DeepFace person DB via the people.list RPC and
-// renders name / facts / last recap per person.
+// #627). Reads confirmed people from the gateway person service via people.list
+// and renders name / facts / last recap per person.
 //
 // The gateway method degrades gracefully: when the DeepFace microservice is not
 // running it returns { available:false, people:[] }, and this view shows a clean

@@ -4,9 +4,9 @@
 // Exercises the path used by iOS/web realtime clients:
 //
 //   WebSocket client -> GatewayServer -> person.* RPC -> PersonService
-//      -> legacy DeepFace-compatible repository + candidate review store
+//      -> face signal provider + candidate review store
 //
-// The legacy repository is in-memory so the test is hermetic: no real DeepFace
+// The face provider is in-memory so the test is hermetic: no real DeepFace
 // service and no writes to the user's ~/.haoclaw state.
 // =============================================================================
 
@@ -20,8 +20,8 @@ import {
   InMemoryPersonCandidateReviewStore,
   PersonService,
   type LegacyDeepFaceProfile,
-  type LegacyPersonRepository,
 } from "../src/identity/person/index.js";
+import type { FaceSignalProvider } from "../src/identity/face/index.js";
 
 function getTestPort(): number {
   return 10000 + Math.floor(Math.random() * 50000);
@@ -71,17 +71,15 @@ function okPayload<T>(frame: ResponseFrame): T {
   return frame.payload as T;
 }
 
-class E2ELegacyPersonRepository implements LegacyPersonRepository {
+class E2EFaceSignalProvider implements FaceSignalProvider {
   readonly updates: Array<{
-    personId: string;
-    name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
+    profileId: string;
+    label?: string | null;
   }> = [];
   readonly enrolls: Array<{
     imageBase64: string;
-    name: string;
-    personId?: string | null;
+    label: string;
+    profileId?: string | null;
   }> = [];
 
   identifyProfileId = "p-unknown";
@@ -94,62 +92,48 @@ class E2ELegacyPersonRepository implements LegacyPersonRepository {
     }
   }
 
-  async identify() {
+  async identifyFrame() {
     const person = this.people.get(this.identifyProfileId);
     if (!person) return { ok: true as const, found: false as const };
     return {
       ok: true as const,
       found: true as const,
-      person: structuredClone(person),
+      profile: structuredClone(person),
       similarity: 0.91,
     };
   }
 
-  async listPeople() {
+  async listFaceProfiles() {
     return {
       ok: true as const,
-      people: [...this.people.values()].map((person) => structuredClone(person)),
+      profiles: [...this.people.values()].map((person) => structuredClone(person)),
     };
   }
 
-  async enroll(input: { imageBase64: string; name: string; personId?: string | null }) {
+  async enrollOrLinkTemplate(input: { imageBase64: string; label: string; profileId?: string | null }) {
     this.enrolls.push(structuredClone(input));
-    const id = input.personId ?? `p-${input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-    const existing = this.people.get(id) ?? { id, name: input.name, facts: [], recaps: [] };
+    const id = input.profileId ?? `p-${input.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    const existing = this.people.get(id) ?? { id, name: input.label, facts: [], recaps: [] };
     const next = {
       ...existing,
       id,
-      name: input.name,
+      name: input.label,
     };
     this.people.set(id, next);
-    return { ok: true as const, person: structuredClone(next) };
+    return { ok: true as const, profile: structuredClone(next) };
   }
 
-  async update(input: {
-    personId: string;
-    name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
-  }) {
+  async updateFaceProfileLabel(input: { profileId: string; label: string }) {
     this.updates.push(structuredClone(input));
-    const existing = this.people.get(input.personId);
+    const existing = this.people.get(input.profileId);
     if (!existing) return { ok: false as const, code: "NOT_FOUND" as const, error: "Missing legacy profile." };
-
-    const facts = Array.isArray(existing.facts) ? [...existing.facts] : [];
-    for (const fact of input.facts ?? []) {
-      if (!facts.includes(fact)) facts.push(fact);
-    }
-    const recaps = Array.isArray(existing.recaps) ? [...existing.recaps] : [];
-    if (input.recap) recaps.push({ summary: input.recap, at: "2026-06-27T12:00:00.000Z" });
 
     const next: LegacyDeepFaceProfile = {
       ...existing,
-      name: input.name ?? existing.name,
-      facts,
-      recaps,
+      name: input.label ?? existing.name,
     };
-    this.people.set(input.personId, next);
-    return { ok: true as const, person: structuredClone(next) };
+    this.people.set(input.profileId, next);
+    return { ok: true as const, profile: structuredClone(next) };
   }
 }
 
@@ -170,7 +154,7 @@ const SEED_PEOPLE: LegacyDeepFaceProfile[] = [
 
 let server: GatewayServer;
 let port: number;
-let repo: E2ELegacyPersonRepository;
+let repo: E2EFaceSignalProvider;
 let reviewStore: InMemoryPersonCandidateReviewStore;
 let personService: PersonService;
 
@@ -178,7 +162,7 @@ beforeEach(() => {
   resetGatewayState();
   server = new GatewayServer();
   port = getTestPort();
-  repo = new E2ELegacyPersonRepository(SEED_PEOPLE);
+  repo = new E2EFaceSignalProvider(SEED_PEOPLE);
   reviewStore = new InMemoryPersonCandidateReviewStore();
   personService = new PersonService(repo, reviewStore, { now: () => "2026-06-27T12:00:00.000Z" });
   registerPersonMethods(server, personService);
@@ -259,10 +243,8 @@ describe("E2E: person.* candidate review RPCs", () => {
       expect(reviewStore.get(candidateId)?.sourceSession?.sessionKey).toBe("e2e:person:confirm");
       expect(repo.updates).toEqual([
         {
-          personId: "p-unknown",
-          name: "Morgan",
-          facts: null,
-          recap: null,
+          profileId: "p-unknown",
+          label: "Morgan",
         },
       ]);
 

@@ -5,14 +5,11 @@
 // DeepFace remains a compatibility backend for face matching/enrollment.
 // =============================================================================
 
-import { createSubsystemLogger } from "../logging/index.js";
 import {
   FilePersonCandidateReviewStore,
   FilePersonStore,
   PersonService,
   PersonServiceError,
-  type LegacyDeepFaceProfile,
-  type LegacyPersonRepository,
   type PersonIdentifyResult,
   type PersonListResult,
   type PersonRecallResult,
@@ -20,13 +17,9 @@ import {
   type PersonClearResult,
   type PersonUpdateProfileResult,
 } from "../identity/person/index.js";
-import { resolveDeepFaceURL } from "../tools/face_recognize.js";
+import { DeepFaceFaceSignalProvider } from "../identity/face/index.js";
 import type { GatewayServer } from "./server.js";
 import { MethodError } from "./methods.js";
-
-const log = createSubsystemLogger("gateway/person-methods");
-
-const REQUEST_TIMEOUT_MS = 20_000;
 
 let defaultService: PersonService | undefined;
 
@@ -169,7 +162,7 @@ function shouldIncludeStructured(params: Record<string, unknown>): boolean {
 
 export function getDefaultPersonService(): PersonService {
   defaultService ??= new PersonService(
-    new DeepFaceLegacyPersonRepository(),
+    new DeepFaceFaceSignalProvider(),
     new FilePersonCandidateReviewStore(),
     { personStore: new FilePersonStore() },
   );
@@ -178,100 +171,6 @@ export function getDefaultPersonService(): PersonService {
 
 export function resetDefaultPersonServiceForTests(): void {
   defaultService = undefined;
-}
-
-class DeepFaceLegacyPersonRepository implements LegacyPersonRepository {
-  async identify(imageBase64: string) {
-    const result = await callDeepFace("/identify", { image_base64: imageBase64 });
-    if (!result.ok) return result;
-    if (!truthy(result.data.found)) return { ok: true as const, found: false as const };
-    const person = objectOrUndefined(result.data.person);
-    if (!person) {
-      return { ok: false as const, code: "INVALID_RESPONSE" as const, error: "DeepFace identify response omitted person." };
-    }
-    return {
-      ok: true as const,
-      found: true as const,
-      person: person as LegacyDeepFaceProfile,
-      similarity: numberOrUndefined(result.data.similarity),
-    };
-  }
-
-  async listPeople() {
-    const result = await callDeepFace("/people", {});
-    if (!result.ok) {
-      log.debug("person.list service unavailable", { error: result.error });
-      return result;
-    }
-    return {
-      ok: true as const,
-      people: Array.isArray(result.data.people) ? result.data.people : [],
-    };
-  }
-
-  async enroll(input: { imageBase64: string; name: string; personId?: string | null }) {
-    const result = await callDeepFace("/enroll", {
-      image_base64: input.imageBase64,
-      name: input.name,
-      person_id: input.personId ?? null,
-    });
-    return writeResult(result, "DeepFace enroll response omitted person.");
-  }
-
-  async update(input: { personId: string; name?: string | null; facts?: string[] | null; recap?: string | null }) {
-    const result = await callDeepFace("/update", {
-      person_id: input.personId,
-      name: input.name ?? null,
-      facts: null,
-      recap: null,
-    });
-    return writeResult(result, "DeepFace update response omitted person.");
-  }
-
-  async clearPeople() {
-    const result = await callDeepFace("/clear", {});
-    if (!result.ok) return result;
-    return {
-      ok: true as const,
-      removed: numberOrUndefined(result.data.removed) ?? 0,
-    };
-  }
-}
-
-async function callDeepFace(
-  path: string,
-  body: Record<string, unknown>,
-): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
-  const url = `${resolveDeepFaceURL()}${path}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!resp.ok) {
-      return { ok: false, error: `DeepFace service HTTP ${resp.status}.` };
-    }
-    const data = await resp.json().catch(() => null);
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      return { ok: false, error: "DeepFace returned a malformed response." };
-    }
-    const record = data as Record<string, unknown>;
-    if (record.ok === false) {
-      return { ok: false, error: `DeepFace error: ${record.error ?? "unknown"}` };
-    }
-    return { ok: true, data: record };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function recordParams(params: unknown): Record<string, unknown> {
@@ -297,32 +196,6 @@ function stringArrayParam(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     .map((item) => item.trim());
-}
-
-function objectOrUndefined(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function truthy(value: unknown): boolean {
-  return value === true;
-}
-
-function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function writeResult(
-  result: Awaited<ReturnType<typeof callDeepFace>>,
-  missingMessage: string,
-) {
-  if (!result.ok) return result;
-  const person = objectOrUndefined(result.data.person);
-  if (!person) {
-    return { ok: false as const, code: "INVALID_RESPONSE" as const, error: missingMessage };
-  }
-  return { ok: true as const, person: person as LegacyDeepFaceProfile };
 }
 
 function personMethodError(error: unknown): MethodError {
