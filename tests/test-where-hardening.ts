@@ -102,6 +102,24 @@ describe("Fix 3: concurrent arms include pending regions in emitted set", () => 
   });
 });
 
+describe("WhereAdapter prepare failure cleanup", () => {
+  test("removes pending bookkeeping when emitRegions throws", async () => {
+    const adapter = new WhereAdapter({
+      emitRegions() {
+        throw new Error("device bridge unavailable");
+      },
+      timeoutMs: 50,
+    });
+    const store = new InMemoryIntentionStore();
+    const intention = await store.create(makeWhereIntention("home"));
+
+    await expect(adapter.prepare(intention)).rejects.toThrow("device bridge unavailable");
+
+    expect(adapter.isPendingArm(intention)).toBe(false);
+    expect(adapter.resolveAck(intention.id, { ok: true })).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Fix 2: Initial-inside-region race — latch region.entered while pending_arm
 // ---------------------------------------------------------------------------
