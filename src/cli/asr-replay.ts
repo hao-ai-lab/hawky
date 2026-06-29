@@ -108,7 +108,7 @@ export async function runAsrReplay(opts: AsrReplayOptions): Promise<number> {
       // re-emits with 0 duration and the entry's dead-letter timestamp as a
       // best-effort proxy. Downstream consumers treat asr.final from replay
       // identically to live finals — see the transcript sidecar for ground truth.
-      emitTranscriptEvents(
+      await emitTranscriptEvents(
         transcript,
         Date.now() - start,
         0,

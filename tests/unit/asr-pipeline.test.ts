@@ -6,7 +6,7 @@
 // =============================================================================
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -170,6 +170,34 @@ describe("pipeline — emitTranscriptEvents", () => {
     expect(final).not.toBeNull();
     expect(final!.text).toBe("");
     expect(final!.segments.length).toBe(0);
+  });
+
+  test("writes transcript sidecar before publishing final", async () => {
+    const wavPath = join(workDir, "audio", "c-sidecar.wav");
+    const sidecarPath = wavPath.replace(/\.wav$/, ".transcript.json");
+    let sidecarAtFinal: unknown = null;
+
+    getBus().subscribe<AsrFinalEvent>("asr.final", (e) => {
+      if (e.media_id !== "c-sidecar") return;
+      if (existsSync(sidecarPath)) {
+        sidecarAtFinal = JSON.parse(readFileSync(sidecarPath, "utf8"));
+      }
+    });
+
+    await emitTranscriptEvents(
+      mkTranscript("c-sidecar", [{ t0_ms: 0, t1_ms: 500, text: "persisted first" }]),
+      17,
+      3000,
+      "node-1",
+      "2026-04-21T07:35:12.441Z",
+      wavPath,
+    );
+
+    expect(sidecarAtFinal).toMatchObject({
+      media_id: "c-sidecar",
+      wav_path: wavPath,
+      text: "persisted first",
+    });
   });
 });
 
