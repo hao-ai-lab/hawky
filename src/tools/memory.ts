@@ -28,6 +28,7 @@ const log = createSubsystemLogger("tools/memory");
 // -----------------------------------------------------------------------------
 
 const DEFAULT_MAX_RESULTS = 6;
+const MAX_RESULTS_LIMIT = 50;
 const MAX_SNIPPET_CHARS = 300;
 
 // Files to search in workspace root (in addition to memory/ directory)
@@ -163,6 +164,14 @@ interface SearchMatch {
   snippet: string;
 }
 
+function normalizeMaxResults(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_MAX_RESULTS;
+  }
+
+  return Math.max(1, Math.min(Math.floor(value), MAX_RESULTS_LIMIT));
+}
+
 /**
  * Hybrid BM25 + vector search across workspace memory files.
  * Uses MemoryIndex (SQLite FTS5 + in-memory cosine similarity).
@@ -173,7 +182,7 @@ async function executeMemorySearch(
   _context: ToolContext,
 ): Promise<ToolResult> {
   const query = input.query.trim();
-  const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
+  const maxResults = normalizeMaxResults(input.max_results);
 
   if (!query) {
     return { type: "error", content: "Query must not be empty" };
@@ -257,7 +266,7 @@ export const memorySearchToolDefinition: ToolDefinition<MemorySearchInput> = {
       },
       max_results: {
         type: "number",
-        description: "Maximum number of results to return. Default: 6.",
+        description: "Maximum number of results to return. Default: 6, max: 50.",
       },
     },
     required: ["query"],

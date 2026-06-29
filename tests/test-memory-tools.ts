@@ -276,6 +276,26 @@ describe("memory_search — limits and edge cases", () => {
     expect(parsed.results.length).toBeLessThanOrEqual(3);
   });
 
+  test("clamps negative max_results to one result", async () => {
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(wsDir, "memory", `negative-${i}.md`), `Negative limit match ${i}`, "utf-8");
+    }
+
+    const result = await runMemorySearch({ query: "Negative limit match", max_results: -10 });
+    const parsed = JSON.parse(result.content);
+    expect(parsed.results.length).toBe(1);
+  });
+
+  test("caps very large max_results", async () => {
+    for (let i = 0; i < 60; i++) {
+      writeFileSync(join(wsDir, "memory", `huge-${i}.md`), `Huge limit match ${i}`, "utf-8");
+    }
+
+    const result = await runMemorySearch({ query: "Huge limit match", max_results: 5_000 });
+    const parsed = JSON.parse(result.content);
+    expect(parsed.results.length).toBeLessThanOrEqual(50);
+  });
+
   test("default max_results caps results", async () => {
     for (let i = 0; i < 10; i++) {
       writeFileSync(join(wsDir, "memory", `hit-${i}.md`), `Hit number ${i} plus more words`, "utf-8");
