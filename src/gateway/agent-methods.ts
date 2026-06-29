@@ -47,7 +47,7 @@ import {
 } from "../agent/compaction.js";
 import type { PushService, PushSubscriptionJSON } from "./push.js";
 import { WorkspaceManager, WORKSPACE_FILES } from "../storage/workspace.js";
-import { updateSessionMeta, loadSessionMeta, persistLastTurnUsage } from "../storage/session.js";
+import { updateSessionMeta, loadSessionMeta, persistLastTurnUsage, sessionKeyToId } from "../storage/session.js";
 import { loadConfig } from "../storage/config.js";
 import { peekTaskStore } from "../tools/task_global.js";
 import type { CronStore } from "./cron-store.js";
@@ -1258,6 +1258,7 @@ export function registerAgentMethods(
     // Fetch more than requested to account for cron sessions that will be filtered out
     const persisted = sessions.listPersisted(limit * 5, { includeArchived: p?.includeArchived });
     const activeKeys = sessions.keys();
+    const activeIds = new Set(activeKeys.map((key) => sessionKeyToId(key)));
 
     // Build lookup for persisted session metadata (for sidebar filtering)
     const persisted_map = new Map(persisted.map((s) => [s.id, s]));
@@ -1285,7 +1286,7 @@ export function registerAgentMethods(
         id: s.id,
         createdAt: s.createdAt,
         messageCount: s.messageCount,
-        active: activeKeys.some((k) => k.includes(s.id)),
+        active: activeIds.has(s.id),
         displayName: s.displayName ?? null,
         pinned: s.pinned ?? false,
         archived: s.archived ?? false,
