@@ -144,6 +144,26 @@ describe("memory_get — line ranges", () => {
     expect(parsed.text).toBe("");
     expect(parsed.lines).toBe(0);
   });
+
+  test("rejects malformed line ranges", async () => {
+    writeFileSync(join(wsDir, "memory", "test.md"), "line1\nline2", "utf-8");
+
+    const zeroFrom = await runMemoryGet({ path: "memory/test.md", from: 0 });
+    expect(zeroFrom.type).toBe("error");
+    expect(zeroFrom.content).toContain("from");
+
+    const fractionalFrom = await runMemoryGet({ path: "memory/test.md", from: 1.5 });
+    expect(fractionalFrom.type).toBe("error");
+    expect(fractionalFrom.content).toContain("from");
+
+    const stringLines = await runMemoryGet({ path: "memory/test.md", lines: "2" });
+    expect(stringLines.type).toBe("error");
+    expect(stringLines.content).toContain("lines");
+
+    const nanLines = await runMemoryGet({ path: "memory/test.md", lines: Number.NaN });
+    expect(nanLines.type).toBe("error");
+    expect(nanLines.content).toContain("lines");
+  });
 });
 
 // =============================================================================
@@ -151,6 +171,20 @@ describe("memory_get — line ranges", () => {
 // =============================================================================
 
 describe("memory_get — security", () => {
+  test("rejects malformed paths", async () => {
+    const missing = await runMemoryGet({});
+    expect(missing.type).toBe("error");
+    expect(missing.content).toContain("Path");
+
+    const nonString = await runMemoryGet({ path: 42 });
+    expect(nonString.type).toBe("error");
+    expect(nonString.content).toContain("Path");
+
+    const blank = await runMemoryGet({ path: "   " });
+    expect(blank.type).toBe("error");
+    expect(blank.content).toContain("Path");
+  });
+
   test("rejects absolute paths", async () => {
     const result = await runMemoryGet({ path: "/etc/passwd" });
     expect(result.type).toBe("error");

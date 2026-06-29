@@ -52,12 +52,40 @@ interface MemoryGetInput {
   lines?: number;
 }
 
+function parseMemoryGetPath(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0 || value.includes("\0")) {
+    return undefined;
+  }
+  return value;
+}
+
+function parseOptionalPositiveInteger(value: unknown, field: string): number | string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    return `${field} must be a positive integer`;
+  }
+  return value;
+}
+
 async function executeMemoryGet(
   input: MemoryGetInput,
   _context: ToolContext,
 ): Promise<ToolResult> {
   const workspaceDir = getWorkspaceDir();
-  const relPath = input.path;
+  const rawInput = input as unknown as Record<string, unknown>;
+  const relPath = parseMemoryGetPath(rawInput.path);
+  if (!relPath) {
+    return { type: "error", content: "Path must be a non-empty relative string" };
+  }
+
+  const from = parseOptionalPositiveInteger(rawInput.from, "from");
+  if (typeof from === "string") {
+    return { type: "error", content: from };
+  }
+  const lines = parseOptionalPositiveInteger(rawInput.lines, "lines");
+  if (typeof lines === "string") {
+    return { type: "error", content: lines };
+  }
 
   // Security: reject absolute paths
   if (relPath.startsWith("/") || relPath.startsWith("\\")) {
@@ -86,9 +114,9 @@ async function executeMemoryGet(
     const allLines = content.split("\n");
 
     // Apply line range if specified
-    if (input.from !== undefined || input.lines !== undefined) {
-      const start = Math.max(0, (input.from ?? 1) - 1); // 1-based to 0-based
-      const count = input.lines ?? allLines.length;
+    if (from !== undefined || lines !== undefined) {
+      const start = (from ?? 1) - 1; // 1-based to 0-based
+      const count = lines ?? allLines.length;
       const slice = allLines.slice(start, start + count);
 
       // content: full JSON for LLM
@@ -135,11 +163,11 @@ export const memoryGetToolDefinition: ToolDefinition<MemoryGetInput> = {
           "'memory/2026-03-14.md', 'IDENTITY.md'.",
       },
       from: {
-        type: "number",
+        type: "integer",
         description: "Start line (1-based). If omitted, reads from beginning.",
       },
       lines: {
-        type: "number",
+        type: "integer",
         description: "Maximum number of lines to read. If omitted, reads entire file.",
       },
     },
