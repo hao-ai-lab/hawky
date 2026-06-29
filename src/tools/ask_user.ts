@@ -214,12 +214,19 @@ async function executeAskUserInner(
   // Wire abort signal to reject the pending request
   const onAbort = () => rejectAskUser(requestId, "Question cancelled by user.");
   if (context.abort_signal.aborted) {
+    pendingRequests.delete(requestId);
     return { type: "error", content: "Question cancelled: operation was aborted." };
   }
   context.abort_signal.addEventListener("abort", onAbort, { once: true });
 
   // Emit the question event
-  context.emit(event);
+  try {
+    context.emit(event);
+  } catch (err) {
+    pendingRequests.delete(requestId);
+    context.abort_signal.removeEventListener("abort", onAbort);
+    throw err;
+  }
 
   // --- Wait for user response ---
   let selected: string[];
