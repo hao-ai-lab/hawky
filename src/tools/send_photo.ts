@@ -60,11 +60,11 @@ function decodeBase64Image(raw: string): Buffer | null {
 }
 
 /** Sniff a sensible filename extension from the magic bytes (jpg/png/webp). */
-function filenameFor(buf: Buffer): string {
+function filenameFor(buf: Buffer): string | null {
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "photo.jpg";
   if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "photo.png";
   if (buf.length >= 12 && buf.toString("ascii", 8, 12) === "WEBP") return "photo.webp";
-  return "photo.jpg"; // frontend captures JPEG by default
+  return null;
 }
 
 export async function executeSendPhoto(
@@ -86,6 +86,10 @@ export async function executeSendPhoto(
   }
   if (data.length > MAX_IMAGE_BYTES) {
     return { type: "error", content: `Image too large (${Math.round(data.length / 1024)} KB; max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).` };
+  }
+  const filename = filenameFor(data);
+  if (!filename) {
+    return { type: "error", content: "image_base64 must decode to a supported image format (jpg, png, or webp)." };
   }
 
   if (!_channels) {
@@ -144,7 +148,6 @@ export async function executeSendPhoto(
     recipient = candidates[0].id;
   }
 
-  const filename = filenameFor(data);
   const comment = typeof input.comment === "string" && input.comment.trim() ? input.comment.trim() : undefined;
 
   try {
