@@ -216,10 +216,14 @@ function sanitizeToolChoice(raw: string | undefined): "auto" | "none" | "require
   }
 }
 
+function clampClientSecretTTL(value: number): number {
+  return Math.min(Math.max(Math.round(value), 10), 7200);
+}
+
 function sanitizeClientSecretTTL(raw: number | undefined): number {
-  const max = envInt("HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS", 600);
+  const max = clampClientSecretTTL(envInt("HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS", 600));
   if (!Number.isFinite(raw)) return max;
-  return Math.min(Math.max(Math.round(raw!), 10), Math.min(Math.max(max, 10), 7200));
+  return Math.min(clampClientSecretTTL(raw!), max);
 }
 
 function extractOpenAIError(payload: unknown): string | null {
