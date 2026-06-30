@@ -85,6 +85,8 @@ export interface GeminiToolCall {
 export type GeminiServerEvent =
   | { kind: "setupComplete" }
   | { kind: "textDelta"; text: string }
+  /** Inline output blob (audio) — surfaced so response-onset is measurable. */
+  | { kind: "audioDelta"; bytes: number }
   | { kind: "turnComplete" }
   | { kind: "toolCall"; calls: GeminiToolCall[] }
   | { kind: "toolCallCancellation"; ids: string[] }
@@ -320,9 +322,20 @@ export class GeminiLiveClient {
     if (payload.serverContent) {
       const sc = payload.serverContent;
       if (sc.modelTurn?.parts) {
-        for (const part of sc.modelTurn.parts as Array<{ text?: string }>) {
+        for (const part of sc.modelTurn.parts as Array<{
+          text?: string;
+          inlineData?: { mimeType?: string; data?: string };
+        }>) {
           if (typeof part.text === "string" && part.text.length > 0) {
             this.emit({ kind: "textDelta", text: part.text });
+          }
+          if (typeof part.inlineData?.data === "string" && part.inlineData.data.length > 0) {
+            // base64 → exact raw byte count (4 chars → 3 bytes, less padding);
+            // enough for onset + throughput without putting PCM on the wire.
+            const b64 = part.inlineData.data;
+            const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+            const bytes = Math.floor((b64.length * 3) / 4) - padding;
+            this.emit({ kind: "audioDelta", bytes });
           }
         }
       }
