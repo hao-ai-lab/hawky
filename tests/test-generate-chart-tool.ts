@@ -96,4 +96,16 @@ describe("executeGenerateChart", () => {
     );
     expect(r.type).toBe("image");
   });
+
+  test("does not mutate caller-owned series data while normalizing", async () => {
+    const input = { type: "bar" as const, series: [{ label: "s", data: [1, NaN as any, Infinity as any, 4] }] };
+
+    const r = await executeGenerateChart(input, ctx);
+
+    expect(r.type).toBe("image");
+    expect(input.series[0].data[0]).toBe(1);
+    expect(Number.isNaN(input.series[0].data[1])).toBe(true);
+    expect(input.series[0].data[2]).toBe(Infinity);
+    expect(input.series[0].data[3]).toBe(4);
+  });
 });
