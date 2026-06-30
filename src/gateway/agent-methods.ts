@@ -252,10 +252,10 @@ export function registerAgentMethods(
     const p = params as
       | { sessionKey?: string; turns?: { role?: string; text?: string; ts?: string }[] }
       | undefined;
-    const sessionKey = p?.sessionKey ?? conn.sessionKey;
-    if (!sessionKey) {
-      throw new MethodError("NO_SESSION", "No session bound. Provide sessionKey in params.");
+    if (p?.sessionKey !== undefined && p.sessionKey !== conn.sessionKey) {
+      throw new MethodError("FORBIDDEN", "Session mismatch: transcript.append is bound to the connected session.");
     }
+    const sessionKey = conn.sessionKey;
     const turns = p?.turns;
     if (!Array.isArray(turns) || turns.length === 0) {
       throw new MethodError("INVALID_REQUEST", "turns must be a non-empty array");
