@@ -105,6 +105,13 @@ describe("send_photo validation", () => {
     expect(r.content).toMatch(/decode|image data/i);
   });
 
+  test("errors when base64 decodes to non-image bytes", async () => {
+    setSendPhotoDeps(registryWith(createMockSlack()));
+    const r = await executeSendPhoto({ image_base64: Buffer.from("not an image").toString("base64") }, ctx);
+    expect(r.type).toBe("error");
+    expect(r.content).toMatch(/supported image format/i);
+  });
+
   test("errors when channel registry is not injected", async () => {
     // deps reset in beforeEach → no registry.
     const r = await executeSendPhoto({ image_base64: TINY_JPEG_B64 }, ctx);
