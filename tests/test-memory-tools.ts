@@ -216,6 +216,13 @@ describe("memory_get — security", () => {
     expect(result.type).toBe("error");
     expect(result.content).toContain(".md");
   });
+
+  test("rejects jsonl files outside memory append logs", async () => {
+    writeFileSync(join(wsDir, "session.jsonl"), "{\"text\":\"secret\"}\n", "utf-8");
+    const result = await runMemoryGet({ path: "session.jsonl" });
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("memory/*.jsonl");
+  });
 });
 
 // =============================================================================
@@ -275,6 +282,29 @@ describe("memory_search — basic matching", () => {
     expect(parsed.results.length).toBeGreaterThan(0);
     expect(parsed.results[0].path).toMatch(/^memory\/observations\/.*\.jsonl$/);
     expect(parsed.results[0].snippet).toContain("calypso orchid");
+  });
+
+  test("memory_get can read memory_append JSONL search results", async () => {
+    const result = await executeMemoryAppend(
+      {
+        category: "observations",
+        text: "Remember the night-blooming jasmine needs pruning tomorrow.",
+        ts_iso: "2026-06-30T13:00:00.000Z",
+      },
+      makeContext(),
+    );
+    expect(result.type).toBe("text");
+
+    const search = await runMemorySearch({ query: "night-blooming jasmine" });
+    const searchParsed = JSON.parse(search.content);
+    const path = searchParsed.results[0].path;
+    expect(path).toMatch(/^memory\/observations\/.*\.jsonl$/);
+
+    const get = await runMemoryGet({ path });
+    expect(get.type).toBe("text");
+    const getParsed = JSON.parse(get.content);
+    expect(getParsed.path).toBe(path);
+    expect(getParsed.text).toContain("[observations] Remember the night-blooming jasmine needs pruning tomorrow.");
   });
 
   test("returns path, line_number, and snippet", async () => {

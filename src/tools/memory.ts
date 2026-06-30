@@ -102,16 +102,20 @@ async function executeMemoryGet(
     return { type: "error", content: "Path must not traverse outside workspace" };
   }
 
-  // Security: only .md files
-  if (!normalized.endsWith(".md")) {
-    return { type: "error", content: "Only .md files can be read via memory_get" };
+  const isAppendJsonl = normalized.startsWith("memory/") && normalized.endsWith(".jsonl");
+  // Security: allow Markdown memory files plus memory.append JSONL files that
+  // memory_search can return. Other JSONL/session logs stay unreadable here.
+  if (!normalized.endsWith(".md") && !isAppendJsonl) {
+    return { type: "error", content: "Only .md files and memory/*.jsonl files can be read via memory_get" };
   }
   if (!existsSync(fullPath)) {
     return { type: "text", content: JSON.stringify({ path: relPath, text: "", error: "File not found" }) };
   }
 
   try {
-    const content = readFileSync(fullPath, "utf-8");
+    const content = isAppendJsonl
+      ? extractMemoryAppendJsonlText(fullPath).text
+      : readFileSync(fullPath, "utf-8");
     const allLines = content.split("\n");
 
     // Apply line range if specified
