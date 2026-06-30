@@ -210,6 +210,31 @@ describe("WebSocketClient close", () => {
     expect(statuses).not.toContain("reconnecting");
   });
 
+  it("does not reconnect after auth refresh resolves if the client was closed", async () => {
+    let resolveToken!: (token: string | null) => void;
+    const onAuthFailed = vi.fn(
+      () => new Promise<string | null>((resolve) => { resolveToken = resolve; }),
+    );
+    const client = new WebSocketClient({
+      url: "ws://localhost:4242",
+      sessionKey: "test",
+      token: "old-token",
+      onAuthFailed,
+    });
+    await client.connect();
+
+    mockWsInstances[0].close(1008);
+    await tick();
+    expect(onAuthFailed).toHaveBeenCalledTimes(1);
+
+    client.close();
+    resolveToken("new-token");
+    await tick();
+
+    expect(mockWsInstances).toHaveLength(1);
+    expect(client.status).toBe("disconnected");
+  });
+
   it("attempts reconnect on abnormal close", async () => {
     vi.useFakeTimers();
     const statuses: ConnectionStatus[] = [];
