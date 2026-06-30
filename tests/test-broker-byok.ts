@@ -68,6 +68,7 @@ describe("broker BYOK", () => {
     resetRealtimeMintQuotaForTests();
     delete process.env.HAWKY_REALTIME_MINTS_PER_HOUR;
     delete process.env.HAWKY_REALTIME_MINTS_PER_DAY;
+    delete process.env.HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS;
   });
 
   test("uses a well-formed byok_api_key over the configured key", async () => {
@@ -122,6 +123,20 @@ describe("broker BYOK", () => {
       },
     });
     expect(stub.captured.body.session).not.toHaveProperty("max_response_output_tokens");
+  });
+
+  test("clamps env max ttl when no explicit ttl is supplied", async () => {
+    process.env.HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS = "999999";
+    await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" });
+    expect(stub.captured.body.expires_after.seconds).toBe(7200);
+
+    process.env.HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS = "1";
+    await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" });
+    expect(stub.captured.body.expires_after.seconds).toBe(10);
+
+    delete process.env.HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS;
+    await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" });
+    expect(stub.captured.body.expires_after.seconds).toBe(600);
   });
 
   test("limits gateway-key mints per quota identity", async () => {
