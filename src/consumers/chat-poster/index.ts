@@ -239,6 +239,23 @@ export function isLikelySilence(
   return false;
 }
 
+export function likelySilenceDropLogMetadata(event: AsrFinalEvent): Record<string, unknown> {
+  const confidences = (event.segments ?? [])
+    .map((s) => s.confidence)
+    .filter((c): c is number => typeof c === "number");
+  const meanConfidence = confidences.length > 0
+    ? confidences.reduce((a, b) => a + b, 0) / confidences.length
+    : undefined;
+
+  return {
+    media_id: event.media_id,
+    media_duration_ms: event.media_duration_ms,
+    transcript_chars: event.text.trim().length,
+    segment_count: event.segments?.length ?? 0,
+    ...(meanConfidence !== undefined ? { mean_confidence: meanConfidence } : {}),
+  };
+}
+
 interface CoalesceLimits {
   debounceMs: number;
   flushAgeMs: number;
@@ -261,11 +278,7 @@ async function handleAsrFinal(
   }
 
   if (isLikelySilence(text, event, config)) {
-    log.info("dropping likely-silence transcript", {
-      media_id: event.media_id,
-      text,
-      media_duration_ms: event.media_duration_ms,
-    });
+    log.info("dropping likely-silence transcript", likelySilenceDropLogMetadata(event));
     return;
   }
 
