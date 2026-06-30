@@ -87,3 +87,24 @@ describe("useSessionStore.fetchSessions", () => {
     expect(useSessionStore.getState().loading).toBe(false);
   });
 });
+
+describe("useSessionStore.remove", () => {
+  it("does not switch sessions when deleting the active session fails", async () => {
+    const existing = [
+      s({ key: "web:ios", displayName: "Active Chat", createdAt: "2026-06-22T00:00:00Z" }),
+    ];
+    const rpc = vi.fn(async (method: string) => {
+      if (method === "session.delete") throw new Error("delete rejected");
+      return { sessions: [] };
+    });
+    useSessionStore.setState({ activeKey: "web:ios", sessions: existing, loading: false });
+    useSocketStore.setState({ rpc: rpc as any });
+
+    await useSessionStore.getState().remove("web:ios");
+
+    expect(useSessionStore.getState().activeKey).toBe("web:ios");
+    expect(useSessionStore.getState().sessions).toEqual(existing);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith("session.delete", { sessionKey: "web:ios" });
+  });
+});
