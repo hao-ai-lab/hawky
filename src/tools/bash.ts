@@ -255,27 +255,10 @@ async function executeOnNode(input: BashToolInput, context: ToolContext): Promis
     };
   }
 
-  // Invoke system.run on the node — race with abort signal
-  const invokePromise = _nodeRegistry.invoke(targetNodeId, "system.run", {
+  const result = await _nodeRegistry.invoke(targetNodeId, "system.run", {
     command: ["bash", "-c", input.command],
     timeoutMs: input.timeout_ms,
-  }, input.timeout_ms);
-
-  // Race invoke against abort signal so cancellation takes effect
-  // Race invoke against abort signal so the UI unblocks on cancel.
-  // NOTE: cancellation is local only — the remote process continues
-  // until its timeout. Full end-to-end cancel is tracked as a follow-up.
-  const abortPromise = new Promise<{ ok: false; error: string }>((resolve) => {
-    if (context.abort_signal.aborted) {
-      resolve({ ok: false, error: "Cancelled locally. The remote command may still be running on the node until its timeout." });
-      return;
-    }
-    context.abort_signal.addEventListener("abort", () => {
-      resolve({ ok: false, error: "Cancelled locally. The remote command may still be running on the node until its timeout." });
-    }, { once: true });
-  });
-
-  const result = await Promise.race([invokePromise, abortPromise]);
+  }, input.timeout_ms, context.abort_signal);
 
   if (!result.ok) {
     return { type: "error", content: result.error ?? "Node invoke failed" };

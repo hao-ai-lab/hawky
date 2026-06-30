@@ -28,9 +28,9 @@ function createMockConnection(): GatewayConnection {
   return conn;
 }
 
-function createContext(): ToolContext {
+function createContext(signal = new AbortController().signal): ToolContext {
   return {
-    abort_signal: new AbortController().signal,
+    abort_signal: signal,
     working_directory: "/tmp",
     permission_mode: "default",
     session_key: "test",
@@ -198,6 +198,31 @@ describe("Bash Node Routing", () => {
       const result = await promise;
       expect(result.type).toBe("error");
       expect(result.content).toContain("timed out");
+    });
+
+    test("cancels in-flight command on node when the tool context aborts", async () => {
+      const conn = createMockConnection();
+      registry.register(conn, { nodeId: "n1", name: "mac", commands: ["system.run"], platform: "darwin" });
+      const ac = new AbortController();
+
+      const promise = bashToolDefinition.execute(
+        { command: "sleep 60", host: "node" } as any,
+        createContext(ac.signal),
+      );
+
+      const sent = (conn as any).sentMessages as string[];
+      const request = JSON.parse(sent[0]);
+      expect(request.event).toBe("node.invoke.request");
+
+      ac.abort();
+
+      const result = await promise;
+      expect(result.type).toBe("error");
+      expect(result.content).toBe("Cancelled");
+
+      const cancel = sent.map((frame) => JSON.parse(frame)).find((frame) => frame.event === "node.invoke.cancel");
+      expect(cancel).toBeDefined();
+      expect(cancel.payload.id).toBe(request.payload.id);
     });
   });
 
