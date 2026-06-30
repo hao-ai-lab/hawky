@@ -483,7 +483,9 @@ async function executeEditFileInner(
   input: EditFileInput,
   context: ToolContext,
 ): Promise<ToolResult> {
-  const { file_path, old_string, new_string, replace_all: doReplaceAll } = input;
+  const rawInput = input as unknown as Record<string, unknown>;
+  const { file_path, old_string, new_string } = rawInput;
+  const rawReplaceAll = rawInput.replace_all;
 
   // --- Pre-abort check ---
   if (context.abort_signal.aborted) {
@@ -500,12 +502,22 @@ async function executeEditFileInner(
   if (new_string === undefined || new_string === null) {
     return { type: "error", content: "Missing required parameter: new_string" };
   }
+  if (typeof old_string !== "string") {
+    return { type: "error", content: "old_string must be a string" };
+  }
+  if (typeof new_string !== "string") {
+    return { type: "error", content: "new_string must be a string" };
+  }
+  if (rawReplaceAll !== undefined && typeof rawReplaceAll !== "boolean") {
+    return { type: "error", content: "replace_all must be a boolean" };
+  }
   if (old_string === "") {
     return { type: "error", content: "old_string must be non-empty" };
   }
   if (old_string === new_string) {
     return { type: "error", content: "old_string and new_string must be different" };
   }
+  const doReplaceAll = rawReplaceAll === true;
 
   // --- Resolve path ---
   const resolved = resolve(context.working_directory, file_path);
@@ -589,7 +601,7 @@ async function executeEditFileInner(
       total_lines: totalLines,
       lines_added: newLineCount,
       lines_removed: oldLineCount,
-      replace_all: doReplaceAll ?? false,
+      replace_all: doReplaceAll,
       // Line number where the match starts (1-based), for accurate diff display
       match_line: doReplaceAll ? 1 : content.substring(0, matchIndex).split("\n").length,
       // Bounded diff strings for display (capped to prevent transport/UI blow-up)
