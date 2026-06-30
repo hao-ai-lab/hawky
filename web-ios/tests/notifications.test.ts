@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { useNotifications } from "../src/lib/notifications";
+import { resetNotificationsForTests, useNotifications } from "../src/lib/notifications";
 
-beforeEach(() => useNotifications.setState({ toasts: [] }));
+beforeEach(() => resetNotificationsForTests());
 
 describe("live notifications (notification.received)", () => {
   it("surfaces a fired reminder as a toast", () => {
@@ -21,6 +21,28 @@ describe("live notifications (notification.received)", () => {
       type: "event", event: "notification.received", seq: 2, payload: { message: "Reminder fired" },
     } as any);
     expect(useNotifications.getState().toasts[0].body).toBe("Reminder fired");
+  });
+
+  it("dedupes repeated backend notification ids", () => {
+    const event = {
+      type: "event", event: "notification.received", seq: 2,
+      payload: { id: "notif-1", body: "Reminder fired" },
+    } as any;
+
+    useNotifications.getState().handleEvent(event);
+    useNotifications.getState().handleEvent({ ...event, seq: 3 });
+
+    const toasts = useNotifications.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].id).toBe("notif-1");
+    expect(toasts[0].body).toBe("Reminder fired");
+  });
+
+  it("keeps missing-id notifications as separate toasts", () => {
+    useNotifications.getState().handleEvent({ type: "event", event: "notification.received", seq: 2, payload: { body: "A" } } as any);
+    useNotifications.getState().handleEvent({ type: "event", event: "notification.received", seq: 3, payload: { body: "A" } } as any);
+
+    expect(useNotifications.getState().toasts).toHaveLength(2);
   });
 
   it("ignores other events and empty bodies", () => {

@@ -29,6 +29,24 @@ function nid(): string {
   return `n-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+const seenNotificationIds = new Set<string>();
+const MAX_SEEN_NOTIFICATION_IDS = 200;
+
+function rememberNotificationId(id: string): boolean {
+  if (seenNotificationIds.has(id)) return false;
+  seenNotificationIds.add(id);
+  if (seenNotificationIds.size > MAX_SEEN_NOTIFICATION_IDS) {
+    const first = seenNotificationIds.values().next().value;
+    if (first) seenNotificationIds.delete(first);
+  }
+  return true;
+}
+
+export function resetNotificationsForTests(): void {
+  seenNotificationIds.clear();
+  useNotifications.setState({ toasts: [] });
+}
+
 export const useNotifications = create<NotificationState>((set, get) => ({
   toasts: [],
 
@@ -39,8 +57,10 @@ export const useNotifications = create<NotificationState>((set, get) => ({
     const p = (e.payload ?? {}) as Record<string, unknown>;
     const body = typeof p.body === "string" ? p.body : typeof p.message === "string" ? p.message : "";
     if (!body) return;
+    const eventId = typeof p.id === "string" && p.id.trim() ? p.id.trim() : undefined;
+    if (eventId && !rememberNotificationId(eventId)) return;
     const n: AppNotification = {
-      id: nid(),
+      id: eventId ?? nid(),
       title: typeof p.title === "string" ? p.title : undefined,
       body,
       origin: typeof p.origin === "string" ? p.origin : undefined,
