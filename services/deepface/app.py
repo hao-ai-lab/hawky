@@ -343,6 +343,7 @@ def update(req: UpdateRequest) -> dict[str, Any]:
         if req.name:
             p["name"] = req.name
         if req.facts:
+            p.setdefault("facts", [])
             for f in req.facts:
                 if f not in p["facts"]:
                     p["facts"].append(f)

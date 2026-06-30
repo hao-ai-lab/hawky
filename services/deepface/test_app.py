@@ -157,6 +157,25 @@ def test_update_sets_name_facts_recap(A):
     assert "embeddings" not in p
 
 
+def test_update_adds_facts_to_legacy_profile_missing_facts(A):
+    pid = "legacy-1"
+    A._save({
+        pid: {
+            "id": pid,
+            "name": "Legacy",
+            "embeddings": [_unit(4)],
+            "recaps": [],
+            "created_at": "2026-06-30T00:00:00Z",
+            "last_seen_at": "2026-06-30T00:00:00Z",
+        },
+    })
+
+    r = A.update(A.UpdateRequest(person_id=pid, facts=["climbs"]))
+
+    assert r["ok"] is True
+    assert r["person"]["facts"] == ["climbs"]
+
+
 def test_identify_empty_db(A):
     A._engine = _engine_returning(FakeFace(_unit(1)))
     assert A.identify(A.IdentifyRequest(image_base64=_b64()))["found"] is False
