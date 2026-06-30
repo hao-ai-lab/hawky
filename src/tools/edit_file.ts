@@ -500,6 +500,9 @@ async function executeEditFileInner(
   if (new_string === undefined || new_string === null) {
     return { type: "error", content: "Missing required parameter: new_string" };
   }
+  if (old_string === "") {
+    return { type: "error", content: "old_string must be non-empty" };
+  }
   if (old_string === new_string) {
     return { type: "error", content: "old_string and new_string must be different" };
   }

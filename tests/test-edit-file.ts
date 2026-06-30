@@ -320,6 +320,22 @@ describe("Error handling", () => {
     expect(r.content).toContain("must be different");
   });
 
+  test("empty old_string returns error", async () => {
+    const p = await file("err4b.txt", "hello\n");
+    const r = await edit({ file_path: p, old_string: "", new_string: "prefix" });
+    expect(r.type).toBe("error");
+    expect(r.content).toContain("old_string must be non-empty");
+    expect(await disk(p)).toBe("hello\n");
+  });
+
+  test("empty old_string with replace_all returns error", async () => {
+    const p = await file("err4c.txt", "hello\n");
+    const r = await edit({ file_path: p, old_string: "", new_string: "prefix", replace_all: true });
+    expect(r.type).toBe("error");
+    expect(r.content).toContain("old_string must be non-empty");
+    expect(await disk(p)).toBe("hello\n");
+  });
+
   test("missing file_path", async () => {
     const r = await edit({ file_path: "", old_string: "x", new_string: "y" });
     expect(r.type).toBe("error");
