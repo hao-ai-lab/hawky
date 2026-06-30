@@ -477,8 +477,8 @@ export function isSafeBashCommand(input: Record<string, unknown>): boolean {
 // -----------------------------------------------------------------------------
 
 const DANGEROUS_PATTERNS = [
-  /\brm\s+-[^\s]*r/,           // rm -rf, rm -r
-  /\brm\s+-[^\s]*f/,           // rm -f, rm -rf
+  /\brm\s+-[^\s]*r/i,          // rm -rf, rm -r, rm -R
+  /\brm\s+-[^\s]*f/i,          // rm -f, rm -rf, rm -Rf
   /\bsudo\b/,                   // any sudo usage
   /\bchmod\b/,                  // permission changes
   /\bchown\b/,                  // ownership changes

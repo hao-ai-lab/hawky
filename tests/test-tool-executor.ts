@@ -1108,6 +1108,8 @@ describe("executeTools", () => {
 describe("isDangerousCommand", () => {
   // Dangerous commands — should be blocked
   test("blocks rm -rf", () => expect(isDangerousCommand("rm -rf /")).toBe(true));
+  test("blocks rm -R", () => expect(isDangerousCommand("rm -R /tmp/foo")).toBe(true));
+  test("blocks rm -Rf", () => expect(isDangerousCommand("rm -Rf /tmp/foo")).toBe(true));
   test("blocks rm -f", () => expect(isDangerousCommand("rm -f file.txt")).toBe(true));
   test("blocks sudo", () => expect(isDangerousCommand("sudo apt install foo")).toBe(true));
   test("blocks chmod", () => expect(isDangerousCommand("chmod 777 /etc/passwd")).toBe(true));
@@ -1558,6 +1560,27 @@ describe("executeTools — config rules", () => {
       makeContext({ headless: true }),
       cache,
       null, // no resolver — simulates cron / sub-agent
+      guard,
+      emit,
+      { allow: ["Bash(rm *)"] },
+    );
+
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("headless mode");
+    expect(events.some((e) => e.type === "tool_use_start")).toBe(false);
+  });
+
+  test("headless mode rejects rm -R even when allow rule matches", async () => {
+    registry.register(makeTool("bash", "ask_user"));
+    const cache = new PermissionCache();
+    const { events, emit } = collectEvents();
+
+    const results = await executeTools(
+      [makeCall("t1", "bash", { command: "rm -R /tmp/foo" })],
+      registry,
+      makeContext({ headless: true }),
+      cache,
+      null,
       guard,
       emit,
       { allow: ["Bash(rm *)"] },
