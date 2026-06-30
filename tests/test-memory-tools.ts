@@ -386,6 +386,21 @@ describe("memory_search — limits and edge cases", () => {
   test("empty query returns error", async () => {
     const result = await runMemorySearch({ query: "" });
     expect(result.type).toBe("error");
+    expect(result.content).toContain("non-empty string");
+  });
+
+  test("rejects missing and non-string query values", async () => {
+    const missing = await runMemorySearch({});
+    expect(missing.type).toBe("error");
+    expect(missing.content).toContain("non-empty string");
+
+    const nonString = await runMemorySearch({ query: 42 });
+    expect(nonString.type).toBe("error");
+    expect(nonString.content).toContain("non-empty string");
+
+    const blank = await runMemorySearch({ query: "   " });
+    expect(blank.type).toBe("error");
+    expect(blank.content).toContain("non-empty string");
   });
 
   test("reports result count", async () => {
