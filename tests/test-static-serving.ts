@@ -6,7 +6,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { serveStatic } from "../src/gateway/static.js";
 
@@ -15,20 +15,25 @@ import { serveStatic } from "../src/gateway/static.js";
 // -----------------------------------------------------------------------------
 
 let testDir: string;
+let siblingDir: string;
 
 beforeAll(() => {
   testDir = join(tmpdir(), `hawky-static-test-${Date.now()}`);
+  siblingDir = `${testDir}-secret`;
   mkdirSync(join(testDir, "assets"), { recursive: true });
+  mkdirSync(siblingDir, { recursive: true });
 
   // Create test files
   writeFileSync(join(testDir, "index.html"), "<html><body>Hawky</body></html>");
   writeFileSync(join(testDir, "assets", "index-abc123.js"), "console.log('app')");
   writeFileSync(join(testDir, "assets", "index-abc123.css"), "body { color: red }");
   writeFileSync(join(testDir, "favicon.svg"), "<svg></svg>");
+  writeFileSync(join(siblingDir, "leak.txt"), "do not serve sibling files");
 });
 
 afterAll(() => {
   rmSync(testDir, { recursive: true, force: true });
+  rmSync(siblingDir, { recursive: true, force: true });
 });
 
 // -----------------------------------------------------------------------------
@@ -75,6 +80,11 @@ describe("serveStatic", () => {
 
   test("blocks path traversal (../../etc/passwd)", () => {
     const res = serveStatic(testDir, "/../../../etc/passwd");
+    expect(res).toBeNull();
+  });
+
+  test("blocks sibling-prefix traversal outside webDistDir", () => {
+    const res = serveStatic(testDir, `/../${basename(siblingDir)}/leak.txt`);
     expect(res).toBeNull();
   });
 
