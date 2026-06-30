@@ -247,6 +247,24 @@ describe("server: WebSocket connection", () => {
     ws.close();
   });
 
+  test("rejects duplicate connect on an authenticated socket", async () => {
+    server.start(port);
+    const { ws } = await handshake(port);
+
+    const duplicate = await sendRequest(ws, "connect", {
+      version: "2.0",
+      platform: "node-host",
+      role: "node",
+      node_id: "node-replay",
+    });
+    expect(duplicate.ok).toBe(false);
+    expect(duplicate.error?.code).toBe(ErrorCodes.INVALID_REQUEST);
+
+    const status = await sendRequest(ws, "status");
+    expect(status.ok).toBe(true);
+    ws.close();
+  });
+
   test("rejects non-connect method before handshake", async () => {
     server.start(port);
     const ws = await connectWs(port);
