@@ -200,6 +200,12 @@ function normalizeMaxResults(value: number | undefined): number {
   return Math.max(1, Math.min(Math.floor(value), MAX_RESULTS_LIMIT));
 }
 
+function parseMemorySearchQuery(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const query = value.trim();
+  return query ? query : undefined;
+}
+
 /**
  * Hybrid BM25 + vector search across workspace memory files.
  * Uses MemoryIndex (SQLite FTS5 + in-memory cosine similarity).
@@ -209,12 +215,12 @@ async function executeMemorySearch(
   input: MemorySearchInput,
   _context: ToolContext,
 ): Promise<ToolResult> {
-  const query = input.query.trim();
-  const maxResults = normalizeMaxResults(input.max_results);
-
+  const rawInput = input as unknown as Record<string, unknown>;
+  const query = parseMemorySearchQuery(rawInput.query);
   if (!query) {
-    return { type: "error", content: "Query must not be empty" };
+    return { type: "error", content: "Query must be a non-empty string" };
   }
+  const maxResults = normalizeMaxResults(rawInput.max_results as number | undefined);
 
   try {
     const { getGlobalMemoryIndex } = await import("../memory/global.js");
