@@ -130,6 +130,7 @@ interface PendingMemo {
   body: string;
   capturedStartIso: string;
   mediaId: string;
+  mediaDurationMs?: number;
   backend: string;
 }
 
@@ -288,6 +289,7 @@ async function handleAsrFinal(
     body,
     capturedStartIso: event.captured_start_iso,
     mediaId: event.media_id,
+    mediaDurationMs: event.media_duration_ms,
     backend: event.backend,
   };
 
@@ -356,6 +358,16 @@ function coalescedText(memos: ReadonlyArray<PendingMemo>): string {
   return out;
 }
 
+function coalescedMediaDurationMs(memos: ReadonlyArray<PendingMemo>): number | undefined {
+  if (memos.length === 0) return undefined;
+  let total = 0;
+  for (const memo of memos) {
+    if (typeof memo.mediaDurationMs !== "number") return undefined;
+    total += memo.mediaDurationMs;
+  }
+  return total;
+}
+
 function formatHHMMSS(iso: string): string {
   try {
     const d = new Date(iso);
@@ -401,10 +413,12 @@ async function flushBuffer(
     session.sessionManager.appendMessage(chatMessage);
 
     // Re-publish a normalized ChatPostEvent so other consumers can observe it.
+    const mediaDurationMs = coalescedMediaDurationMs(buf.memos);
     const chatEvent: ChatPostEvent = {
       session_id: sessionKey,
       role: "user",
       text: body,
+      ...(mediaDurationMs !== undefined ? { media_duration_ms: mediaDurationMs } : {}),
       source: {
         kind: "voice_memo",
         media_id: mediaIds,
