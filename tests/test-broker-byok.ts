@@ -6,7 +6,7 @@
 // mintOpenAIRealtimeClientSecret:
 //   - uses a well-formed byok_api_key in the upstream Authorization header,
 //     overriding the gateway-configured key;
-//   - ignores a malformed BYOK key and falls back to the configured key;
+//   - rejects a malformed BYOK key instead of falling back to the configured key;
 //   - never echoes the key back to the caller in the response payload.
 // =============================================================================
 
@@ -83,8 +83,15 @@ describe("broker BYOK", () => {
     expect(stub.captured.authorization).toBe(`Bearer ${GATEWAY_KEY}`);
   });
 
-  test("ignores a malformed BYOK key and falls back to the configured key", async () => {
-    const res = await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2", byok_api_key: "not-a-real-key" });
+  test("rejects a malformed BYOK key instead of falling back to the configured key", async () => {
+    await expect(
+      mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2", byok_api_key: "not-a-real-key" }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(stub.captured.authorization).toBeNull();
+  });
+
+  test("treats a blank BYOK key as absent and uses the configured key", async () => {
+    const res = await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2", byok_api_key: "   " });
     expect(res.ok).toBe(true);
     expect(stub.captured.authorization).toBe(`Bearer ${GATEWAY_KEY}`);
   });

@@ -117,7 +117,8 @@ function selectRealtimeApiKey(
   configuredKey: string | undefined,
 ): RealtimeApiKeySelection {
   // Prefer a caller-supplied "bring your own key" (hosted web demo) when it is
-  // well-formed; otherwise fall back to the gateway's configured key.
+  // well-formed. If a non-empty BYOK value is supplied but malformed, reject it
+  // instead of silently consuming the gateway's configured key.
   const byok = sanitizeByokKey(params.byok_api_key);
   return {
     apiKey: byok || process.env.OPENAI_API_KEY || configuredKey || "",
@@ -164,9 +165,9 @@ function buildRealtimeClientSecretRequest(
 
 /**
  * Validate a caller-supplied BYOK key. Returns the trimmed key when it looks
- * like an OpenAI secret key (`sk-…`), otherwise an empty string so the broker
- * falls back to the gateway-configured key. Deliberately conservative: a
- * malformed key is ignored rather than forwarded upstream.
+ * like an OpenAI secret key (`sk-…`). Missing or blank input is treated as
+ * absent; malformed non-empty input is rejected so it cannot accidentally fall
+ * back to the gateway-configured key.
  */
 function sanitizeByokKey(raw: string | undefined): string {
   const key = (raw ?? "").trim();
@@ -174,7 +175,7 @@ function sanitizeByokKey(raw: string | undefined): string {
   // OpenAI keys start with "sk-" (incl. "sk-proj-…"); enforce a sane length and
   // charset so we never forward obviously-bogus input to the OpenAI API.
   if (/^sk-[A-Za-z0-9_-]{20,200}$/.test(key)) return key;
-  return "";
+  throw new LiveRealtimeBrokerError("Invalid BYOK OpenAI API key format.", 400);
 }
 
 function sanitizeRealtimeModel(raw: string | undefined): string {
