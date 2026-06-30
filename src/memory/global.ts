@@ -7,27 +7,46 @@
 import { MemoryIndex } from "./index.js";
 
 let globalIndex: MemoryIndex | null = null;
+let globalIndexConfig: MemoryIndexConfig | null = null;
+
+type MemoryIndexConfig = {
+  workspacePath?: string;
+  openaiApiKey?: string;
+  dbPath?: string;
+  sessionsPath?: string | null;
+};
+
+function hasConfigChange(current: MemoryIndexConfig, requested: MemoryIndexConfig): boolean {
+  return (
+    (requested.workspacePath !== undefined && requested.workspacePath !== current.workspacePath) ||
+    (requested.openaiApiKey !== undefined && requested.openaiApiKey !== current.openaiApiKey) ||
+    (requested.dbPath !== undefined && requested.dbPath !== current.dbPath) ||
+    (requested.sessionsPath !== undefined && requested.sessionsPath !== current.sessionsPath)
+  );
+}
 
 /** Get (or create) the global MemoryIndex.
- *  If the singleton already exists but was created without key/sessions config,
- *  it is recreated with the new parameters. This handles the case where
- *  tools/memory.ts creates the singleton before gateway startup provides
- *  the full config. */
+ *  If callers provide identity-affecting config that differs from the existing
+ *  singleton, the index is recreated instead of silently reusing a database or
+ *  workspace from an earlier runtime context.
+ */
 export function getGlobalMemoryIndex(
   workspacePath?: string,
   openaiApiKey?: string,
   dbPath?: string,
-  sessionsPath?: string,
+  sessionsPath?: string | null,
 ): MemoryIndex {
-  // Recreate if called with config that the existing singleton lacks
-  if (globalIndex && (openaiApiKey || sessionsPath)) {
-    const needsRecreate =
-      (openaiApiKey && !globalIndex.hasEmbeddingProvider()) ||
-      (sessionsPath && !globalIndex.hasSessionsPath());
-    if (needsRecreate) {
-      globalIndex.close();
-      globalIndex = null;
-    }
+  const requestedConfig: MemoryIndexConfig = {
+    workspacePath,
+    openaiApiKey,
+    dbPath,
+    sessionsPath,
+  };
+
+  if (globalIndex && globalIndexConfig && hasConfigChange(globalIndexConfig, requestedConfig)) {
+    globalIndex.close();
+    globalIndex = null;
+    globalIndexConfig = null;
   }
 
   if (!globalIndex) {
@@ -38,6 +57,7 @@ export function getGlobalMemoryIndex(
       dbPath,
       sessionsPath,
     });
+    globalIndexConfig = requestedConfig;
   }
   return globalIndex;
 }
@@ -46,4 +66,5 @@ export function getGlobalMemoryIndex(
 export function resetGlobalMemoryIndex(): void {
   globalIndex?.close();
   globalIndex = null;
+  globalIndexConfig = null;
 }
