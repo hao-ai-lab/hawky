@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { memoryGetToolDefinition, memorySearchToolDefinition } from "../src/tools/memory.js";
+import { executeMemoryAppend } from "../src/tools/memory_append.js";
 import { setWorkspaceDir } from "../src/storage/workspace.js";
 import { WorkspaceManager } from "../src/storage/workspace.js";
 import { resetGlobalMemoryIndex, getGlobalMemoryIndex } from "../src/memory/global.js";
@@ -255,6 +256,25 @@ describe("memory_search — basic matching", () => {
 
     idx.close();
     rmSync(dailyDir, { recursive: true, force: true });
+  });
+
+  test("finds text written by memory_append JSONL logs", async () => {
+    const result = await executeMemoryAppend(
+      {
+        category: "observations",
+        text: "Remember the calypso orchid needs shade after lunch.",
+        ts_iso: "2026-06-30T12:00:00.000Z",
+      },
+      makeContext(),
+    );
+    expect(result.type).toBe("text");
+
+    const search = await runMemorySearch({ query: "calypso orchid" });
+    const parsed = JSON.parse(search.content);
+
+    expect(parsed.results.length).toBeGreaterThan(0);
+    expect(parsed.results[0].path).toMatch(/^memory\/observations\/.*\.jsonl$/);
+    expect(parsed.results[0].snippet).toContain("calypso orchid");
   });
 
   test("returns path, line_number, and snippet", async () => {

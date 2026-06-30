@@ -27,6 +27,7 @@ import {
 import { mergeHybridResults, applyTemporalDecay, applyMMR, type HybridResult } from "./hybrid.js";
 import { createMemoryWatcher, type MemoryWatcher } from "./watcher.js";
 import { extractSessionText } from "./session-extract.js";
+import { extractMemoryAppendJsonlText } from "./append-jsonl-extract.js";
 import {
   type SearchResult,
   type SearchConfig,
@@ -427,9 +428,30 @@ export class MemoryIndex {
     if (file.source === "sessions") {
       return this.indexSessionFile(file);
     }
+    if (file.relPath.startsWith("memory/") && file.relPath.endsWith(".jsonl")) {
+      return this.indexMemoryAppendJsonlFile(file);
+    }
 
     const content = readFileSync(file.absPath, "utf-8");
     const chunks = chunkMarkdown(content, this.chunkConfig);
+    await this.indexChunksForFile(file, chunks);
+  }
+
+  /** Index memory.append JSONL files by extracting searchable text entries. */
+  private async indexMemoryAppendJsonlFile(file: WorkspaceFile): Promise<void> {
+    const result = extractMemoryAppendJsonlText(file.absPath);
+
+    // Track the file even if empty/malformed so unchanged files are skipped.
+    if (result.entryCount === 0) {
+      this.removeFile(file.relPath);
+      this.db.run(
+        "INSERT OR REPLACE INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
+        [file.relPath, "memory", file.hash, file.mtime, file.size],
+      );
+      return;
+    }
+
+    const chunks = chunkMarkdown(result.text, this.chunkConfig);
     await this.indexChunksForFile(file, chunks);
   }
 
@@ -603,27 +625,7 @@ export class MemoryIndex {
     // memory/ directory
     const memDir = join(wsPath, "memory");
     if (existsSync(memDir)) {
-      try {
-        for (const entry of readdirSync(memDir)) {
-          if (entry.endsWith(".md")) {
-            const absPath = join(memDir, entry);
-            try {
-              const stat = statSync(absPath);
-              if (stat.isFile()) {
-                const content = readFileSync(absPath, "utf-8");
-                files.push({
-                  relPath: `memory/${entry}`,
-                  absPath,
-                  hash: hashText(content),
-                  mtime: stat.mtimeMs,
-                  size: stat.size,
-                  source: "memory",
-                });
-              }
-            } catch { /* skip */ }
-          }
-        }
-      } catch { /* skip */ }
+      this.scanMemoryFiles(memDir, memDir, files);
     }
 
     // Session JSONL files (recent, within window)
@@ -633,6 +635,42 @@ export class MemoryIndex {
     }
 
     return files;
+  }
+
+  private scanMemoryFiles(dir: string, rootDir: string, out: WorkspaceFile[]): void {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const absPath = join(dir, entry);
+      try {
+        const stat = statSync(absPath);
+        if (stat.isDirectory()) {
+          this.scanMemoryFiles(absPath, rootDir, out);
+          continue;
+        }
+        if (!stat.isFile() || (!entry.endsWith(".md") && !entry.endsWith(".jsonl"))) {
+          continue;
+        }
+
+        const relFromRoot = absPath.slice(rootDir.length + 1);
+        const hash = entry.endsWith(".jsonl")
+          ? hashText(`${stat.mtimeMs}:${stat.size}`)
+          : hashText(readFileSync(absPath, "utf-8"));
+        out.push({
+          relPath: `memory/${relFromRoot}`,
+          absPath,
+          hash,
+          mtime: stat.mtimeMs,
+          size: stat.size,
+          source: "memory",
+        });
+      } catch { /* skip unreadable */ }
+    }
   }
 
   /**

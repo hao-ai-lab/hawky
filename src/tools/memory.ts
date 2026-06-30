@@ -11,7 +11,7 @@
 // workspace path and enforce security boundaries.
 // =============================================================================
 
-import { readdirSync, existsSync, readFileSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join, normalize, resolve } from "node:path";
 import type {
   ToolDefinition,
@@ -20,6 +20,7 @@ import type {
 } from "../agent/types.js";
 import { getWorkspaceDir } from "../storage/workspace.js";
 import { createSubsystemLogger } from "../logging/index.js";
+import { extractMemoryAppendJsonlText } from "../memory/append-jsonl-extract.js";
 
 const log = createSubsystemLogger("tools/memory");
 
@@ -320,13 +321,7 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
 
   const memoryDir = join(workspaceDir, "memory");
   if (existsSync(memoryDir)) {
-    try {
-      for (const entry of readdirSync(memoryDir)) {
-        if (entry.endsWith(".md")) {
-          filesToSearch.push({ relPath: `memory/${entry}`, fullPath: join(memoryDir, entry) });
-        }
-      }
-    } catch { /* skip */ }
+    collectSearchableMemoryFiles(memoryDir, memoryDir, filesToSearch);
   }
 
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -336,7 +331,10 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
   for (const file of filesToSearch) {
     if (matches.length >= maxResults) break;
     try {
-      const lines = readFileSync(file.fullPath, "utf-8").split("\n");
+      const content = file.relPath.endsWith(".jsonl")
+        ? extractMemoryAppendJsonlText(file.fullPath).text
+        : readFileSync(file.fullPath, "utf-8");
+      const lines = content.split("\n");
       for (let i = 0; i < lines.length && matches.length < maxResults; i++) {
         if (regex.test(lines[i])) {
           const start = Math.max(0, i - 1);
@@ -373,6 +371,35 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
     content,
     display_content: displayLines.join("\n"),
   };
+}
+
+function collectSearchableMemoryFiles(
+  dir: string,
+  rootDir: string,
+  out: Array<{ relPath: string; fullPath: string }>,
+): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    try {
+      const stat = statSync(fullPath);
+      if (stat.isDirectory()) {
+        collectSearchableMemoryFiles(fullPath, rootDir, out);
+        continue;
+      }
+      if (!stat.isFile() || (!entry.endsWith(".md") && !entry.endsWith(".jsonl"))) {
+        continue;
+      }
+      const relFromRoot = fullPath.slice(rootDir.length + 1);
+      out.push({ relPath: `memory/${relFromRoot}`, fullPath });
+    } catch { /* skip */ }
+  }
 }
 
 // -----------------------------------------------------------------------------
