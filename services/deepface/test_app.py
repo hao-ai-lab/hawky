@@ -146,6 +146,18 @@ def test_enroll_dedupes_against_existing(A):
     assert len(A.people()["people"]) == 1
 
 
+def test_enroll_rejects_path_traversal_person_id(A, tmp_path):
+    A._engine = _engine_returning(FakeFace(_unit(4)))
+    outside = tmp_path / "outside"
+
+    r = A.enroll(A.EnrollRequest(image_base64=_b64(), name="Bad", person_id="../outside"))
+
+    assert r["ok"] is False
+    assert "person_id" in r["error"]
+    assert not outside.exists()
+    assert A.people()["people"] == []
+
+
 def test_update_sets_name_facts_recap(A):
     A._engine = _engine_returning(FakeFace(_unit(4)))
     pid = A.enroll(A.EnrollRequest(image_base64=_b64(), name="Unknown"))["person"]["id"]

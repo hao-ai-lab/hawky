@@ -28,6 +28,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ from pydantic import BaseModel, Field
 DB_PATH = os.environ.get("DEEPFACE_DB", os.path.join(os.path.dirname(__file__), "facedb"))
 PROFILES_FILE = os.path.join(DB_PATH, "profiles.json")
 MODEL_PACK = os.environ.get("INSIGHTFACE_MODEL", "buffalo_l")
+PERSON_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # Cosine threshold: >= is a match. InsightFace/ArcFace separates same vs different
 # widely (same ~0.65, diff ~0.10 on the #627 set), so 0.35 is safely between.
@@ -146,6 +148,20 @@ def _save(profiles: dict[str, dict[str, Any]]) -> None:
     os.replace(tmp, PROFILES_FILE)
 
 
+def _is_valid_person_id(person_id: str) -> bool:
+    return bool(person_id) and PERSON_ID_RE.fullmatch(person_id) is not None and person_id not in {".", ".."}
+
+
+def _safe_person_dir(person_id: str) -> str | None:
+    if not _is_valid_person_id(person_id):
+        return None
+    base = os.path.abspath(DB_PATH)
+    candidate = os.path.abspath(os.path.join(base, person_id))
+    if candidate != base and candidate.startswith(base + os.sep):
+        return candidate
+    return None
+
+
 def _decode(image_base64: str):
     if "," in image_base64 and image_base64.strip().lower().startswith("data:"):
         image_base64 = image_base64.split(",", 1)[1]
@@ -162,7 +178,9 @@ def _decode(image_base64: str):
 
 
 def _thumbnail_b64(person_id: str) -> str | None:
-    person_dir = os.path.join(DB_PATH, person_id)
+    person_dir = _safe_person_dir(person_id)
+    if person_dir is None:
+        return None
     try:
         crops = sorted(f for f in os.listdir(person_dir) if f.endswith(".jpg"))
     except FileNotFoundError:
@@ -290,7 +308,9 @@ def enroll(req: EnrollRequest) -> dict[str, Any]:
                 person_id = best_id
 
         person_id = person_id or uuid.uuid4().hex
-        person_dir = os.path.join(DB_PATH, person_id)
+        person_dir = _safe_person_dir(person_id)
+        if person_dir is None:
+            return {"ok": False, "error": "invalid person_id"}
         os.makedirs(person_dir, exist_ok=True)
         cv2.imwrite(os.path.join(person_dir, f"{uuid.uuid4().hex}.jpg"), img)
 
