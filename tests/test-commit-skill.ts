@@ -44,7 +44,7 @@ describe("repo commit skill", () => {
     const result = spawnSync(rootGuard, [
       "docs(readme): test guard",
       "Body.\n\nCo-authored-by: Codex <codex@example.com>",
-    ], { cwd: repoRoot, encoding: "utf-8" });
+    ], { cwd: repoRoot, encoding: "utf-8", env: humanGitEnv });
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("COMMIT BLOCKED");

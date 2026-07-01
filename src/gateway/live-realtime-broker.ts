@@ -30,6 +30,7 @@ export type LiveRealtimeClientSecretResponse = {
 export type LiveRealtimeBrokerOptions = {
   quotaKey?: string;
   allowProviderGatewayForward?: boolean;
+  preferProviderGatewayForward?: boolean;
 };
 
 export class LiveRealtimeBrokerError extends Error {
@@ -73,6 +74,10 @@ export async function mintOpenAIRealtimeClientSecret(
 ): Promise<LiveRealtimeClientSecretResponse> {
   const cfg = loadConfig();
   const keySelection = selectRealtimeApiKey(params, cfg.api_keys?.openai);
+  if (!keySelection.byokApiKey && options.preferProviderGatewayForward && options.allowProviderGatewayForward !== false) {
+    const gatewayResponse = await mintViaProviderGateway(params, options);
+    if (gatewayResponse) return gatewayResponse;
+  }
   if (!keySelection.apiKey) {
     if (!keySelection.byokApiKey && options.allowProviderGatewayForward !== false) {
       const gatewayResponse = await mintViaProviderGateway(params, options);

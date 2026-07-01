@@ -70,7 +70,10 @@ describe("provider gateway broker forwarding", () => {
       });
     }) as typeof fetch;
 
-    const result = await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" }, { quotaKey: "user:u1" });
+    const result = await mintOpenAIRealtimeClientSecret(
+      { model: "gpt-realtime-2" },
+      { quotaKey: "user:u1", preferProviderGatewayForward: true },
+    );
 
     expect(result.ok).toBe(true);
     expect(captured.url).toBe("http://control.local/internal/provider/openai/realtime/client-secret");
