@@ -49,4 +49,19 @@ describe("repo commit skill", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("COMMIT BLOCKED");
   });
+
+  test("blocks non-conventional commit subjects", () => {
+    execFileSync(rootGuard, [
+      "fix(commit): test conventional subject",
+      "Human-only body.",
+    ], { cwd: repoRoot, env: humanGitEnv });
+
+    const result = spawnSync(rootGuard, [
+      "test guard without a type",
+      "Human-only body.",
+    ], { cwd: repoRoot, encoding: "utf-8", env: humanGitEnv });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("conventional commit format");
+  });
 });
