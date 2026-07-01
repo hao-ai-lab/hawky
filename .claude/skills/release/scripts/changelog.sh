@@ -8,7 +8,11 @@ FROM="${1:?from ref}"; TO="${2:?to ref}"
 emit() { # $1=type label, $2=conventional prefix
   local out
   out="$(git log "$FROM..$TO" --pretty='%s' | grep -E "^$2(\(.+\))?:" || true)"
-  [ -n "$out" ] && { echo "### $1"; printf '%s\n' "$out" | sed -E 's/^/- /'; echo; }
+  if [ -n "$out" ]; then
+    echo "### $1"
+    printf '%s\n' "$out" | sed -E 's/^/- /'
+    echo
+  fi
 }
 
 echo "## $TO"
