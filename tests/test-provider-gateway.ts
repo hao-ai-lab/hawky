@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { GatewayServer, resetGatewayState } from "../src/gateway/server.js";
 import { mintOpenAIRealtimeClientSecret, resetRealtimeMintQuotaForTests } from "../src/gateway/live-realtime-broker.js";
-import { resetConfig, resetConfigDir, setConfigDir } from "../src/storage/config.js";
+import { getDefaultConfig, resetConfig, resetConfigDir, saveConfig, setConfigDir } from "../src/storage/config.js";
 
 const TOKEN = "internal-provider-token-test";
 const OPENAI_KEY = "sk-control-openai-key-aaaaaaaaaaaa";
@@ -34,6 +34,15 @@ function tempConfigDir(): string {
   setConfigDir(dir);
   resetConfig();
   return dir;
+}
+
+function saveProviderKeys(keys: { openai?: string; anthropic?: string }): void {
+  const config = getDefaultConfig();
+  config.api_keys = {
+    ...config.api_keys,
+    ...keys,
+  };
+  saveConfig(config);
 }
 
 describe("provider gateway broker forwarding", () => {
@@ -134,7 +143,7 @@ describe("provider gateway internal endpoints", () => {
   });
 
   test("mints OpenAI Realtime client secrets with the control gateway key", async () => {
-    process.env.OPENAI_API_KEY = OPENAI_KEY;
+    saveProviderKeys({ openai: OPENAI_KEY });
     const captured: { authorization?: string | null } = {};
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -160,7 +169,7 @@ describe("provider gateway internal endpoints", () => {
   });
 
   test("proxies Anthropic requests while replacing the internal token with the upstream key", async () => {
-    process.env.ANTHROPIC_API_KEY = ANTHROPIC_KEY;
+    saveProviderKeys({ anthropic: ANTHROPIC_KEY });
     const captured: { url?: string; xApiKey?: string | null; authorization?: string | null } = {};
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -190,6 +199,59 @@ describe("provider gateway internal endpoints", () => {
     expect(captured.url).toBe("https://api.anthropic.com/v1/messages");
     expect(captured.xApiKey).toBe(ANTHROPIC_KEY);
     expect(captured.authorization).toBeNull();
+  });
+
+  test("proxies OpenAI requests while replacing the internal token with the upstream key", async () => {
+    saveProviderKeys({ openai: OPENAI_KEY });
+    process.env.HAWKY_PROVIDER_BUDGET_STORE = join(configDir, "state", "provider-budget.json");
+    const captured: {
+      url?: string;
+      authorization?: string | null;
+      idempotencyKey?: string | null;
+      safetyIdentifier?: string | null;
+      xApiKey?: string | null;
+      body?: unknown;
+    } = {};
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("api.openai.com")) {
+        const headers = new Headers(init?.headers);
+        captured.url = url;
+        captured.authorization = headers.get("Authorization");
+        captured.idempotencyKey = headers.get("idempotency-key");
+        captured.safetyIdentifier = headers.get("openai-safety-identifier");
+        captured.xApiKey = headers.get("x-api-key");
+        const text = init?.body ? await new Response(init.body as BodyInit).text() : "{}";
+        captured.body = JSON.parse(text);
+        return Response.json({ id: "chatcmpl_test", choices: [] }, {
+          headers: { "Content-Type": "application/json", "x-request-id": "req_test" },
+        });
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    const res = await fetch(`http://localhost:${port}/internal/provider/openai/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+        "idempotency-key": "idem_test",
+        "openai-safety-identifier": "hawky-test",
+        "X-Hawky-Provider-Subject": "user:mikey",
+      },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.id).toBe("chatcmpl_test");
+    expect(captured.url).toBe("https://api.openai.com/v1/chat/completions");
+    expect(captured.authorization).toBe(`Bearer ${OPENAI_KEY}`);
+    expect(captured.idempotencyKey).toBe("idem_test");
+    expect(captured.safetyIdentifier).toBe("hawky-test");
+    expect(captured.xApiKey).toBeNull();
+    expect(captured.body).toEqual({ model: "gpt-test", messages: [] });
+    expect(res.headers.get("x-request-id")).toBe("req_test");
   });
 
   test("canary consumes budget without making an upstream call by default", async () => {

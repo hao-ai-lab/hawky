@@ -9,7 +9,8 @@
 import type { GatewayServer } from "./server.js";
 import type { HeartbeatService } from "./heartbeat.js";
 import type { AgentSessionManager } from "./agent-sessions.js";
-import { loadConfig, updateConfig, resetConfig, DEFAULT_CONFIG } from "../storage/config.js";
+import { loadConfig, updateConfig, resetConfig, DEFAULT_CONFIG, saveConfig } from "../storage/config.js";
+import { normalizeProviderModels } from "../agent/model-compat.js";
 import { MethodError } from "./methods.js";
 
 // Fields that are NEVER exposed or settable via the web panel
@@ -282,7 +283,11 @@ export function registerConfigMethods(
       return { ok: true, config: sanitizeConfig(loadConfig()) };
     }
 
-    updateConfig(updates);
+    const updated = updateConfig(updates);
+    const normalized = normalizeProviderModels(updated);
+    if (JSON.stringify(normalized) !== JSON.stringify(updated)) {
+      saveConfig(normalized);
+    }
     resetConfig(); // Clear cache so next loadConfig() reads the new file
     const refreshed = loadConfig();
 

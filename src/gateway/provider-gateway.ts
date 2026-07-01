@@ -10,12 +10,14 @@ import {
 } from "./live-realtime-broker.js";
 
 const INTERNAL_OPENAI_REALTIME_PATH = "/internal/provider/openai/realtime/client-secret";
+const INTERNAL_OPENAI_PREFIX = "/internal/provider/openai";
 const INTERNAL_ANTHROPIC_PREFIX = "/internal/provider/anthropic";
 const INTERNAL_CANARY_PATH = "/internal/provider/canary";
 
 export function isProviderGatewayPath(pathname: string): boolean {
   return pathname === INTERNAL_OPENAI_REALTIME_PATH
     || pathname === INTERNAL_CANARY_PATH
+    || pathname.startsWith(`${INTERNAL_OPENAI_PREFIX}/v1/`)
     || pathname.startsWith(`${INTERNAL_ANTHROPIC_PREFIX}/`);
 }
 
@@ -30,6 +32,10 @@ export async function handleProviderGatewayRequest(req: Request, url: URL): Prom
 
   if (url.pathname === INTERNAL_CANARY_PATH && (req.method === "GET" || req.method === "POST")) {
     return handleProviderCanary(req, url);
+  }
+
+  if (url.pathname.startsWith(`${INTERNAL_OPENAI_PREFIX}/`)) {
+    return proxyOpenAI(req, url);
   }
 
   if (url.pathname.startsWith(`${INTERNAL_ANTHROPIC_PREFIX}/`)) {
@@ -78,6 +84,46 @@ async function handleOpenAIRealtimeMint(req: Request): Promise<Response> {
       : err instanceof ProviderBudgetExceededError
         ? err.status
         : 500;
+    return Response.json({ ok: false, error: message }, { status });
+  }
+}
+
+async function proxyOpenAI(req: Request, url: URL): Promise<Response> {
+  try {
+    const cfg = loadConfig();
+    const apiKey = process.env.OPENAI_API_KEY || cfg.api_keys?.openai || "";
+    if (!apiKey) {
+      return Response.json({ ok: false, error: "OpenAI provider key is not configured on the control gateway" }, { status: 503 });
+    }
+
+    const upstreamPath = url.pathname.slice(INTERNAL_OPENAI_PREFIX.length) || "/";
+    if (!upstreamPath.startsWith("/v1/")) {
+      return Response.json({ ok: false, error: "OpenAI proxy only allows /v1 routes" }, { status: 404 });
+    }
+    const subject = sanitizeProviderSubject(req.headers.get("X-Hawky-Provider-Subject") ?? "");
+    consumeProviderBudget({
+      provider: "openai",
+      subject,
+      units: estimateOpenAIUnits(req),
+    });
+
+    const target = new URL(`${openAIUpstreamBaseURL()}${upstreamPath}${url.search}`);
+    const headers = buildOpenAIUpstreamHeaders(req.headers, apiKey);
+    const upstream = await fetch(target, {
+      method: req.method,
+      headers,
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+      signal: req.signal,
+    });
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: filterUpstreamResponseHeaders(upstream.headers),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = err instanceof ProviderBudgetExceededError ? err.status : 500;
     return Response.json({ ok: false, error: message }, { status });
   }
 }
@@ -148,7 +194,7 @@ async function handleProviderCanary(req: Request, url: URL): Promise<Response> {
       const cfg = loadConfig();
       const apiKey = process.env.OPENAI_API_KEY || cfg.api_keys?.openai || "";
       if (!apiKey) return Response.json({ ok: false, error: "OpenAI provider key is not configured on the control gateway" }, { status: 503 });
-      const upstream = await fetch("https://api.openai.com/v1/models", {
+      const upstream = await fetch(`${openAIUpstreamBaseURL()}/v1/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
       });
       return Response.json({ ok: upstream.ok, provider, subject, live: true, upstream_status: upstream.status, provider_budget: budget }, { status: upstream.ok ? 200 : 502 });
@@ -178,6 +224,28 @@ async function handleProviderCanary(req: Request, url: URL): Promise<Response> {
   }
 }
 
+function buildOpenAIUpstreamHeaders(input: Headers, apiKey: string): Headers {
+  const headers = new Headers();
+  for (const name of [
+    "accept",
+    "content-type",
+    "idempotency-key",
+    "openai-beta",
+    "openai-organization",
+    "openai-project",
+    "openai-safety-identifier",
+  ]) {
+    const value = input.get(name);
+    if (value) headers.set(name, value);
+  }
+  headers.set("Authorization", `Bearer ${apiKey}`);
+  return headers;
+}
+
+function openAIUpstreamBaseURL(): string {
+  return (process.env.HAWKY_OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/, "");
+}
+
 function buildAnthropicUpstreamHeaders(input: Headers, apiKey: string): Headers {
   const headers = new Headers();
   for (const name of ["accept", "anthropic-beta", "anthropic-version", "content-type"]) {
@@ -190,7 +258,7 @@ function buildAnthropicUpstreamHeaders(input: Headers, apiKey: string): Headers 
 
 function filterUpstreamResponseHeaders(input: Headers): Headers {
   const headers = new Headers();
-  for (const name of ["cache-control", "content-type", "request-id"]) {
+  for (const name of ["cache-control", "content-type", "request-id", "x-request-id"]) {
     const value = input.get(name);
     if (value) headers.set(name, value);
   }
@@ -256,6 +324,16 @@ function consumeProviderBudget(use: ProviderBudgetUse): { subject: string; provi
 
 function estimateAnthropicUnits(req: Request): number {
   const configured = envFloat("HAWKY_PROVIDER_ANTHROPIC_REQUEST_UNITS", Number.NaN);
+  if (Number.isFinite(configured)) return configured;
+  const maxTokens = Number(req.headers.get("X-Hawky-Estimated-Max-Tokens") || "");
+  if (Number.isFinite(maxTokens) && maxTokens > 0) {
+    return Math.max(1, Math.ceil(maxTokens / 10_000));
+  }
+  return 1;
+}
+
+function estimateOpenAIUnits(req: Request): number {
+  const configured = envFloat("HAWKY_PROVIDER_OPENAI_REQUEST_UNITS", Number.NaN);
   if (Number.isFinite(configured)) return configured;
   const maxTokens = Number(req.headers.get("X-Hawky-Estimated-Max-Tokens") || "");
   if (Number.isFinite(maxTokens) && maxTokens > 0) {

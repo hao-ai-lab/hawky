@@ -84,6 +84,46 @@ describe("SettingsPanel heartbeat model dropdown", () => {
       expect(screen.queryByText(/\(custom\)/)).not.toBeInTheDocument();
     });
   });
+
+  it("shows OpenAI heartbeat options when OpenAI is the active provider", async () => {
+    mockRpc({
+      provider: "openai",
+      model: "gpt-5.5",
+      has_openai_key: true,
+      heartbeat: { ...baseConfig().heartbeat, model: null },
+    });
+    render(<SettingsPanel />);
+
+    await waitFor(() => {
+      const heartbeatSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+      expect(heartbeatSelect.querySelector("option[value='gpt-5.5']")).toBeTruthy();
+      expect(heartbeatSelect.querySelector("option[value='claude-sonnet-4-6']")).toBeFalsy();
+    });
+  });
+
+  it("sends heartbeat.model null when Same as default is selected", async () => {
+    const rpc = mockRpc({
+      provider: "openai",
+      model: "gpt-5.5",
+      has_openai_key: true,
+      heartbeat: { ...baseConfig().heartbeat, model: "gpt-5.4-mini" },
+    });
+    render(<SettingsPanel />);
+
+    const heartbeatSelect = await waitFor(() => screen.getAllByRole("combobox")[1] as HTMLSelectElement);
+    fireEvent.change(heartbeatSelect, { target: { value: "" } });
+    const saveBtn = await waitFor(() => screen.getByRole("button", { name: /save/i }));
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const calls = (rpc.mock.calls as [string, ...unknown[]][]);
+      const updateCall = calls.find((c) => c[0] === "config.update");
+      expect(updateCall).toBeDefined();
+      expect(updateCall![1]).toMatchObject({
+        heartbeat: { model: null },
+      });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -235,6 +275,45 @@ describe("SettingsPanel unified model dropdown", () => {
       expect(swapCall![1]).toMatchObject({ provider: "openai", model: "gpt-5.5" });
       const updateCall = calls.find((c) => c[0] === "config.update");
       expect(updateCall).toBeUndefined();
+    });
+  });
+
+  it("clears compatible heartbeat model when switching to direct OpenAI", async () => {
+    const rpc = mockRpc({
+      has_openai_key: true,
+      provider: "openai_compatible",
+      model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+      heartbeat: { ...baseConfig().heartbeat, model: "Qwen/Qwen3-Omni-30B-A3B-Instruct" },
+      openai_compatible: {
+        active_profile: "runpod",
+        profile_names: ["runpod"],
+        profiles: {
+          runpod: {
+            model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            base_url: "http://localhost:8000/v1",
+          },
+        },
+      },
+    });
+    render(<SettingsPanel />);
+
+    const select = await waitFor(() => screen.getAllByRole("combobox")[0]);
+    await waitFor(() => {
+      expect((select as HTMLSelectElement).querySelector("option[value='gpt-5.5']")).toBeTruthy();
+    });
+    fireEvent.change(select, { target: { value: "gpt-5.5" } });
+
+    const saveBtn = await waitFor(() => screen.getByRole("button", { name: /save/i }));
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      const calls = (rpc.mock.calls as [string, ...unknown[]][]);
+      const swapCall = calls.find((c) => c[0] === "gateway.swapProvider");
+      expect(swapCall).toBeDefined();
+      expect(swapCall![1]).toMatchObject({ provider: "openai", model: "gpt-5.5" });
+      const updateCall = calls.find((c) => c[0] === "config.update");
+      expect(updateCall).toBeDefined();
+      expect(updateCall![1]).toMatchObject({ heartbeat: { model: null } });
     });
   });
 

@@ -86,6 +86,14 @@ function modelOptionLabel(model: string): string {
   return OPENAI_MODEL_LABELS[model] ?? model;
 }
 
+function isClaudeModel(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("claude");
+}
+
+function isOpenAIModel(model: string): boolean {
+  return /^(gpt|o[1-9])(?:[-.]|$)/i.test(model.trim());
+}
+
 // -----------------------------------------------------------------------------
 // Sub-components
 // -----------------------------------------------------------------------------
@@ -441,6 +449,34 @@ export function SettingsPanel({
     return current;
   }
 
+  const effectiveProvider = pendingProvider ?? provider;
+  const effectiveCompatProfile = pendingProvider === "openai_compatible"
+    ? pendingCompatProfile
+    : activeCompatProfile;
+
+  function heartbeatModelsForProvider(targetProvider: string): string[] {
+    if (targetProvider === "openai") return gptModels;
+    if (targetProvider === "openai_compatible") {
+      const profileModel = effectiveCompatProfile ? compatProfiles[effectiveCompatProfile]?.model : "";
+      return profileModel ? [profileModel] : [];
+    }
+    return claudeModels;
+  }
+
+  function normalizeHeartbeatModelForProvider(
+    heartbeatModel: string,
+    targetProvider: string,
+    targetModel: string,
+  ): string {
+    if (!heartbeatModel) return "";
+    if (targetProvider === "openai" && !isOpenAIModel(heartbeatModel)) return "";
+    if ((targetProvider === "anthropic" || targetProvider === "vertex") && !isClaudeModel(heartbeatModel)) return "";
+    if (targetProvider === "openai_compatible" && isClaudeModel(heartbeatModel)) {
+      return heartbeatModelsForProvider(targetProvider)[0] ?? targetModel;
+    }
+    return heartbeatModel;
+  }
+
   const handleSave = async () => {
     if (!draft || !saved) return;
     setSaving(true);
@@ -450,6 +486,11 @@ export function SettingsPanel({
       const modelChanged = draft.model !== saved.model;
       const baseUrlChanged = draft.openaiBaseUrl !== saved.openaiBaseUrl;
       const targetProvider = pendingProvider ?? (modelChanged ? inferProviderFromModel(draft.model, provider) : provider);
+      const heartbeatModel = normalizeHeartbeatModelForProvider(
+        draft.heartbeatModel,
+        targetProvider,
+        draft.model,
+      );
       const compatProfileChanged =
         targetProvider === "openai_compatible" &&
         Boolean(pendingCompatProfile) &&
@@ -499,14 +540,14 @@ export function SettingsPanel({
 
       if (draft.heartbeatEnabled !== saved.heartbeatEnabled ||
           draft.heartbeatInterval !== saved.heartbeatInterval ||
-          draft.heartbeatModel !== saved.heartbeatModel ||
+          heartbeatModel !== saved.heartbeatModel ||
           draft.activeHoursStart !== saved.activeHoursStart ||
           draft.activeHoursEnd !== saved.activeHoursEnd ||
           draft.consolidationEnabled !== saved.consolidationEnabled) {
         updates.heartbeat = {
           enabled: draft.heartbeatEnabled,
           interval_minutes: draft.heartbeatInterval,
-          ...(draft.heartbeatModel ? { model: draft.heartbeatModel } : {}),
+          model: heartbeatModel || null,
           active_hours: { start: draft.activeHoursStart, end: draft.activeHoursEnd },
           consolidation_enabled: draft.consolidationEnabled,
         };
@@ -524,7 +565,8 @@ export function SettingsPanel({
         await rpc("config.update", updates);
       }
 
-      setSaved({ ...draft });
+      setSaved({ ...draft, heartbeatModel });
+      setDraft({ ...draft, heartbeatModel });
       setGlobalAgentRuntimesEnabled(draft.agentRuntimesEnabled);
       setPendingProvider(null);
       setPendingCompatProfile(null);
@@ -576,15 +618,23 @@ export function SettingsPanel({
                         const profileName = v.slice("compat:".length);
                         const prof = compatProfiles[profileName];
                         if (!prof?.model) return;
-                        update("model", prof.model);
+                        setDraft((prev) => prev ? {
+                          ...prev,
+                          model: prof.model,
+                          heartbeatModel: normalizeHeartbeatModelForProvider(prev.heartbeatModel, "openai_compatible", prof.model),
+                        } : prev);
                         setPendingProvider("openai_compatible");
                         setPendingCompatProfile(profileName);
                       } else {
-                        update("model", v);
                         // Anthropic / vertex / openai — clear compat pending and
                         // record the inferred provider so the visible dropdown
                         // value flips immediately (without waiting for Save).
                         const inferred = inferProviderFromModel(v, provider);
+                        setDraft((prev) => prev ? {
+                          ...prev,
+                          model: v,
+                          heartbeatModel: normalizeHeartbeatModelForProvider(prev.heartbeatModel, inferred, v),
+                        } : prev);
                         setPendingProvider(inferred !== provider ? inferred : provider);
                         setPendingCompatProfile(null);
                       }
@@ -664,14 +714,14 @@ export function SettingsPanel({
                       className="rounded-md border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 px-2 py-1 text-sm text-stone-700 dark:text-stone-300 focus:outline-none focus:border-stone-400 dark:focus:border-stone-500"
                     >
                       <option value="">Same as default</option>
-                      {CLAUDE_MODELS.map((m) => (
+                      {heartbeatModelsForProvider(effectiveProvider).map((m) => (
                         <option key={m} value={m}>{m}</option>
                       ))}
                       {/* Custom-value fallback: preserve a user's existing
                           heartbeat.model (e.g. a deprecated 4-5 variant) so
                           their saved config still renders after upgrade. */}
                       {draft.heartbeatModel &&
-                        !CLAUDE_MODELS.includes(draft.heartbeatModel) && (
+                        !heartbeatModelsForProvider(effectiveProvider).includes(draft.heartbeatModel) && (
                           <option value={draft.heartbeatModel}>
                             {draft.heartbeatModel} (custom)
                           </option>

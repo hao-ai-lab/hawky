@@ -27,6 +27,7 @@ import { getBackgroundAgentStates } from "../tools/agent.js";
 import type { HeartbeatService } from "./heartbeat.js";
 import { ExternalAgentRuntime } from "./external-agent-runtime.js";
 import type { SessionRuntimeKind } from "../storage/session.js";
+import { normalizeProviderModels } from "../agent/model-compat.js";
 
 const log = createSubsystemLogger("gateway/sessions");
 const VALID_PROVIDERS = new Set(["anthropic", "vertex", "openai", "openai_compatible"]);
@@ -130,20 +131,22 @@ export class AgentSessionManager {
       } else if (spec.active_profile) {
         candidate.openai_compatible = { active_profile: spec.active_profile, profiles: {} };
       }
+      const normalizedCandidate = normalizeProviderModels(candidate);
 
       // Validate — throws if config is bad (e.g. unknown profile, missing key)
       let newProvider: LLMProvider;
       try {
-        newProvider = createProvider(candidate);
+        newProvider = createProvider(normalizedCandidate);
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
 
       // Persist
-      const updates: Record<string, unknown> = { provider: spec.provider };
-      if (spec.model !== undefined) {
-        updates.model = spec.model;
-      }
+      const updates: Record<string, unknown> = {
+        provider: spec.provider,
+        model: normalizedCandidate.model,
+        heartbeat: { model: normalizedCandidate.heartbeat.model ?? null },
+      };
       if (spec.openai_base_url !== undefined) {
         updates.openai_base_url = spec.openai_base_url;
       }

@@ -8,7 +8,8 @@
 
 import { createInterface } from "node:readline";
 import { validateAnthropicKey, validateOpenAIKey } from "./config-validators.js";
-import { updateConfig } from "./config.js";
+import { saveConfig, updateConfig } from "./config.js";
+import { normalizeProviderModels } from "../agent/model-compat.js";
 
 // -----------------------------------------------------------------------------
 // Masked input helper
@@ -172,7 +173,7 @@ export async function promptForOpenAIKey(): Promise<void> {
 
     if (result.valid) {
       console.log("valid!\n");
-      updateConfig({ provider: "openai", api_keys: { openai: apiKey } });
+      saveConfig(normalizeProviderModels(updateConfig({ provider: "openai", api_keys: { openai: apiKey } })));
       console.log("  Saved to ~/.hawky/config.json\n");
       return;
     }
@@ -184,7 +185,7 @@ export async function promptForOpenAIKey(): Promise<void> {
 
     // Network/timeout — soft warning, accept and continue
     console.log(`  Warning: could not validate key (${result.error}). Saving anyway.\n`);
-    updateConfig({ provider: "openai", api_keys: { openai: apiKey } });
+    saveConfig(normalizeProviderModels(updateConfig({ provider: "openai", api_keys: { openai: apiKey } })));
     console.log("  Saved to ~/.hawky/config.json\n");
     return;
   }

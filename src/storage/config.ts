@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { HawkyConfig } from "../agent/types.js";
+import { normalizeProviderModels } from "../agent/model-compat.js";
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -149,16 +150,28 @@ const ENV_MAPPINGS: EnvMapping[] = [
 // Deep merge utility
 // -----------------------------------------------------------------------------
 
+const NULLABLE_CONFIG_PATHS = new Set([
+  "effort",
+  "heartbeat.model",
+]);
+
 function deepMerge(
   defaults: Record<string, unknown>,
   overrides: Record<string, unknown>,
+  path: string[] = [],
 ): Record<string, unknown> {
   const result = cloneConfigValue(defaults) as Record<string, unknown>;
   for (const key of Object.keys(overrides)) {
     const val = overrides[key];
     const def = defaults[key];
+    const childPath = [...path, key];
+    if (val === null) {
+      if (NULLABLE_CONFIG_PATHS.has(childPath.join("."))) {
+        result[key] = null;
+      }
+      continue;
+    }
     if (
-      val !== null &&
       val !== undefined &&
       typeof val === "object" &&
       !Array.isArray(val) &&
@@ -170,6 +183,7 @@ function deepMerge(
       result[key] = deepMerge(
         def as Record<string, unknown>,
         val as Record<string, unknown>,
+        childPath,
       );
     } else if (val !== undefined && val !== null) {
       result[key] = val;
@@ -310,9 +324,9 @@ export function loadConfig(configPath?: string): HawkyConfig {
     }
   }
 
-  cachedConfig = config;
+  cachedConfig = normalizeProviderModels(config);
   cachedConfigPath = filePath;
-  return config;
+  return cachedConfig;
 }
 
 /**
