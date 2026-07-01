@@ -108,14 +108,33 @@ export class LoopGuard {
 // -----------------------------------------------------------------------------
 
 function hashInput(input: Record<string, unknown>): string {
-  // Simple deterministic hash of the input JSON
-  const json = JSON.stringify(input, Object.keys(input).sort());
+  const json = stableStringify(input);
   let hash = 0;
   for (let i = 0; i < json.length; i++) {
     const char = json.charCodeAt(i);
     hash = ((hash << 5) - hash + char) | 0;
   }
   return hash.toString(36);
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
+  }
+  return sorted;
 }
 
 // Export for testing

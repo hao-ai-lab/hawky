@@ -102,6 +102,16 @@ describe("Tool loop detection", () => {
     }
   });
 
+  test("different nested inputs for same tool dont trigger loop", () => {
+    const guard = new LoopGuard(100);
+    for (let i = 0; i < BLOCK_THRESHOLD + 1; i++) {
+      const result = guard.recordToolCall("nodes", {
+        params: { command: ["run", String(i)] },
+      });
+      expect(result.ok).toBe(true);
+    }
+  });
+
   test("warns at WARN_THRESHOLD identical calls", () => {
     const guard = new LoopGuard(100);
     let lastResult: any;
@@ -184,6 +194,24 @@ describe("hashInput", () => {
     const a = _hashInput({ a: 1, b: 2 });
     const b = _hashInput({ b: 2, a: 1 });
     expect(a).toBe(b);
+  });
+
+  test("nested key order doesn't matter", () => {
+    const a = _hashInput({
+      params: { cwd: "/tmp/a", command: ["bun", "test"] },
+      target: "node-a",
+    });
+    const b = _hashInput({
+      target: "node-a",
+      params: { command: ["bun", "test"], cwd: "/tmp/a" },
+    });
+    expect(a).toBe(b);
+  });
+
+  test("nested input values affect hash", () => {
+    const a = _hashInput({ params: { command: ["run", "one"] } });
+    const b = _hashInput({ params: { command: ["run", "two"] } });
+    expect(a).not.toBe(b);
   });
 
   test("empty input has consistent hash", () => {
