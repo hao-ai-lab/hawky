@@ -1955,6 +1955,37 @@ describe("unread persistence (localStorage)", () => {
     expect(parsed.hasUnread["web:other"]).toBe(true);
   });
 
+  it("writes to localStorage and updates the OS badge when a background user.message arrives", () => {
+    const setAppBadgeMock = vi.fn();
+    const clearAppBadgeMock = vi.fn();
+    (globalThis as any).navigator.setAppBadge = setAppBadgeMock;
+    (globalThis as any).navigator.clearAppBadge = clearAppBadgeMock;
+
+    useSessionStore.setState({
+      activeKey: "web:general",
+      sessionCache: {},
+      unreadCounts: { "web:existing": 2 },
+      hasUnread: {},
+    });
+
+    useSessionStore.getState().handleEvent({
+      type: "event",
+      event: "user.message",
+      payload: {
+        _sessionKey: "web:other",
+        text: "from phone",
+        timestamp: "2026-04-22T00:00:00.000Z",
+      },
+    });
+
+    const parsed = JSON.parse(globalThis.localStorage.getItem("hawky:unread")!);
+    expect(parsed.counts["web:other"]).toBe(1);
+    expect(parsed.counts["web:existing"]).toBe(2);
+    expect(parsed.hasUnread["web:other"]).toBe(true);
+    expect(setAppBadgeMock).toHaveBeenLastCalledWith(3);
+    expect(useSessionStore.getState().sessionCache["web:other"]?.messages[0]?.content).toBe("from phone");
+  });
+
   it("writes the -1 sentinel when a background permission request lands", () => {
     useSessionStore.getState().handleEvent({
       type: "event",

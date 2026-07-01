@@ -2154,6 +2154,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             },
           },
         }));
+        persistUnread(get());
+        applyAppBadge(newCounts);
         return;
       }
 
