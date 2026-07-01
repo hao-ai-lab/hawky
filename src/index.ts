@@ -994,7 +994,12 @@ async function main() {
       registerPromptMethods(gateway);
 
       // Register provider.listModels (returns OpenAI catalog from probe or fallback).
-      const { getCachedCatalog: getOpenaiCatalog, KNOWN_OPENAI_MODELS, probeCatalogAsync } = await import("./agent/openai-models.js");
+      const {
+        getCachedCatalog: getOpenaiCatalog,
+        KNOWN_OPENAI_MODELS,
+        probeCatalogAsync,
+        resolveOpenAIModelCatalogProbe,
+      } = await import("./agent/openai-models.js");
       gateway.registerMethod("provider.listModels", () => {
         const probed = getOpenaiCatalog();
         if (probed) {
@@ -1008,9 +1013,9 @@ async function main() {
           source: "fallback" as const,
         };
       });
-      if (gwConfig.provider === "openai") {
-        const apiKey = process.env.OPENAI_API_KEY || gwConfig.api_keys?.openai;
-        if (apiKey) probeCatalogAsync(apiKey);
+      const catalogProbe = resolveOpenAIModelCatalogProbe(gwConfig);
+      if (catalogProbe) {
+        probeCatalogAsync(catalogProbe.apiKey, { baseURL: catalogProbe.baseURL });
       }
 
       // Register media RPC methods (media.chunk.upload — M0 Slice 0)
