@@ -4,6 +4,7 @@
 # Usage: changelog.sh <from-ref> <to-ref>
 set -euo pipefail
 FROM="${1:?from ref}"; TO="${2:?to ref}"
+AI_BOT='claude|codex|anthropic|copilot|github-actions|dependabot|\[bot\]|(^|[^a-z])bot([^a-z]|$)'
 
 emit() { # $1=type label, $2=conventional prefix
   local out
@@ -25,8 +26,18 @@ emit "Refactors"     "refactor"
 emit "Tests"         "test"
 
 echo "### Contributors"
-git log "$FROM..$TO" --pretty='%an <%ae>' \
-  | cat - <(git log "$FROM..$TO" --pretty=%B | sed -nE 's/^Co-authored-by:[[:space:]]*//Ip') \
+contributors="$(
+  {
+    git log "$FROM..$TO" --pretty='%an <%ae>'
+    git log "$FROM..$TO" --pretty=%B | sed -nE 's/^Co-authored-by:[[:space:]]*//Ip'
+  } \
   | sort -u \
-  | grep -ivE 'claude|codex|anthropic|copilot|github-actions|dependabot|\[bot\]|(^|[^a-z])bot([^a-z]|$)' \
-  | sed -E 's/^/- /'
+  | grep -ivE "$AI_BOT" \
+  || true
+)"
+
+if [ -n "$contributors" ]; then
+  printf '%s\n' "$contributors" | sed -E 's/^/- /'
+else
+  echo "- None"
+fi
