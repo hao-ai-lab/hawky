@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -212,6 +212,83 @@ describe("WorkspaceManager.writeFile()", () => {
 
     ws.writeFile("memory/2026-03-14.md", "# 2026-03-14\nToday's log");
     expect(existsSync(join(wsDir, "memory", "2026-03-14.md"))).toBe(true);
+  });
+});
+
+// =============================================================================
+// Path containment
+// =============================================================================
+
+describe("WorkspaceManager path containment", () => {
+  test("readFile rejects traversal outside the workspace", () => {
+    const wsDir = join(tempDir, "workspace");
+    const outside = join(tempDir, "outside.md");
+    writeFileSync(outside, "outside", "utf-8");
+
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+
+    expect(() => ws.readFile("../outside.md")).toThrow("escapes workspace");
+  });
+
+  test("writeFile rejects traversal outside the workspace", () => {
+    const wsDir = join(tempDir, "workspace");
+    const outside = join(tempDir, "outside.md");
+
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+
+    expect(() => ws.writeFile("../outside.md", "hacked")).toThrow("escapes workspace");
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  test("absolute paths are rejected", () => {
+    const wsDir = join(tempDir, "workspace");
+    const outside = join(tempDir, "outside.md");
+
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+
+    expect(() => ws.writeFile(outside, "hacked")).toThrow("escapes workspace");
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  test("exists and deleteFile reject traversal outside the workspace", () => {
+    const wsDir = join(tempDir, "workspace");
+    const outside = join(tempDir, "outside.md");
+    writeFileSync(outside, "outside", "utf-8");
+
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+
+    expect(() => ws.exists("../outside.md")).toThrow("escapes workspace");
+    expect(() => ws.deleteFile("../outside.md")).toThrow("escapes workspace");
+    expect(readFileSync(outside, "utf-8")).toBe("outside");
+  });
+
+  test("readFile rejects a symlink that points outside the workspace", () => {
+    const wsDir = join(tempDir, "workspace");
+    const outside = join(tempDir, "outside.md");
+    writeFileSync(outside, "outside", "utf-8");
+
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+    symlinkSync(outside, join(wsDir, "linked.md"));
+
+    expect(() => ws.readFile("linked.md")).toThrow("escapes workspace");
+  });
+
+  test("writeFile rejects parent symlinks that point outside the workspace", () => {
+    const wsDir = join(tempDir, "workspace");
+    const outsideDir = join(tempDir, "outside-dir");
+    mkdirSync(outsideDir, { recursive: true });
+
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+    symlinkSync(outsideDir, join(wsDir, "linked-dir"), "dir");
+
+    expect(() => ws.writeFile("linked-dir/evil.md", "hacked")).toThrow("escapes workspace");
+    expect(existsSync(join(outsideDir, "evil.md"))).toBe(false);
   });
 });
 

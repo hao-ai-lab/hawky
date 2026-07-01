@@ -10,9 +10,9 @@
 // Existing files are NEVER overwritten (idempotent init).
 // =============================================================================
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // -----------------------------------------------------------------------------
@@ -97,6 +97,58 @@ export class WorkspaceManager {
     return join(this.dir, "memory");
   }
 
+  private resolveWorkspacePath(filename: string): string {
+    const root = resolve(this.dir);
+    const filePath = resolve(root, filename);
+    this.assertInsideWorkspace(root, filePath, filename);
+
+    return filePath;
+  }
+
+  private resolveReadableWorkspacePath(filename: string): string {
+    const filePath = this.resolveWorkspacePath(filename);
+    if (existsSync(filePath)) {
+      this.assertRealPathInsideWorkspace(filePath, filename);
+    }
+    return filePath;
+  }
+
+  private prepareWritableWorkspacePath(filename: string): string {
+    const filePath = this.resolveWorkspacePath(filename);
+    const parentDir = dirname(filePath);
+    if (existsSync(this.dir)) {
+      this.assertNearestExistingParentInsideWorkspace(parentDir, filename);
+    }
+    if (!existsSync(parentDir)) {
+      mkdirSync(parentDir, { recursive: true });
+    }
+    this.assertRealPathInsideWorkspace(parentDir, filename);
+    return filePath;
+  }
+
+  private assertNearestExistingParentInsideWorkspace(parentDir: string, filename: string): void {
+    let cursor = parentDir;
+    while (!existsSync(cursor)) {
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+    this.assertRealPathInsideWorkspace(cursor, filename);
+  }
+
+  private assertRealPathInsideWorkspace(path: string, filename: string): void {
+    const root = existsSync(this.dir) ? realpathSync(this.dir) : resolve(this.dir);
+    this.assertInsideWorkspace(root, realpathSync(path), filename);
+  }
+
+  private assertInsideWorkspace(root: string, filePath: string, filename: string): void {
+    const rel = relative(root, filePath);
+
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`Workspace path escapes workspace: ${filename}`);
+    }
+  }
+
   /**
    * Initialize the workspace. Copies templates for missing files.
    * Creates the workspace and memory directories if needed.
@@ -158,7 +210,7 @@ export class WorkspaceManager {
    * @returns File content, or null if the file doesn't exist
    */
   readFile(filename: string): string | null {
-    const filePath = join(this.dir, filename);
+    const filePath = this.resolveReadableWorkspacePath(filename);
     if (!existsSync(filePath)) return null;
     return readFileSync(filePath, "utf-8");
   }
@@ -169,11 +221,7 @@ export class WorkspaceManager {
    * @param content - File content
    */
   writeFile(filename: string, content: string): void {
-    const filePath = join(this.dir, filename);
-    const parentDir = dirname(filePath);
-    if (!existsSync(parentDir)) {
-      mkdirSync(parentDir, { recursive: true });
-    }
+    const filePath = this.prepareWritableWorkspacePath(filename);
     writeFileSync(filePath, content, "utf-8");
   }
 
@@ -187,13 +235,7 @@ export class WorkspaceManager {
     const d = date ?? new Date();
     const dateStr = formatDate(d);
     const filename = `memory/${dateStr}.md`;
-    const filePath = join(this.dir, filename);
-
-    // Ensure memory/ directory exists
-    const memoryDir = this.getMemoryDir();
-    if (!existsSync(memoryDir)) {
-      mkdirSync(memoryDir, { recursive: true });
-    }
+    const filePath = this.prepareWritableWorkspacePath(filename);
 
     // Format: [HH:MM] content
     const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -212,7 +254,7 @@ export class WorkspaceManager {
    * @param filename - File name or relative path
    */
   exists(filename: string): boolean {
-    return existsSync(join(this.dir, filename));
+    return existsSync(this.resolveReadableWorkspacePath(filename));
   }
 
   /**
@@ -221,7 +263,7 @@ export class WorkspaceManager {
    * @returns true if file was deleted, false if it didn't exist
    */
   deleteFile(filename: string): boolean {
-    const filePath = join(this.dir, filename);
+    const filePath = this.resolveReadableWorkspacePath(filename);
     if (!existsSync(filePath)) return false;
     unlinkSync(filePath);
     return true;
@@ -232,7 +274,7 @@ export class WorkspaceManager {
    * @returns Sorted array of filenames (e.g., ["2026-03-12.md", "2026-03-13.md", "2026-03-14.md"])
    */
   listDailyLogs(): string[] {
-    const memoryDir = this.getMemoryDir();
+    const memoryDir = this.resolveReadableWorkspacePath("memory");
     if (!existsSync(memoryDir)) return [];
 
     const datePattern = /^\d{4}-\d{2}-\d{2}\.md$/;
