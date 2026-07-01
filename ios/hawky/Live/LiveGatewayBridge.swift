@@ -25,6 +25,45 @@ struct LiveGatewayBridgeResponse {
     var error: String? = nil
 }
 
+struct LiveGatewayToolInvokeResult: Equatable {
+    var ok: Bool
+    var type: String?
+    var content: String?
+    var metadata: [String: JSONValue]
+    var hasMetadata: Bool
+    var error: String?
+
+    init?(payload: JSONValue?) {
+        guard let root = payload?.asObject else { return nil }
+        let rpcOK = root["ok"]?.asBool ?? false
+        if !rpcOK {
+            ok = false
+            type = nil
+            content = nil
+            metadata = [:]
+            hasMetadata = false
+            error = root["error"]?.asString ?? "tool.invoke failed"
+            return
+        }
+
+        let result = root["result"]?.asObject ?? [:]
+        let resultType = result["type"]?.asString
+        let resultContent = result["content"]?.asString
+        let resultMetadata = result["metadata"]?.asObject
+        type = resultType
+        content = resultContent
+        metadata = resultMetadata ?? [:]
+        hasMetadata = resultMetadata != nil
+        if resultType == "error" {
+            ok = false
+            error = resultContent ?? "tool returned an error"
+        } else {
+            ok = true
+            error = nil
+        }
+    }
+}
+
 /// Result of the `intention.create` RPC: either a stored+armed intention, or a
 /// precision-gate bounce asking the model to clarify the trigger time.
 struct LiveIntentionCreateResult {
@@ -599,6 +638,40 @@ actor LiveGatewayBridge {
         return people
     }
 
+    /// Upload the latest iOS camera frame through the backend `send_photo` tool.
+    /// The image bytes are attached by iOS; the realtime model only supplies the
+    /// destination/caption.
+    func sendPhoto(
+        imageBase64: String,
+        to: String?,
+        comment: String?,
+        platform: String,
+        sessionKey: String
+    ) async -> LiveGatewayToolInvokeResult? {
+        var args: [String: JSONValue] = [
+            "image_base64": .string(imageBase64),
+            "platform": .string(platform),
+        ]
+        if let to = Self.nonEmptyString(to) {
+            args["to"] = .string(to)
+        }
+        if let comment = Self.nonEmptyString(comment) {
+            args["comment"] = .string(comment)
+        }
+        return await invokeTool(
+            "send_photo",
+            args: args,
+            sessionKey: sessionKey,
+            platform: "ios-live-send-photo",
+            timeoutSeconds: 20
+        )
+    }
+
+    private static func nonEmptyString(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// Wipe the entire person database (People Database tab Clear button). Returns
     /// true on success.
     @discardableResult
@@ -706,14 +779,16 @@ actor LiveGatewayBridge {
         }
     }
 
-    /// Invoke a whitelisted face tool and return its result `metadata` object, or
-    /// nil on any failure. Short-lived connection, mirroring fetchPrompt.
-    private func invokeFaceTool(
+    /// Invoke a whitelisted gateway `tool.invoke` tool over a short-lived
+    /// connection and return the structured wrapper result, or nil on transport
+    /// failure. Callers choose the platform label to preserve existing wire tags.
+    private func invokeTool(
         _ toolName: String,
         args: [String: JSONValue],
         sessionKey: String,
+        platform: String,
         timeoutSeconds: TimeInterval = 15
-    ) async -> [String: JSONValue]? {
+    ) async -> LiveGatewayToolInvokeResult? {
         do {
             let token = try KeychainStore.load(for: gatewayURL)
             guard let token, !token.isEmpty else { return nil }
@@ -721,7 +796,7 @@ actor LiveGatewayBridge {
             let transport = transportFactory()
             let wsURL = Self.websocketURL(from: gatewayURL)
             let params = ConnectParams(
-                version: "1", platform: "ios-live-face", token: token,
+                version: "1", platform: platform, token: token,
                 sessionKey: sessionKey, role: "client", mode: currentMode
             )
             _ = try await transport.connect(url: wsURL, connectParams: params)
@@ -743,15 +818,30 @@ actor LiveGatewayBridge {
             defer { timeout.cancel() }
 
             let response = try await transport.send(frame, timeout: timeoutSeconds + 2)
-            guard response.ok,
-                  case let .object(root)? = response.payload,
-                  case let .object(result)? = root["result"],
-                  case let .object(metadata)? = result["metadata"]
-            else { return nil }
-            return metadata
+            guard response.ok else { return nil }
+            return LiveGatewayToolInvokeResult(payload: response.payload)
         } catch {
             return nil
         }
+    }
+
+    /// Invoke a whitelisted face tool and return its result `metadata` object, or
+    /// nil on any failure. Short-lived connection, mirroring fetchPrompt.
+    private func invokeFaceTool(
+        _ toolName: String,
+        args: [String: JSONValue],
+        sessionKey: String,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> [String: JSONValue]? {
+        let result = await invokeTool(
+            toolName,
+            args: args,
+            sessionKey: sessionKey,
+            platform: "ios-live-face",
+            timeoutSeconds: timeoutSeconds
+        )
+        guard let result, result.ok, result.hasMetadata else { return nil }
+        return result.metadata
     }
 
     /// M6 §3.2 / §9 H1 — send finalized transcript turns to the gateway for latent recognition.

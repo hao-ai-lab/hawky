@@ -419,6 +419,8 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
     var identifyOnCameraHook: (@MainActor () async -> FaceIdentifyResult)?
     /// Set by LiveSessionStore; resolve+enroll the camera person for a profile write.
     var resolveCameraPersonHook: (@MainActor (String?) async -> FaceIdentifyResult)?
+    /// Set by LiveSessionStore; returns the latest live camera frame for media tools.
+    var latestCameraFrameHook: (@MainActor () async -> LiveJPEGFrame?)?
 
     /// Build the tool-execution context from the provider's current config + hooks.
     /// MainActor-isolated because the cocktail-party hook runs on the main actor.
@@ -432,7 +434,8 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
             silenceSummary: silenceSummaryHook,
             cocktailPartyActive: cocktailPartyActiveHook?() ?? false,
             identifyOnCamera: identifyOnCameraHook,
-            resolveCameraPerson: resolveCameraPersonHook
+            resolveCameraPerson: resolveCameraPersonHook,
+            latestCameraFrame: latestCameraFrameHook
         )
     }
 
@@ -1684,6 +1687,8 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
     var identifyOnCameraHook: (@MainActor () async -> FaceIdentifyResult)?
     /// Hook set by LiveSessionStore; resolve+enroll the camera person for a write.
     var resolveCameraPersonHook: (@MainActor (String?) async -> FaceIdentifyResult)?
+    /// Hook set by LiveSessionStore; returns the latest live camera frame for media tools.
+    var latestCameraFrameHook: (@MainActor () async -> LiveJPEGFrame?)?
 
     /// Build the tool-execution context from the provider's current config + hooks.
     private func makeLiveToolContext() -> LiveToolContext {
@@ -1695,7 +1700,8 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
             silenceSummary: silenceSummaryHook,
             cocktailPartyActive: cocktailPartyActiveHook?() ?? false,
             identifyOnCamera: identifyOnCameraHook,
-            resolveCameraPerson: resolveCameraPersonHook
+            resolveCameraPerson: resolveCameraPersonHook,
+            latestCameraFrame: latestCameraFrameHook
         )
     }
 
