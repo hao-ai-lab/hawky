@@ -543,6 +543,34 @@ describe("Abort and error handling", () => {
     expect(signalSpy.removed).toContain(signalSpy.added[0]);
   });
 
+  test("request timeout is still reported as timeout", async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+
+    try {
+      (globalThis as any).setTimeout = (callback: () => void) => {
+        queueMicrotask(callback);
+        return 1;
+      };
+      (globalThis as any).clearTimeout = () => {};
+
+      mockFetch(async (_input, init) => {
+        await Promise.resolve();
+        if (init?.signal?.aborted) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
+        throw new Error("expected timeout abort");
+      });
+
+      const r = await doFetch({ url: "https://example.test/timeout" });
+      expect(r.type).toBe("error");
+      expect(r.content).toContain("timed out");
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
+  });
+
   test("top-level catch handles unexpected errors", async () => {
     const bad: any = {
       session_id: "t",
