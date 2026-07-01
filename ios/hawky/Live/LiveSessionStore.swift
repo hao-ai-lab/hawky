@@ -288,8 +288,10 @@ final class LiveSessionStore {
     private let realtimeFrameFeeder = RealtimeFrameFeeder()
     private let liveTimeline = LiveTimelineStore()
     private var latestTimelineVisualFrame: (refID: String, frame: LiveJPEGFrame, capturedAtNs: UInt64)?
+    private var toolCameraFrames = LiveToolCameraFrameCache()
     private static let turnVisualFreshnessNs: UInt64 = 1_000_000_000
     private static let turnVisualMaxAgeNs: UInt64 = 2_000_000_000
+    private static let liveToolCameraFrameMaxAgeNs: UInt64 = 30_000_000_000
     private static let turnVisualInjectionBudgetNs: UInt64 = 120_000_000
     /// Parallel mic capture used ONLY for recording when the provider owns the
     /// realtime mic (WebRTC) and therefore never tees PCM to `recordingSink`.
@@ -1598,6 +1600,7 @@ final class LiveSessionStore {
         toolCameraFrames.clear()
         liveTimeline.reset()
         latestTimelineVisualFrame = nil
+        toolCameraFrames.clear()
         // A start is now underway — clear any stale "can't start" alert so it
         // can't linger over a connecting/connected session.
         pendingUserAlert = nil
@@ -3074,6 +3077,7 @@ final class LiveSessionStore {
 
     private func stopVisualStream() async {
         isStreamingVisual = false
+        latestTimelineVisualFrame = nil
         toolCameraFrames.clear()
         realtimeFrameFeeder.cancel()
         visualDeduplicator.reset()
