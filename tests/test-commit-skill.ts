@@ -7,6 +7,14 @@ const repoRoot = join(__dirname, "..");
 const rootGuard = join(repoRoot, "scripts", "check_commit.sh");
 const skillGuard = join(repoRoot, ".claude", "skills", "commit", "scripts", "check_commit.sh");
 const skillFile = join(repoRoot, ".claude", "skills", "commit", "SKILL.md");
+const humanGitEnv = {
+  ...process.env,
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "user.name",
+  GIT_CONFIG_VALUE_0: "Hawk Reviewer",
+  GIT_CONFIG_KEY_1: "user.email",
+  GIT_CONFIG_VALUE_1: "123456+hawk-reviewer@users.noreply.github.com",
+};
 
 describe("repo commit skill", () => {
   test("uses an executable repo-root guard", () => {
@@ -31,7 +39,7 @@ describe("repo commit skill", () => {
     execFileSync(rootGuard, [
       "docs(readme): test guard",
       "Human-only body.",
-    ], { cwd: repoRoot });
+    ], { cwd: repoRoot, env: humanGitEnv });
 
     const result = spawnSync(rootGuard, [
       "docs(readme): test guard",
