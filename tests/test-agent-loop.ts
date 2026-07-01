@@ -832,6 +832,19 @@ describe("AgentLoop — error handling", () => {
     await loop.sendMessage("hello");
     expect(loop.isRunning()).toBe(false);
   });
+
+  test("current turn is not left streaming after provider error", async () => {
+    const provider = new ThrowingProvider(new Error("provider failed"));
+    const loop = makeLoop(provider);
+    collectEvents(loop);
+
+    await loop.sendMessage("hello");
+
+    expect(loop.getCurrentTurn()).toMatchObject({
+      streaming: false,
+      busy: false,
+    });
+  });
 });
 
 describe("AgentLoop — retry on retryable errors", () => {

@@ -826,76 +826,79 @@ export class AgentLoop {
     let stopReason: string | null = null;
     let usage: TokenUsage | null = null;
 
-    for await (const event of this.provider.stream(request, signal)) {
-      switch (event.type) {
-        case "text_delta":
-          textContent += event.text;
-          this._currentStreamingText = textContent;
-          this.emitter.emit({ type: "text", content: event.text });
-          break;
+    try {
+      for await (const event of this.provider.stream(request, signal)) {
+        switch (event.type) {
+          case "text_delta":
+            textContent += event.text;
+            this._currentStreamingText = textContent;
+            this.emitter.emit({ type: "text", content: event.text });
+            break;
 
-        case "thinking_delta":
-          thinkingContent += event.thinking;
-          this.emitter.emit({ type: "thinking", content: event.thinking });
-          break;
+          case "thinking_delta":
+            thinkingContent += event.thinking;
+            this.emitter.emit({ type: "thinking", content: event.thinking });
+            break;
 
-        case "tool_use_start":
-          currentToolIndex = event.index;
-          currentToolJsonParts = [];
-          // Don't emit ToolUseStartEvent yet — tool_executor handles that
-          // after permission check
-          break;
+          case "tool_use_start":
+            currentToolIndex = event.index;
+            currentToolJsonParts = [];
+            // Don't emit ToolUseStartEvent yet — tool_executor handles that
+            // after permission check
+            break;
 
-        case "tool_use_input_delta":
-          currentToolJsonParts.push(event.partial_json);
-          break;
+          case "tool_use_input_delta":
+            currentToolJsonParts.push(event.partial_json);
+            break;
 
-        case "content_block_stop": {
-          // If we were accumulating a tool call, finalize it
-          if (currentToolIndex >= 0 && this._pendingToolStart) {
-            const jsonStr = currentToolJsonParts.join("");
-            let input: Record<string, unknown> = {};
-            try {
-              input = jsonStr ? JSON.parse(jsonStr) : {};
-            } catch {
-              input = { _raw: jsonStr };
+          case "content_block_stop": {
+            // If we were accumulating a tool call, finalize it
+            if (currentToolIndex >= 0 && this._pendingToolStart) {
+              const jsonStr = currentToolJsonParts.join("");
+              let input: Record<string, unknown> = {};
+              try {
+                input = jsonStr ? JSON.parse(jsonStr) : {};
+              } catch {
+                input = { _raw: jsonStr };
+              }
+              toolCalls.push({
+                id: this._pendingToolStart.id,
+                name: this._pendingToolStart.name,
+                input,
+              });
+              this._pendingToolStart = null;
             }
-            toolCalls.push({
-              id: this._pendingToolStart.id,
-              name: this._pendingToolStart.name,
-              input,
-            });
-            this._pendingToolStart = null;
+            currentToolIndex = -1;
+            currentToolJsonParts = [];
+            break;
           }
-          currentToolIndex = -1;
-          currentToolJsonParts = [];
-          break;
+
+          case "message_start":
+            if (event.usage) {
+              usage = event.usage;
+            }
+            break;
+
+          case "message_delta":
+            stopReason = event.stop_reason;
+            if (event.usage && usage) {
+              usage.output_tokens = event.usage.output_tokens;
+            }
+            break;
+
+          case "message_stop":
+            break;
         }
 
-        case "message_start":
-          if (event.usage) {
-            usage = event.usage;
-          }
-          break;
-
-        case "message_delta":
-          stopReason = event.stop_reason;
-          if (event.usage && usage) {
-            usage.output_tokens = event.usage.output_tokens;
-          }
-          break;
-
-        case "message_stop":
-          break;
+        // Also track tool_use_start for ID/name association
+        if (event.type === "tool_use_start") {
+          this._pendingToolStart = { id: event.id, name: event.name };
+        }
       }
-
-      // Also track tool_use_start for ID/name association
-      if (event.type === "tool_use_start") {
-        this._pendingToolStart = { id: event.id, name: event.name };
-      }
+    } finally {
+      this._currentStreamingActive = false;
     }
 
-    this._currentStreamingActive = false;
     return { textContent, thinkingContent, toolCalls, stopReason, usage };
   }
 
@@ -919,4 +922,3 @@ function errorCode(err: unknown): string {
   if (err instanceof LLMError) return err.code;
   return "unknown";
 }
-
