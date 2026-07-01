@@ -53,6 +53,12 @@ function parseMaxChars(value: unknown): number | string {
   return Math.max(MIN_MAX_CHARS, Math.min(value, MAX_MAX_CHARS));
 }
 
+function isAbortError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof Error) return err.name === "AbortError";
+  return false;
+}
+
 // -----------------------------------------------------------------------------
 // HTML → Markdown conversion (custom, no heavy library)
 // -----------------------------------------------------------------------------
@@ -234,16 +240,19 @@ async function executeWebFetchInner(
     parsedUrl = new URL(parsedUrl.toString().replace(/^http:/, "https:"));
   }
 
+  if (context.abort_signal.aborted) {
+    return { type: "error", content: "Request cancelled." };
+  }
+
   // --- Fetch with timeout ---
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  // Chain with context abort signal
-  if (context.abort_signal.aborted) {
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
     controller.abort();
-  } else {
-    context.abort_signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
+  }, REQUEST_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  context.abort_signal.addEventListener("abort", onAbort, { once: true });
 
   let response: Response;
   try {
@@ -259,12 +268,16 @@ async function executeWebFetchInner(
   } catch (err: unknown) {
     clearTimeout(timeoutId);
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("abort") || msg.includes("AbortError")) {
+    if (isAbortError(err)) {
+      if (!timedOut) {
+        return { type: "error", content: "Request cancelled." };
+      }
       return { type: "error", content: "Request timed out after 30 seconds." };
     }
     return { type: "error", content: `Network error: ${msg}` };
   } finally {
     clearTimeout(timeoutId);
+    context.abort_signal.removeEventListener("abort", onAbort);
   }
 
   // --- Check HTTP status ---

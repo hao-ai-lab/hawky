@@ -40,6 +40,36 @@ function mockFetch(
   globalThis.fetch = impl as typeof fetch;
 }
 
+function spyAbortSignal(signal: AbortSignal): {
+  added: EventListenerOrEventListenerObject[];
+  removed: EventListenerOrEventListenerObject[];
+} {
+  const added: EventListenerOrEventListenerObject[] = [];
+  const removed: EventListenerOrEventListenerObject[] = [];
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+
+  (signal as any).addEventListener = (
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ) => {
+    if (type === "abort") added.push(listener);
+    return originalAdd(type, listener, options);
+  };
+
+  (signal as any).removeEventListener = (
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ) => {
+    if (type === "abort") removed.push(listener);
+    return originalRemove(type, listener, options);
+  };
+
+  return { added, removed };
+}
+
 afterEach(() => {
   globalThis.fetch = realFetch;
   resetToolRegistry();
@@ -474,7 +504,13 @@ describe("Errors and validation", () => {
 // =============================================================================
 
 describe("Abort and error handling", () => {
-  test("pre-aborted signal returns error", async () => {
+  test("pre-aborted signal returns cancelled without fetching", async () => {
+    let fetchCalled = false;
+    mockFetch(async () => {
+      fetchCalled = true;
+      return response("should not fetch");
+    });
+
     const controller = new AbortController();
     controller.abort();
     const r = await doFetch(
@@ -482,23 +518,29 @@ describe("Abort and error handling", () => {
       { abort_signal: controller.signal },
     );
     expect(r.type).toBe("error");
-    expect(r.content).toMatch(/aborted|cancelled/i);
+    expect(r.content).toContain("cancelled");
+    expect(fetchCalled).toBe(false);
   });
 
-  test("fetch abort is reported as timeout/error", async () => {
+  test("in-flight context abort returns cancelled and removes listener", async () => {
+    const controller = new AbortController();
+    const signalSpy = spyAbortSignal(controller.signal);
     mockFetch(async (_input, init) => {
-      init?.signal?.throwIfAborted?.();
-      await Promise.resolve();
-      throw new DOMException("The operation was aborted.", "AbortError");
+      controller.abort();
+      if (init?.signal?.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      throw new Error("expected abort");
     });
 
-    const controller = new AbortController();
-    controller.abort();
     const r = await doFetch(
       { url: "https://example.test/abort" },
       { abort_signal: controller.signal },
     );
     expect(r.type).toBe("error");
+    expect(r.content).toContain("cancelled");
+    expect(signalSpy.added.length).toBe(1);
+    expect(signalSpy.removed).toContain(signalSpy.added[0]);
   });
 
   test("top-level catch handles unexpected errors", async () => {
