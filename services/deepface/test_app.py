@@ -199,6 +199,50 @@ def test_health(A):
     assert h["engine"] == "insightface"
 
 
+def test_clear_refuses_markerless_database_dir(A):
+    os.makedirs(A.DB_PATH, exist_ok=True)
+    profiles_path = os.path.join(A.DB_PATH, "profiles.json")
+    with open(profiles_path, "w", encoding="utf-8") as f:
+        f.write('{"p1":{"id":"p1","name":"Unsafe","embeddings":[]}}')
+
+    r = A.clear()
+
+    assert r["ok"] is False
+    assert "markerless" in r["error"]
+    assert os.path.exists(profiles_path)
+
+
+def test_clear_removes_only_owned_face_db_children(A):
+    pid = "person-1"
+    A._save({
+        pid: {
+            "id": pid,
+            "name": "Clear Me",
+            "embeddings": [_unit(4)],
+            "facts": [],
+            "recaps": [],
+            "created_at": "2026-06-30T00:00:00Z",
+            "last_seen_at": "2026-06-30T00:00:00Z",
+        },
+    })
+    person_dir = os.path.join(A.DB_PATH, pid)
+    os.makedirs(person_dir, exist_ok=True)
+    with open(os.path.join(person_dir, "crop.jpg"), "wb") as f:
+        f.write(b"jpg")
+    keep_path = os.path.join(A.DB_PATH, "keep.txt")
+    with open(keep_path, "w", encoding="utf-8") as f:
+        f.write("not face-db data")
+
+    r = A.clear()
+
+    assert r == {"ok": True, "removed": 1}
+    assert os.path.isdir(A.DB_PATH)
+    assert os.path.exists(os.path.join(A.DB_PATH, A.DB_MARKER_FILE))
+    assert not os.path.exists(os.path.join(A.DB_PATH, "profiles.json"))
+    assert not os.path.exists(person_dir)
+    assert os.path.exists(keep_path)
+
+
 # -----------------------------------------------------------------------------
 # Safety Check (#648): /assess_hazard — silent off-model vision classifier. The
 # OpenAI HTTP call (urllib.urlopen) is mocked so these run without a key/network.

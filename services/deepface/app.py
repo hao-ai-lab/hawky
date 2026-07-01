@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 
 DB_PATH = os.environ.get("DEEPFACE_DB", os.path.join(os.path.dirname(__file__), "facedb"))
 PROFILES_FILE = os.path.join(DB_PATH, "profiles.json")
+DB_MARKER_FILE = ".hawky-face-db"
 MODEL_PACK = os.environ.get("INSIGHTFACE_MODEL", "buffalo_l")
 PERSON_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -140,8 +141,15 @@ def _load() -> dict[str, dict[str, Any]]:
         return {}
 
 
-def _save(profiles: dict[str, dict[str, Any]]) -> None:
+def _ensure_db_dir() -> None:
     os.makedirs(DB_PATH, exist_ok=True)
+    marker = os.path.join(DB_PATH, DB_MARKER_FILE)
+    with open(marker, "a", encoding="utf-8"):
+        pass
+
+
+def _save(profiles: dict[str, dict[str, Any]]) -> None:
+    _ensure_db_dir()
     tmp = PROFILES_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(profiles, f, indent=2)
@@ -159,6 +167,17 @@ def _safe_person_dir(person_id: str) -> str | None:
     candidate = os.path.abspath(os.path.join(base, person_id))
     if candidate != base and candidate.startswith(base + os.sep):
         return candidate
+    return None
+
+
+def _clear_safety_error() -> str | None:
+    base = os.path.abspath(DB_PATH)
+    if base in {os.path.abspath(os.sep), os.path.abspath(os.path.expanduser("~"))}:
+        return f"unsafe database path: {DB_PATH}"
+    if os.path.exists(base) and not os.path.isdir(base):
+        return f"database path is not a directory: {DB_PATH}"
+    if os.path.isdir(base) and not os.path.exists(os.path.join(base, DB_MARKER_FILE)):
+        return f"refusing to clear markerless database directory: {DB_PATH}"
     return None
 
 
@@ -343,11 +362,25 @@ def clear() -> dict[str, Any]:
     import shutil
 
     with _lock:
-        removed = len(_load())
+        profiles = _load()
+        removed = len(profiles)
         try:
-            if os.path.isdir(DB_PATH):
-                shutil.rmtree(DB_PATH)
-            os.makedirs(DB_PATH, exist_ok=True)
+            safety_error = _clear_safety_error()
+            if safety_error:
+                return {"ok": False, "error": safety_error}
+            if not os.path.isdir(DB_PATH):
+                _ensure_db_dir()
+                return {"ok": True, "removed": 0}
+
+            for person_id in profiles:
+                person_dir = _safe_person_dir(person_id)
+                if person_dir and os.path.isdir(person_dir):
+                    shutil.rmtree(person_dir)
+            for filename in ("profiles.json", "profiles.json.tmp"):
+                path = os.path.join(DB_PATH, filename)
+                if os.path.isfile(path):
+                    os.unlink(path)
+            _ensure_db_dir()
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "removed": removed}
