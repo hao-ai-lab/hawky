@@ -322,6 +322,38 @@ describe("Caching", () => {
     expect(second.model).toBe("second-load");
     expect(second).not.toBe(first);
   });
+
+  test("loadConfig does not reuse cache across explicit config paths", () => {
+    const otherConfigPath = join(testDir, "other-config.json");
+    writeTestConfig({ model: "first-path" });
+    writeFileSync(otherConfigPath, JSON.stringify({ model: "second-path" }, null, 2));
+
+    const first = loadConfig(testConfigPath);
+    const second = loadConfig(otherConfigPath);
+
+    expect(first.model).toBe("first-path");
+    expect(second.model).toBe("second-path");
+    expect(second).not.toBe(first);
+  });
+
+  test("setConfigDir invalidates cached default-path config", () => {
+    const firstDir = join(testDir, "first");
+    const secondDir = join(testDir, "second");
+    mkdirSync(firstDir, { recursive: true });
+    mkdirSync(secondDir, { recursive: true });
+    writeFileSync(join(firstDir, "config.json"), JSON.stringify({ model: "first-dir" }, null, 2));
+    writeFileSync(join(secondDir, "config.json"), JSON.stringify({ model: "second-dir" }, null, 2));
+
+    setConfigDir(firstDir);
+    const first = loadConfig();
+
+    setConfigDir(secondDir);
+    const second = loadConfig();
+
+    expect(first.model).toBe("first-dir");
+    expect(second.model).toBe("second-dir");
+    expect(second).not.toBe(first);
+  });
 });
 
 // =============================================================================
