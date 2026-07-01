@@ -70,12 +70,28 @@ describe("provider gateway broker forwarding", () => {
       });
     }) as typeof fetch;
 
-    const result = await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2", byok_api_key: "not-a-key" }, { quotaKey: "user:u1" });
+    const result = await mintOpenAIRealtimeClientSecret({ model: "gpt-realtime-2" }, { quotaKey: "user:u1" });
 
     expect(result.ok).toBe(true);
     expect(captured.url).toBe("http://control.local/internal/provider/openai/realtime/client-secret");
     expect(captured.authorization).toBe(`Bearer ${TOKEN}`);
-    expect(JSON.stringify(captured.body)).not.toContain("not-a-key");
+    expect(JSON.stringify(captured.body)).not.toContain("byok_api_key");
+  });
+
+  test("rejects malformed BYOK keys before provider gateway forwarding", async () => {
+    process.env.HAWKY_PROVIDER_GATEWAY_URL = "http://control.local";
+    process.env.HAWKY_PROVIDER_GATEWAY_TOKEN = TOKEN;
+    let forwarded = false;
+    globalThis.fetch = (async () => {
+      forwarded = true;
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+
+    await expect(mintOpenAIRealtimeClientSecret(
+      { model: "gpt-realtime-2", byok_api_key: "not-a-key" },
+      { quotaKey: "user:u1" },
+    )).rejects.toThrow("Invalid BYOK OpenAI API key format.");
+    expect(forwarded).toBe(false);
   });
 });
 
