@@ -20,7 +20,7 @@
     "dev": "bun run src/index.ts",
     "gateway": "bun run src/index.ts gateway",
     "build": "bun build src/index.ts --outdir dist --target bun",
-    "prepublishOnly": "bun run build && cp -r src/templates templates && cp -r src/skill-templates skill-templates && (cd web && bun install --frozen-lockfile && bun run build) && cp -r web/dist web-dist",
+    "prepublishOnly": "bash scripts/prepare-publish-package.sh",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "test": "bun test ./tests/test-*.ts ./tests/test-*.tsx ./tests/unit/*.test.ts",
