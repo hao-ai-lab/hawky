@@ -1,0 +1,16 @@
+{
+  "users": [
+    {
+      "slug": "alice",
+      "email": "alice@example.com",
+      "linuxUser": "hawky-alice",
+      "port": 4301
+    },
+    {
+      "slug": "bob",
+      "email": "bob@example.com",
+      "linuxUser": "hawky-bob",
+      "port": 4302
+    }
+  ]
+}
