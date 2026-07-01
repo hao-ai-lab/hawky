@@ -74,13 +74,13 @@ beforeEach(() => {
 describe("StatusDashboard", () => {
   it("shows loading state", () => {
     mockRpc.mockImplementation(() => new Promise(() => {})); // Never resolves
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
     expect(screen.getByText("Loading...")).toBeInTheDocument();
   });
 
   it("renders gateway status after loading", async () => {
     // Uses default mock from beforeEach
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("1h 1m")).toBeInTheDocument(); // 3661 seconds
@@ -89,7 +89,7 @@ describe("StatusDashboard", () => {
 
   it("renders heartbeat section", async () => {
     // Uses default mock from beforeEach
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("Heartbeat")).toBeInTheDocument();
@@ -99,7 +99,7 @@ describe("StatusDashboard", () => {
 
   it("renders cron jobs", async () => {
     // Uses default mock from beforeEach
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("hn-digest")).toBeInTheDocument();
@@ -140,7 +140,7 @@ describe("StatusDashboard", () => {
       return Promise.resolve(null);
     });
 
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("j-tomorrow")).toBeInTheDocument();
@@ -165,7 +165,7 @@ describe("StatusDashboard", () => {
   });
 
   it("renders usage stats section", async () => {
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("Usage")).toBeInTheDocument();
@@ -179,7 +179,7 @@ describe("StatusDashboard", () => {
 
   it("renders active sessions", async () => {
     // Uses default mock from beforeEach
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("Active Sessions")).toBeInTheDocument();
@@ -189,7 +189,7 @@ describe("StatusDashboard", () => {
 
   it("shows connection details", async () => {
     // Uses default mock from beforeEach
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("Connected Clients")).toBeInTheDocument();
@@ -200,7 +200,7 @@ describe("StatusDashboard", () => {
   });
 
   it("shows model breakdown in usage history", async () => {
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("claude-sonnet-4-6")).toBeInTheDocument();
@@ -209,7 +209,7 @@ describe("StatusDashboard", () => {
 
   it("handles error state", async () => {
     mockRpc.mockImplementation(() => Promise.reject(new Error("connection failed")));
-    render(<StatusDashboard onClose={() => {}} />);
+    render(<StatusDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("Unable to load status")).toBeInTheDocument();

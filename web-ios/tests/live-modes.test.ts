@@ -51,6 +51,34 @@ describe("Live modes", () => {
     expect(result.current.staySilent).toBe(false);
   });
 
+  it("releasing Stay Silent announces it is summarizing what happened (#671)", () => {
+    // On release the model should recap what was said while it listened. We can't
+    // open a real data channel in jsdom to observe the forced response.create, but
+    // the user-facing marker that drives the recap turn must appear.
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
+    act(() => result.current.toggleStaySilent());          // on
+    act(() => result.current.toggleStaySilent());          // off → recap
+    expect(result.current.staySilent).toBe(false);
+    expect(result.current.transcript.some((e) => /summarizing what happened/i.test(e.text))).toBe(true);
+    // The recap is fired after a settle window; advancing timers must not throw.
+    act(() => vi.advanceTimersByTime(1300));
+    expect(result.current.error).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("toggling Stay Silent on with no active response never surfaces a cancellation error", () => {
+    // Regression: toggleStaySilent used to fire response.cancel unconditionally,
+    // and the Realtime API answers with "Cancellation failed: no active response
+    // found", which the error handler showed as a warning bubble + error banner.
+    const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
+    act(() => result.current.toggleStaySilent());
+    expect(result.current.staySilent).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.transcript.some((e) => e.kind === "warning")).toBe(false);
+    expect(result.current.transcript.some((e) => /cancellation failed/i.test(e.text))).toBe(false);
+  });
+
   it("toggling Cocktail Party flips state + uses on-demand recognition copy", () => {
     const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
     act(() => result.current.toggleCocktailParty());

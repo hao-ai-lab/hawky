@@ -250,7 +250,7 @@ function ControlBar(p: {
           <Ctrl on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
         </>
       )}
-      <PrimaryButton phase={p.phase} canStart={p.canStart} isConnected={p.isConnected} onStart={p.onStart} onStop={p.onStop} />
+      <PrimaryButton phase={p.phase} canStart={p.canStart} onStart={p.onStart} onStop={p.onStop} />
     </div>
   );
 }
@@ -268,7 +268,7 @@ function Ctrl({ on, onIcon, offIcon, label, onClick, pulse, danger }: {
   );
 }
 
-function PrimaryButton({ phase, canStart, isConnected, onStart, onStop }: { phase: LivePhase; canStart: boolean; isConnected?: boolean; onStart: () => void; onStop: () => void }) {
+function PrimaryButton({ phase, canStart, onStart, onStop }: { phase: LivePhase; canStart: boolean; onStart: () => void; onStop: () => void }) {
   // End button sits inline with the toggle row when connected → keep it the same
   // 44px footprint as the toggles; the idle call button is larger and prominent.
   if (phase === "connected" || phase === "paused") {
@@ -277,7 +277,6 @@ function PrimaryButton({ phase, canStart, isConnected, onStart, onStop }: { phas
   if (phase === "connecting") {
     return <div className="grid h-14 w-14 place-items-center rounded-full bg-danger/80 text-white"><span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" /></div>;
   }
-  void isConnected;
   return <button onClick={onStart} disabled={!canStart} aria-label="Start session" className="pressable grid h-14 w-14 place-items-center rounded-full bg-ok text-white shadow-glass disabled:opacity-40"><Icon name="phone" className="h-6 w-6" filled /></button>;
 }
 

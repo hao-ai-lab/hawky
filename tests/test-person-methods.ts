@@ -1,14 +1,21 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  clearPeople,
   confirmCandidate,
   identifyCurrentFrame,
   listPeople,
   rejectCandidate,
   recallPerson,
+  resetDefaultPersonServiceForTests,
   updatePersonProfile,
 } from "../src/gateway/person-methods.js";
+import { resetConfigDir, setConfigDir } from "../src/storage/config.js";
 import {
   InMemoryPersonCandidateReviewStore,
+  InMemoryPersonStore,
   PersonService,
   PERSON_MODEL_TOOL_NAMES,
   PERSON_RPC_METHODS,
@@ -68,6 +75,7 @@ describe("person tool contract", () => {
       "person.update_profile",
       "person.confirm_candidate",
       "person.reject_candidate",
+      "person.clear",
     ]);
     expect(personToolForName("update_person_profile").parameters.properties).toHaveProperty("facts");
     expect(personToolForName("confirm_identity_candidate").parameters.required).toEqual(["candidate_id", "name"]);
@@ -78,8 +86,24 @@ describe("person tool contract", () => {
 
 describe("person.* gateway methods over legacy DeepFace", () => {
   let restore = () => {};
+  let testConfigDir: string | undefined;
 
-  afterEach(() => restore());
+  beforeEach(() => {
+    testConfigDir = mkdtempSync(join(tmpdir(), "hawky-person-methods-"));
+    setConfigDir(testConfigDir);
+    resetDefaultPersonServiceForTests();
+  });
+
+  afterEach(() => {
+    restore();
+    restore = () => {};
+    resetDefaultPersonServiceForTests();
+    resetConfigDir();
+    if (testConfigDir) {
+      rmSync(testConfigDir, { recursive: true, force: true });
+      testConfigDir = undefined;
+    }
+  });
 
   test("person.list returns compact people by default and filters Unknown profiles", async () => {
     restore = stubDeepFaceFetch((path) => {
@@ -187,7 +211,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     }
   });
 
-  test("person.update_profile writes through DeepFace compatibility endpoint", async () => {
+  test("person.update_profile syncs only the display name through the DeepFace compatibility endpoint", async () => {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     restore = stubDeepFaceFetch((path, body) => {
       calls.push({ path, body });
@@ -200,11 +224,8 @@ describe("person.* gateway methods over legacy DeepFace", () => {
         person: {
           ...RAW_PEOPLE[0],
           name: "Sarah Chen",
-          facts: ["climber", "runs a coffee startup", "studies robotics"],
-          recaps: [
-            ...(RAW_PEOPLE[0].recaps as Array<{ summary: string; at: string }>),
-            { summary: "Talked about mapping.", at: "2026-06-27T00:00:00.000Z" },
-          ],
+          facts: ["legacy should not be canonical"],
+          recaps: [],
         },
       });
     });
@@ -225,8 +246,8 @@ describe("person.* gateway methods over legacy DeepFace", () => {
         body: {
           person_id: "p-sarah",
           name: "Sarah Chen",
-          facts: ["studies robotics"],
-          recap: "Talked about mapping.",
+          facts: null,
+          recap: null,
         },
       },
     ]);
@@ -237,14 +258,7 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       if (path === "/people") {
         return Response.json({ people: RAW_PEOPLE });
       }
-      expect(path).toBe("/update");
-      return Response.json({
-        ok: true,
-        person: {
-          ...RAW_PEOPLE[0],
-          facts: ["climber", "studies robotics"],
-        },
-      });
+      throw new Error(`unexpected DeepFace call: ${path}`);
     });
 
     const result = await updatePersonProfile({
@@ -253,6 +267,143 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       include_structured: true,
     });
     expect(result.person.structured?.facts.every((fact) => fact.review.state === "unreviewed")).toBe(true);
+  });
+
+  test("person.update_profile writes new facts and recaps to the TypeScript person store", async () => {
+    const reviewStore = new InMemoryPersonCandidateReviewStore();
+    const personStore = new InMemoryPersonStore();
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      update: (input) => {
+        updates.push(input);
+        return {
+          ...RAW_PEOPLE[0],
+          name: input.name ?? "Sarah",
+          facts: ["legacy should not be canonical"],
+          recaps: [],
+        };
+      },
+    }), reviewStore, {
+      personStore,
+      now: () => "2026-06-27T12:00:00.000Z",
+    });
+
+    const result = await updatePersonProfile({
+      id: "p-sarah",
+      name: "Sarah Chen",
+      facts: ["studies robotics"],
+      recap: "Talked about mapping.",
+      session_key: "realtime:session-1",
+      include_structured: true,
+    }, service);
+
+    expect(result.person.name).toBe("Sarah Chen");
+    expect(result.person.facts).toContain("studies robotics");
+    expect(result.person.structured?.facts.find((fact) => fact.text === "studies robotics")?.source).toBe("tool");
+    expect(result.person.structured?.facts.find((fact) => fact.text === "studies robotics")?.sourceSession?.sessionKey).toBe("realtime:session-1");
+    expect(result.person.structured?.recaps.map((recap) => recap.summary)).toContain("Talked about mapping.");
+    expect(personStore.getProfile("p-sarah")?.displayName).toBe("Sarah Chen");
+    expect(personStore.listFacts("p-sarah").map((fact) => fact.text)).toContain("studies robotics");
+    expect(updates).toEqual([
+      {
+        personId: "p-sarah",
+        name: "Sarah Chen",
+      },
+    ]);
+  });
+
+  test("person.clear resets the TypeScript person store, review ledger, and legacy face index", async () => {
+    const reviewStore = new InMemoryPersonCandidateReviewStore();
+    const personStore = new InMemoryPersonStore();
+    let legacyClears = 0;
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      clear: () => {
+        legacyClears += 1;
+        return { removed: 2 };
+      },
+    }), reviewStore, {
+      personStore,
+      now: () => "2026-06-27T12:00:00.000Z",
+    });
+
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+    await updatePersonProfile({
+      id: "p-sarah",
+      facts: ["studies robotics"],
+      recap: "Talked about mapping.",
+    }, service);
+    await rejectCandidate({
+      candidate_id: candidateId,
+      reason: "not a person to remember",
+    }, service);
+
+    expect(personStore.listProfiles().length).toBe(1);
+    expect(personStore.listFacts().length).toBeGreaterThan(0);
+    expect(personStore.listCandidates().length).toBe(1);
+    expect(personStore.listTombstones().length).toBe(2);
+    expect(reviewStore.list().length).toBe(1);
+
+    const result = await clearPeople({ session_key: "realtime:session-1" }, service);
+
+    expect(result.ok).toBe(true);
+    expect(result.cleared.profiles).toBe(1);
+    expect(result.cleared.candidates).toBe(1);
+    expect(result.cleared.tombstones).toBe(2);
+    expect(result.cleared.candidate_reviews).toBe(1);
+    expect(result.cleared.legacy_face_profiles).toBe(2);
+    expect(result.legacy).toEqual({ ok: true, removed: 2 });
+    expect(legacyClears).toBe(1);
+    expect(personStore.listProfiles()).toEqual([]);
+    expect(personStore.listFacts()).toEqual([]);
+    expect(personStore.listRecaps()).toEqual([]);
+    expect(personStore.listCandidates()).toEqual([]);
+    expect(personStore.listTombstones()).toEqual([]);
+    expect(reviewStore.list()).toEqual([]);
+  });
+
+  test("person.clear preserves local people when the legacy face index cannot be cleared", async () => {
+    const reviewStore = new InMemoryPersonCandidateReviewStore();
+    const personStore = new InMemoryPersonStore();
+    let legacyClears = 0;
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      clear: () => {
+        legacyClears += 1;
+        return { ok: false, error: "DeepFace service HTTP 500." };
+      },
+    }), reviewStore, {
+      personStore,
+      now: () => "2026-06-27T12:00:00.000Z",
+    });
+
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+    await updatePersonProfile({
+      id: "p-sarah",
+      facts: ["studies robotics"],
+      recap: "Talked about mapping.",
+    }, service);
+    await rejectCandidate({
+      candidate_id: candidateId,
+      reason: "not a person to remember",
+    }, service);
+
+    await expect(clearPeople({ session_key: "realtime:session-1" }, service))
+      .rejects.toThrow(/Legacy face index clear failed/);
+
+    expect(legacyClears).toBe(1);
+    expect(personStore.listProfiles().length).toBe(1);
+    expect(personStore.listFacts().length).toBeGreaterThan(0);
+    expect(personStore.listRecaps().length).toBeGreaterThan(0);
+    expect(personStore.listCandidates().length).toBe(1);
+    expect(personStore.getTombstone(candidateId!)?.review.state).toBe("rejected");
+    expect(personStore.getTombstone("p-unknown")?.review.state).toBe("rejected");
+    expect(reviewStore.list().length).toBe(1);
   });
 
   test("person.update_profile can create a named profile from a frame without creating Unknown", async () => {
@@ -410,6 +561,51 @@ describe("person.* gateway methods over legacy DeepFace", () => {
     expect(updates).toEqual([]);
   });
 
+  test("person.reject_candidate tombstones stale legacy ids in the TypeScript person store", async () => {
+    const reviewStore = new InMemoryPersonCandidateReviewStore();
+    const personStore = new InMemoryPersonStore();
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      identify: {
+        found: true,
+        person: RAW_PEOPLE[1],
+        similarity: 0.83,
+      },
+      update: (input) => {
+        updates.push(input);
+        return { ...RAW_PEOPLE[1], name: input.name ?? "Morgan" };
+      },
+    }), reviewStore, {
+      personStore,
+      now: () => "2026-06-27T12:00:00.000Z",
+    });
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    await rejectCandidate({
+      candidate_id: candidateId,
+      reason: "not a person to remember",
+      session_key: "realtime:session-1",
+    }, service);
+
+    expect(personStore.getTombstone(candidateId!)?.review.state).toBe("rejected");
+    expect(personStore.getTombstone("p-unknown")?.review.state).toBe("rejected");
+    await expect(updatePersonProfile({
+      id: "p-unknown",
+      name: "Morgan",
+    }, service)).rejects.toThrow(/rejected, suppressed, or deleted/);
+
+    const afterIdentify = await identifyCurrentFrame({ image_base64: "abc" }, service);
+    expect(afterIdentify.found).toBe(false);
+    if (!afterIdentify.found) {
+      expect(afterIdentify.reason).toBe("candidate_rejected");
+      expect(afterIdentify.no_enroll).toBe(true);
+    }
+    expect(updates).toEqual([]);
+  });
+
   test("person.confirm_candidate promotes a legacy Unknown candidate through the person service boundary", async () => {
     const store = new InMemoryPersonCandidateReviewStore();
     const updates: Array<Record<string, unknown>> = [];
@@ -445,14 +641,64 @@ describe("person.* gateway methods over legacy DeepFace", () => {
       {
         personId: "p-unknown",
         name: "Morgan",
-        facts: null,
-        recap: null,
       },
     ]);
     const stored = store.get(candidateId!);
     expect(stored?.review.state).toBe("confirmed");
     expect(stored?.promotedPersonId).toBe("p-unknown");
     expect(stored?.sourceSession?.sessionKey).toBe("realtime:session-1");
+  });
+
+  test("person.identify_current_frame resolves confirmed candidates from the TypeScript store when DeepFace stays Unknown", async () => {
+    const reviewStore = new InMemoryPersonCandidateReviewStore();
+    const personStore = new InMemoryPersonStore();
+    const updates: Array<Record<string, unknown>> = [];
+    const service = new PersonService(fakeLegacyPersonRepository({
+      people: RAW_PEOPLE,
+      identify: {
+        found: true,
+        person: RAW_PEOPLE[1],
+        similarity: 0.91,
+      },
+      update: (input) => {
+        updates.push(input);
+        return RAW_PEOPLE[1];
+      },
+    }), reviewStore, {
+      personStore,
+      now: () => "2026-06-27T12:00:00.000Z",
+    });
+
+    const listed = await listPeople({ include_candidates: true }, service);
+    const candidateId = listed.candidates?.[0]?.id;
+    expect(candidateId).toBeTruthy();
+
+    const confirmed = await confirmCandidate({
+      candidate_id: candidateId,
+      name: "Morgan",
+      session_key: "realtime:session-1",
+    }, service);
+    expect(confirmed.person?.name).toBe("Morgan");
+    expect(updates).toEqual([
+      {
+        personId: "p-unknown",
+        name: "Morgan",
+      },
+    ]);
+
+    const afterList = await listPeople({ include_candidates: true }, service);
+    expect(afterList.people.map((person) => person.name).sort()).toEqual(["Morgan", "Sarah"]);
+    expect(afterList.candidates).toEqual([]);
+
+    const afterIdentify = await identifyCurrentFrame({
+      image_base64: "abc",
+      session_key: "realtime:session-1",
+    }, service);
+    expect(afterIdentify.found).toBe(true);
+    if (afterIdentify.found) {
+      expect(afterIdentify.person).toMatchObject({ id: "p-unknown", name: "Morgan" });
+      expect(afterIdentify.identity_signal?.subject).toEqual({ type: "person", personId: "p-unknown" });
+    }
   });
 
   test("person.reject_candidate suppresses a legacy Unknown candidate from future list and identify results", async () => {
@@ -499,14 +745,13 @@ function fakeLegacyPersonRepository(options: {
   update?: (input: {
     personId: string;
     name?: string | null;
-    facts?: string[] | null;
-    recap?: string | null;
   }) => Record<string, unknown>;
   enroll?: (input: {
     imageBase64: string;
     name: string;
     personId?: string | null;
   }) => Record<string, unknown>;
+  clear?: () => { removed?: number } | { ok: false; error: string };
 }): LegacyPersonRepository {
   return {
     async identify() {
@@ -541,10 +786,17 @@ function fakeLegacyPersonRepository(options: {
       const person = options.update?.(input) ?? {
         id: input.personId,
         name: input.name ?? "Updated",
-        facts: input.facts ?? [],
-        recaps: input.recap ? [{ summary: input.recap }] : [],
+        facts: [],
+        recaps: [],
       };
       return { ok: true, person: person as LegacyDeepFaceProfile };
+    },
+    async clearPeople() {
+      const result = options.clear?.();
+      if (result && "ok" in result && result.ok === false) {
+        return { ok: false, error: result.error };
+      }
+      return { ok: true, removed: result?.removed ?? 0 };
     },
   };
 }

@@ -138,7 +138,13 @@ export class WhereAdapter implements ArmAdapter {
         resolve(result);
       });
       // Emit region registration to the device after the resolver is in place.
-      this.emitRegions(sessionKey, this._fullSetFor(sessionKey, intention.id, place, isHard, content));
+      try {
+        this.emitRegions(sessionKey, this._fullSetFor(sessionKey, intention.id, place, isHard, content));
+      } catch (error) {
+        this.pendingAcks.delete(intention.id);
+        this.removePending(sessionKey, intention.id);
+        throw error;
+      }
       timeoutHandle = setTimeout(() => {
         // #481: delete the in-flight resolver (so resolveAck() reports "no live
         // resolver" and the RPC routes a late ack to armFromLateAck instead) but
@@ -155,18 +161,15 @@ export class WhereAdapter implements ArmAdapter {
 
     // #481: a device_ack_timeout is RECOVERABLE, not terminal. Keep the intention
     // registered in pendingBySession (so concurrent arms still see it and the
-    // device set stays consistent) and leave the pendingAcks resolver in place so
-    // a late ack arms it. Return deferred:true so the caller keeps it in pending_arm.
+    // device set stays consistent). The ack resolver was removed on timeout so
+    // a late ack must arm it through armFromLateAck. Return deferred:true so the
+    // caller keeps it in pending_arm.
     if (timedOut) {
       return { ok: false, state: "arm_failed", reason: "device_ack_timeout", deferred: true };
     }
 
     // Resolved by an explicit ack (or disarm) — remove from pendingBySession.
-    const pm = this.pendingBySession.get(sessionKey);
-    if (pm) {
-      pm.delete(intention.id);
-      if (pm.size === 0) this.pendingBySession.delete(sessionKey);
-    }
+    this.removePending(sessionKey, intention.id);
 
     if (!ack.ok) {
       // Emit the remaining active set (without this intention) so the device stays consistent.
@@ -210,15 +213,13 @@ export class WhereAdapter implements ArmAdapter {
 
     if (!ack.ok) {
       // Device gave up (e.g. denied/restricted). Drop and re-emit without it.
-      pendingMap.delete(intention.id);
-      if (pendingMap.size === 0) this.pendingBySession.delete(sessionKey);
+      this.removePending(sessionKey, intention.id);
       this.emitRegions(sessionKey, this._fullSetFor(sessionKey, null, "", false, ""));
       return false;
     }
 
     // Promote pending → armed.
-    pendingMap.delete(intention.id);
-    if (pendingMap.size === 0) this.pendingBySession.delete(sessionKey);
+    this.removePending(sessionKey, intention.id);
     let sessionMap = this.armedBySession.get(sessionKey);
     if (!sessionMap) {
       sessionMap = new Map();
@@ -287,10 +288,7 @@ export class WhereAdapter implements ArmAdapter {
     // Remove from pendingBySession.
     const pendingMap = this.pendingBySession.get(sessionKey);
     const wasInPending = pendingMap?.has(intention.id) ?? false;
-    if (wasInPending && pendingMap) {
-      pendingMap.delete(intention.id);
-      if (pendingMap.size === 0) this.pendingBySession.delete(sessionKey);
-    }
+    if (wasInPending) this.removePending(sessionKey, intention.id);
 
     // Remove from armedBySession.
     const sessionMap = this.armedBySession.get(sessionKey);
@@ -348,6 +346,13 @@ export class WhereAdapter implements ArmAdapter {
       result.push({ intentionId: addId, place: addPlace, isHard: addIsHard, label: addPlace, content: addContent });
     }
     return result;
+  }
+
+  private removePending(sessionKey: string, intentionId: string): void {
+    const pendingMap = this.pendingBySession.get(sessionKey);
+    if (!pendingMap) return;
+    pendingMap.delete(intentionId);
+    if (pendingMap.size === 0) this.pendingBySession.delete(sessionKey);
   }
 
   /** The termKey for the first armable where term (used by region.entered RPC). */

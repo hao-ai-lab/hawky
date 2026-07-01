@@ -477,8 +477,8 @@ export function isSafeBashCommand(input: Record<string, unknown>): boolean {
 // -----------------------------------------------------------------------------
 
 const DANGEROUS_PATTERNS = [
-  /\brm\s+-[^\s]*r/,           // rm -rf, rm -r
-  /\brm\s+-[^\s]*f/,           // rm -f, rm -rf
+  /\brm\s+-[^\s]*r/i,          // rm -rf, rm -r, rm -R
+  /\brm\s+-[^\s]*f/i,          // rm -f, rm -rf, rm -Rf
   /\bsudo\b/,                   // any sudo usage
   /\bchmod\b/,                  // permission changes
   /\bchown\b/,                  // ownership changes
@@ -1440,32 +1440,22 @@ export async function executeTools(
     }),
   );
 
-  // -------------------------------------------------------------------------
-  // Phase 3: Post-processing (future: hooks)
-  // -------------------------------------------------------------------------
-  // Clean phase boundary — hooks will be added here in P2.
-
-  // Collect results (maintain order, include denied tools)
+  // Collect results in original tool_use order, including denied tools.
+  const resultsById = new Map<string, ToolCallResult>();
   for (const slot of slots) {
-    if (slot) results.push(slot);
+    if (slot) resultsById.set(slot.tool_use_id, slot);
   }
 
-  // Add denied tools with their actual feedback content
   for (const denied of deniedResults) {
-    if (!results.find((r) => r.tool_use_id === denied.tool_use_id)) {
-      results.push(denied);
-    }
+    if (!resultsById.has(denied.tool_use_id)) resultsById.set(denied.tool_use_id, denied);
   }
 
-  // Fallback: any remaining tools not in results (unknown tools, etc.)
   for (const call of toolCalls) {
-    if (!results.find((r) => r.tool_use_id === call.id)) {
-      results.push({
-        tool_use_id: call.id,
-        name: call.name,
-        result: { type: "error", content: "Tool execution denied or unknown." },
-      });
-    }
+    results.push(resultsById.get(call.id) ?? {
+      tool_use_id: call.id,
+      name: call.name,
+      result: { type: "error", content: "Tool execution denied or unknown." },
+    });
   }
 
   return results;

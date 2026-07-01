@@ -146,6 +146,18 @@ def test_enroll_dedupes_against_existing(A):
     assert len(A.people()["people"]) == 1
 
 
+def test_enroll_rejects_path_traversal_person_id(A, tmp_path):
+    A._engine = _engine_returning(FakeFace(_unit(4)))
+    outside = tmp_path / "outside"
+
+    r = A.enroll(A.EnrollRequest(image_base64=_b64(), name="Bad", person_id="../outside"))
+
+    assert r["ok"] is False
+    assert "person_id" in r["error"]
+    assert not outside.exists()
+    assert A.people()["people"] == []
+
+
 def test_update_sets_name_facts_recap(A):
     A._engine = _engine_returning(FakeFace(_unit(4)))
     pid = A.enroll(A.EnrollRequest(image_base64=_b64(), name="Unknown"))["person"]["id"]
@@ -155,6 +167,25 @@ def test_update_sets_name_facts_recap(A):
     assert p["facts"] == ["climbs"]
     assert p["recaps"][-1]["summary"] == "Q3"
     assert "embeddings" not in p
+
+
+def test_update_adds_facts_to_legacy_profile_missing_facts(A):
+    pid = "legacy-1"
+    A._save({
+        pid: {
+            "id": pid,
+            "name": "Legacy",
+            "embeddings": [_unit(4)],
+            "recaps": [],
+            "created_at": "2026-06-30T00:00:00Z",
+            "last_seen_at": "2026-06-30T00:00:00Z",
+        },
+    })
+
+    r = A.update(A.UpdateRequest(person_id=pid, facts=["climbs"]))
+
+    assert r["ok"] is True
+    assert r["person"]["facts"] == ["climbs"]
 
 
 def test_identify_empty_db(A):

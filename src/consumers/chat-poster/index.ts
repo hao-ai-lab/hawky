@@ -130,6 +130,7 @@ interface PendingMemo {
   body: string;
   capturedStartIso: string;
   mediaId: string;
+  mediaDurationMs?: number;
   backend: string;
 }
 
@@ -239,6 +240,23 @@ export function isLikelySilence(
   return false;
 }
 
+export function likelySilenceDropLogMetadata(event: AsrFinalEvent): Record<string, unknown> {
+  const confidences = (event.segments ?? [])
+    .map((s) => s.confidence)
+    .filter((c): c is number => typeof c === "number");
+  const meanConfidence = confidences.length > 0
+    ? confidences.reduce((a, b) => a + b, 0) / confidences.length
+    : undefined;
+
+  return {
+    media_id: event.media_id,
+    media_duration_ms: event.media_duration_ms,
+    transcript_chars: event.text.trim().length,
+    segment_count: event.segments?.length ?? 0,
+    ...(meanConfidence !== undefined ? { mean_confidence: meanConfidence } : {}),
+  };
+}
+
 interface CoalesceLimits {
   debounceMs: number;
   flushAgeMs: number;
@@ -261,11 +279,7 @@ async function handleAsrFinal(
   }
 
   if (isLikelySilence(text, event, config)) {
-    log.info("dropping likely-silence transcript", {
-      media_id: event.media_id,
-      text,
-      media_duration_ms: event.media_duration_ms,
-    });
+    log.info("dropping likely-silence transcript", likelySilenceDropLogMetadata(event));
     return;
   }
 
@@ -275,6 +289,7 @@ async function handleAsrFinal(
     body,
     capturedStartIso: event.captured_start_iso,
     mediaId: event.media_id,
+    mediaDurationMs: event.media_duration_ms,
     backend: event.backend,
   };
 
@@ -343,6 +358,16 @@ function coalescedText(memos: ReadonlyArray<PendingMemo>): string {
   return out;
 }
 
+function coalescedMediaDurationMs(memos: ReadonlyArray<PendingMemo>): number | undefined {
+  if (memos.length === 0) return undefined;
+  let total = 0;
+  for (const memo of memos) {
+    if (typeof memo.mediaDurationMs !== "number") return undefined;
+    total += memo.mediaDurationMs;
+  }
+  return total;
+}
+
 function formatHHMMSS(iso: string): string {
   try {
     const d = new Date(iso);
@@ -388,10 +413,12 @@ async function flushBuffer(
     session.sessionManager.appendMessage(chatMessage);
 
     // Re-publish a normalized ChatPostEvent so other consumers can observe it.
+    const mediaDurationMs = coalescedMediaDurationMs(buf.memos);
     const chatEvent: ChatPostEvent = {
       session_id: sessionKey,
       role: "user",
       text: body,
+      ...(mediaDurationMs !== undefined ? { media_duration_ms: mediaDurationMs } : {}),
       source: {
         kind: "voice_memo",
         media_id: mediaIds,

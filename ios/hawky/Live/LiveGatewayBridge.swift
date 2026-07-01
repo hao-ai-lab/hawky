@@ -580,7 +580,7 @@ actor LiveGatewayBridge {
         return root["candidate"] != nil
     }
 
-    /// List everyone in the face database.
+    /// List confirmed people and reviewable candidates from the person service.
     func listPeople(sessionKey: String) async -> [LivePerson] {
         let payload = await invokeMethod(
             "person.list",
@@ -603,7 +603,15 @@ actor LiveGatewayBridge {
     /// true on success.
     @discardableResult
     func clearPeople(sessionKey: String) async -> Bool {
-        await invokeFaceTool("face_clear", args: [:], sessionKey: sessionKey) != nil
+        let payload = await invokeMethod(
+            "person.clear",
+            params: ["session_key": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: 15
+        )
+        guard case let .object(root)? = payload else { return false }
+        if case let .bool(ok)? = root["ok"] { return ok }
+        return false
     }
 
     /// Safety Check (#648): classify a frame for hazards via the assess_hazard tool

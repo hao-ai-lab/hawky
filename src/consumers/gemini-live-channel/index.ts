@@ -29,6 +29,7 @@ import { createSubsystemLogger } from "../../logging/index.js";
 import { getPrompt } from "../../prompts/index.js";
 import { getBus } from "../../bus/index.js";
 import type { MediaLiveChunkEvent } from "../../bus/events.js";
+import { LiveDownlinkEmitter } from "../../gateway/live-events.js";
 import type { AgentSessionManager } from "../../gateway/agent-sessions.js";
 import type { GatewayServer } from "../../gateway/server.js";
 import { loadSessionMeta } from "../../storage/session.js";
@@ -148,6 +149,8 @@ interface SessionState {
   setupComplete: boolean;
   /** Chunks received while waiting for setupComplete; drain on setupComplete. */
   pending: Array<{ kind: "frame" | "audio_chunk"; base64: string }>;
+  /** Realtime downlink (#2): timed `live.*` events back to the caller. */
+  downlink: LiveDownlinkEmitter;
 }
 
 // -----------------------------------------------------------------------------
@@ -288,6 +291,7 @@ async function openSession(
     setupSent: false,
     setupComplete: false,
     pending: [],
+    downlink: new LiveDownlinkEmitter(deps.server, sessionKey, "gemini-live"),
   };
 
   client.onEvent((e) => {
@@ -377,13 +381,21 @@ async function onServerEvent(
   switch (e.kind) {
     case "setupComplete": {
       state.setupComplete = true;
+      state.downlink.sessionOpen(
+        deps.config.model ?? DEFAULT_GEMINI_LIVE_MODEL,
+      );
       // Drain pending chunks queued while waiting for setup.
       for (const p of state.pending) forwardChunk(state, p.kind, p.base64);
       state.pending = [];
       return;
     }
     case "textDelta": {
+      state.downlink.textDelta(e.text);
       state.textBuffer += e.text;
+      return;
+    }
+    case "audioDelta": {
+      state.downlink.audioDelta(e.bytes);
       return;
     }
     case "turnComplete": {
@@ -391,6 +403,9 @@ async function onServerEvent(
       return;
     }
     case "toolCall": {
+      for (const call of e.calls) {
+        state.downlink.toolCall(call.id ?? "", call.name, call.args);
+      }
       await dispatchToolCalls(e.calls, state, deps);
       return;
     }
@@ -404,6 +419,7 @@ async function onServerEvent(
       return;
     }
     case "error": {
+      state.downlink.error(e.message);
       log.warn("gemini-live error event", {
         sessionKey: state.sessionKey,
         message: e.message,
@@ -419,6 +435,11 @@ async function onTurnComplete(
 ): Promise<void> {
   const text = state.textBuffer.trim();
   state.textBuffer = "";
+
+  // Close the turn on the downlink first — must fire even for audio-only turns
+  // (empty text) so the caller can time and bound the turn.
+  state.downlink.turnComplete(text.length > 0 ? text : undefined);
+
   if (!text) return;
 
   // Persist as an assistant message on the voice session JSONL, mirroring
@@ -492,6 +513,8 @@ async function dispatchToolCalls(
         content: `tool threw: ${err instanceof Error ? err.message : String(err)}`,
       } as ToolResult;
     }
+
+    state.downlink.toolResult(call.id ?? "", result.type !== "error");
 
     // Report the result back to Gemini so future turns can observe it.
     try {

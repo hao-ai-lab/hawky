@@ -10,6 +10,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { getBus, resetBus } from "../../src/bus/index.js";
 import {
   registerChatPoster,
+  type ChatPostEvent,
   type ChatPosterConfig,
 } from "../../src/consumers/chat-poster/index.js";
 import type { AsrFinalEvent } from "../../src/consumers/asr/events.js";
@@ -120,6 +121,66 @@ describe("chat-poster debounce coalescing", () => {
       expect(/\n\n\[\d{2}:\d{2}:\d{2}\] /.test(text)).toBe(true);
     } finally {
       unsub();
+    }
+  });
+
+  test("chat.post forwards media duration for a single memo", async () => {
+    const { manager } = makeMockSessions();
+    const posts: ChatPostEvent[] = [];
+    const unsubPost = getBus().subscribe<ChatPostEvent>("chat.post", (event) => posts.push(event));
+    const unsub = registerChatPoster({
+      sessions: manager,
+      config: { ...baseConfig, debounce_ms: 30 },
+    });
+
+    try {
+      getBus().publish("asr.final", mkEvent({ media_id: "m1", text: "duration one", media_duration_ms: 1234 }));
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(posts.length).toBe(1);
+      expect(posts[0]).toMatchObject({
+        session_id: "voice:coalesce-test",
+        media_duration_ms: 1234,
+        source: {
+          kind: "voice_memo",
+          media_id: "m1",
+        },
+      });
+    } finally {
+      unsub();
+      unsubPost();
+    }
+  });
+
+  test("chat.post sums media duration for coalesced memos", async () => {
+    const { manager } = makeMockSessions();
+    const posts: ChatPostEvent[] = [];
+    const unsubPost = getBus().subscribe<ChatPostEvent>("chat.post", (event) => posts.push(event));
+    const unsub = registerChatPoster({
+      sessions: manager,
+      config: { ...baseConfig, debounce_ms: 80 },
+    });
+
+    try {
+      getBus().publish("asr.final", mkEvent({ media_id: "m1", text: "first thing", media_duration_ms: 1000 }));
+      await new Promise((r) => setTimeout(r, 10));
+      getBus().publish(
+        "asr.final",
+        mkEvent({
+          media_id: "m2",
+          text: "second thing",
+          media_duration_ms: 2500,
+          captured_start_iso: "2026-04-29T10:00:05.000Z",
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 200));
+
+      expect(posts.length).toBe(1);
+      expect(posts[0].media_duration_ms).toBe(3500);
+      expect(posts[0].source.media_id).toBe("m1,m2");
+    } finally {
+      unsub();
+      unsubPost();
     }
   });
 

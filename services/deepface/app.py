@@ -5,7 +5,7 @@ Engine: InsightFace (deepinsight/insightface) — SCRFD detector + ArcFace
 (buffalo_l). Chosen over the DeepFace wrapper because it (a) separates real faces
 far better on hard live-camera frames (verified: same-person cosine ~0.65 vs
 different ~0.10, a wide margin) and (b) exposes per-face QUALITY signals
-(det_score, bbox size, pose) so we can reject sideways/tiny/blurry crops before
+(det_score, bbox size, pitch/yaw) so we can reject looking-away/tiny/blurry crops before
 they pollute the DB. The service owns matching + the person DB; iOS sends a face
 crop and gets back an identity, enrolls new people, and updates profiles.
 
@@ -15,7 +15,7 @@ Pipeline per request:
   embeddings. A profile holds MULTIPLE embeddings (every confirmed match adds its
   frame), so a person becomes robust to angle/lighting over time.
 
-DB layout (DEEPFACE_DB, default ./facedb):
+DB layout (DEEPFACE_DB, default services/deepface/facedb):
   facedb/<person_id>/<uuid>.jpg   enrolled crops (for thumbnails)
   facedb/profiles.json            { id, name, embeddings[[float]], facts, recaps, ... }
 
@@ -28,6 +28,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -40,18 +41,19 @@ from pydantic import BaseModel, Field
 DB_PATH = os.environ.get("DEEPFACE_DB", os.path.join(os.path.dirname(__file__), "facedb"))
 PROFILES_FILE = os.path.join(DB_PATH, "profiles.json")
 MODEL_PACK = os.environ.get("INSIGHTFACE_MODEL", "buffalo_l")
+PERSON_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # Cosine threshold: >= is a match. InsightFace/ArcFace separates same vs different
 # widely (same ~0.65, diff ~0.10 on the #627 set), so 0.35 is safely between.
 MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.35"))
 # Quality gate — reject crops that would produce a garbage embedding (the cause of
 # the duplicate "Unknown" profiles): low detector confidence, tiny face, or extreme
-# pose (sideways / looking away / upside-down). Tuned for LIVE camera frames (the
+# pose (sideways / looking away). Tuned for LIVE camera frames (the
 # client now sends the full frame, so InsightFace detects with full context): a
 # too-strict gate left the DB empty. Override via env to retune from real testing.
 MIN_DET_SCORE = float(os.environ.get("FACE_MIN_DET_SCORE", "0.50"))
 MIN_FACE_PX = int(os.environ.get("FACE_MIN_PX", "50"))          # min bbox width in px
-MAX_POSE_DEG = float(os.environ.get("FACE_MAX_POSE_DEG", "50")) # max |yaw|/|pitch|/|roll|
+MAX_POSE_DEG = float(os.environ.get("FACE_MAX_POSE_DEG", "50")) # max |yaw|/|pitch|
 
 _lock = threading.Lock()
 _app = None  # lazy InsightFace FaceAnalysis
@@ -96,16 +98,6 @@ def _passes_quality(face) -> FaceQuality:
         if max(pitch, yaw) > MAX_POSE_DEG:
             return FaceQuality(False, f"looking away (pitch {pitch:.0f}, yaw {yaw:.0f})")
     return FaceQuality(True)
-
-
-def _best_face(img):
-    """Return (face, quality) for the highest-confidence face, or (None, reason).
-    Picks by det_score (NOT bbox size — a large mis-detection scores low)."""
-    faces = _engine().get(img)
-    if not faces:
-        return None, FaceQuality(False, "no face detected")
-    face = max(faces, key=lambda f: f.det_score)
-    return face, _passes_quality(face)
 
 
 def _embedding(img) -> tuple[list[float] | None, str]:
@@ -156,6 +148,20 @@ def _save(profiles: dict[str, dict[str, Any]]) -> None:
     os.replace(tmp, PROFILES_FILE)
 
 
+def _is_valid_person_id(person_id: str) -> bool:
+    return bool(person_id) and PERSON_ID_RE.fullmatch(person_id) is not None and person_id not in {".", ".."}
+
+
+def _safe_person_dir(person_id: str) -> str | None:
+    if not _is_valid_person_id(person_id):
+        return None
+    base = os.path.abspath(DB_PATH)
+    candidate = os.path.abspath(os.path.join(base, person_id))
+    if candidate != base and candidate.startswith(base + os.sep):
+        return candidate
+    return None
+
+
 def _decode(image_base64: str):
     if "," in image_base64 and image_base64.strip().lower().startswith("data:"):
         image_base64 = image_base64.split(",", 1)[1]
@@ -172,7 +178,9 @@ def _decode(image_base64: str):
 
 
 def _thumbnail_b64(person_id: str) -> str | None:
-    person_dir = os.path.join(DB_PATH, person_id)
+    person_dir = _safe_person_dir(person_id)
+    if person_dir is None:
+        return None
     try:
         crops = sorted(f for f in os.listdir(person_dir) if f.endswith(".jpg"))
     except FileNotFoundError:
@@ -300,7 +308,9 @@ def enroll(req: EnrollRequest) -> dict[str, Any]:
                 person_id = best_id
 
         person_id = person_id or uuid.uuid4().hex
-        person_dir = os.path.join(DB_PATH, person_id)
+        person_dir = _safe_person_dir(person_id)
+        if person_dir is None:
+            return {"ok": False, "error": "invalid person_id"}
         os.makedirs(person_dir, exist_ok=True)
         cv2.imwrite(os.path.join(person_dir, f"{uuid.uuid4().hex}.jpg"), img)
 
@@ -353,6 +363,7 @@ def update(req: UpdateRequest) -> dict[str, Any]:
         if req.name:
             p["name"] = req.name
         if req.facts:
+            p.setdefault("facts", [])
             for f in req.facts:
                 if f not in p["facts"]:
                     p["facts"].append(f)

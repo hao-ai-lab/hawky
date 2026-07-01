@@ -11,7 +11,7 @@
 // workspace path and enforce security boundaries.
 // =============================================================================
 
-import { readdirSync, existsSync, readFileSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join, normalize, resolve } from "node:path";
 import type {
   ToolDefinition,
@@ -20,6 +20,7 @@ import type {
 } from "../agent/types.js";
 import { getWorkspaceDir } from "../storage/workspace.js";
 import { createSubsystemLogger } from "../logging/index.js";
+import { extractMemoryAppendJsonlText } from "../memory/append-jsonl-extract.js";
 
 const log = createSubsystemLogger("tools/memory");
 
@@ -28,6 +29,7 @@ const log = createSubsystemLogger("tools/memory");
 // -----------------------------------------------------------------------------
 
 const DEFAULT_MAX_RESULTS = 6;
+const MAX_RESULTS_LIMIT = 50;
 const MAX_SNIPPET_CHARS = 300;
 
 // Files to search in workspace root (in addition to memory/ directory)
@@ -51,12 +53,40 @@ interface MemoryGetInput {
   lines?: number;
 }
 
+function parseMemoryGetPath(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0 || value.includes("\0")) {
+    return undefined;
+  }
+  return value;
+}
+
+function parseOptionalPositiveInteger(value: unknown, field: string): number | string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    return `${field} must be a positive integer`;
+  }
+  return value;
+}
+
 async function executeMemoryGet(
   input: MemoryGetInput,
   _context: ToolContext,
 ): Promise<ToolResult> {
   const workspaceDir = getWorkspaceDir();
-  const relPath = input.path;
+  const rawInput = input as unknown as Record<string, unknown>;
+  const relPath = parseMemoryGetPath(rawInput.path);
+  if (!relPath) {
+    return { type: "error", content: "Path must be a non-empty relative string" };
+  }
+
+  const from = parseOptionalPositiveInteger(rawInput.from, "from");
+  if (typeof from === "string") {
+    return { type: "error", content: from };
+  }
+  const lines = parseOptionalPositiveInteger(rawInput.lines, "lines");
+  if (typeof lines === "string") {
+    return { type: "error", content: lines };
+  }
 
   // Security: reject absolute paths
   if (relPath.startsWith("/") || relPath.startsWith("\\")) {
@@ -72,22 +102,26 @@ async function executeMemoryGet(
     return { type: "error", content: "Path must not traverse outside workspace" };
   }
 
-  // Security: only .md files
-  if (!normalized.endsWith(".md")) {
-    return { type: "error", content: "Only .md files can be read via memory_get" };
+  const isAppendJsonl = normalized.startsWith("memory/") && normalized.endsWith(".jsonl");
+  // Security: allow Markdown memory files plus memory.append JSONL files that
+  // memory_search can return. Other JSONL/session logs stay unreadable here.
+  if (!normalized.endsWith(".md") && !isAppendJsonl) {
+    return { type: "error", content: "Only .md files and memory/*.jsonl files can be read via memory_get" };
   }
   if (!existsSync(fullPath)) {
     return { type: "text", content: JSON.stringify({ path: relPath, text: "", error: "File not found" }) };
   }
 
   try {
-    const content = readFileSync(fullPath, "utf-8");
+    const content = isAppendJsonl
+      ? extractMemoryAppendJsonlText(fullPath).text
+      : readFileSync(fullPath, "utf-8");
     const allLines = content.split("\n");
 
     // Apply line range if specified
-    if (input.from !== undefined || input.lines !== undefined) {
-      const start = Math.max(0, (input.from ?? 1) - 1); // 1-based to 0-based
-      const count = input.lines ?? allLines.length;
+    if (from !== undefined || lines !== undefined) {
+      const start = (from ?? 1) - 1; // 1-based to 0-based
+      const count = lines ?? allLines.length;
       const slice = allLines.slice(start, start + count);
 
       // content: full JSON for LLM
@@ -134,11 +168,11 @@ export const memoryGetToolDefinition: ToolDefinition<MemoryGetInput> = {
           "'memory/2026-03-14.md', 'IDENTITY.md'.",
       },
       from: {
-        type: "number",
+        type: "integer",
         description: "Start line (1-based). If omitted, reads from beginning.",
       },
       lines: {
-        type: "number",
+        type: "integer",
         description: "Maximum number of lines to read. If omitted, reads entire file.",
       },
     },
@@ -163,6 +197,20 @@ interface SearchMatch {
   snippet: string;
 }
 
+function normalizeMaxResults(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_MAX_RESULTS;
+  }
+
+  return Math.max(1, Math.min(Math.floor(value), MAX_RESULTS_LIMIT));
+}
+
+function parseMemorySearchQuery(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const query = value.trim();
+  return query ? query : undefined;
+}
+
 /**
  * Hybrid BM25 + vector search across workspace memory files.
  * Uses MemoryIndex (SQLite FTS5 + in-memory cosine similarity).
@@ -172,12 +220,12 @@ async function executeMemorySearch(
   input: MemorySearchInput,
   _context: ToolContext,
 ): Promise<ToolResult> {
-  const query = input.query.trim();
-  const maxResults = input.max_results ?? DEFAULT_MAX_RESULTS;
-
+  const rawInput = input as unknown as Record<string, unknown>;
+  const query = parseMemorySearchQuery(rawInput.query);
   if (!query) {
-    return { type: "error", content: "Query must not be empty" };
+    return { type: "error", content: "Query must be a non-empty string" };
   }
+  const maxResults = normalizeMaxResults(rawInput.max_results as number | undefined);
 
   try {
     const { getGlobalMemoryIndex } = await import("../memory/global.js");
@@ -257,7 +305,7 @@ export const memorySearchToolDefinition: ToolDefinition<MemorySearchInput> = {
       },
       max_results: {
         type: "number",
-        description: "Maximum number of results to return. Default: 6.",
+        description: "Maximum number of results to return. Default: 6, max: 50.",
       },
     },
     required: ["query"],
@@ -283,13 +331,7 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
 
   const memoryDir = join(workspaceDir, "memory");
   if (existsSync(memoryDir)) {
-    try {
-      for (const entry of readdirSync(memoryDir)) {
-        if (entry.endsWith(".md")) {
-          filesToSearch.push({ relPath: `memory/${entry}`, fullPath: join(memoryDir, entry) });
-        }
-      }
-    } catch { /* skip */ }
+    collectSearchableMemoryFiles(memoryDir, memoryDir, filesToSearch);
   }
 
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -299,7 +341,10 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
   for (const file of filesToSearch) {
     if (matches.length >= maxResults) break;
     try {
-      const lines = readFileSync(file.fullPath, "utf-8").split("\n");
+      const content = file.relPath.endsWith(".jsonl")
+        ? extractMemoryAppendJsonlText(file.fullPath).text
+        : readFileSync(file.fullPath, "utf-8");
+      const lines = content.split("\n");
       for (let i = 0; i < lines.length && matches.length < maxResults; i++) {
         if (regex.test(lines[i])) {
           const start = Math.max(0, i - 1);
@@ -336,6 +381,35 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
     content,
     display_content: displayLines.join("\n"),
   };
+}
+
+function collectSearchableMemoryFiles(
+  dir: string,
+  rootDir: string,
+  out: Array<{ relPath: string; fullPath: string }>,
+): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    try {
+      const stat = statSync(fullPath);
+      if (stat.isDirectory()) {
+        collectSearchableMemoryFiles(fullPath, rootDir, out);
+        continue;
+      }
+      if (!stat.isFile() || (!entry.endsWith(".md") && !entry.endsWith(".jsonl"))) {
+        continue;
+      }
+      const relFromRoot = fullPath.slice(rootDir.length + 1);
+      out.push({ relPath: `memory/${relFromRoot}`, fullPath });
+    } catch { /* skip */ }
+  }
 }
 
 // -----------------------------------------------------------------------------

@@ -11,8 +11,13 @@
 // =============================================================================
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { fetchPeople } from "../src/gateway/people-methods.js";
+import { resetDefaultPersonServiceForTests } from "../src/gateway/person-methods.js";
+import { resetConfigDir, setConfigDir } from "../src/storage/config.js";
 
 const RAW_PEOPLE = [
   {
@@ -44,8 +49,24 @@ function stubDeepFaceFetch(handler: (url: string) => Response | Promise<Response
 
 describe("people.list (fetchPeople)", () => {
   let restore: () => void = () => {};
+  let testConfigDir: string | undefined;
 
-  afterEach(() => restore());
+  beforeEach(() => {
+    testConfigDir = mkdtempSync(join(tmpdir(), "hawky-people-methods-"));
+    setConfigDir(testConfigDir);
+    resetDefaultPersonServiceForTests();
+  });
+
+  afterEach(() => {
+    restore();
+    restore = () => {};
+    resetDefaultPersonServiceForTests();
+    resetConfigDir();
+    if (testConfigDir) {
+      rmSync(testConfigDir, { recursive: true, force: true });
+      testConfigDir = undefined;
+    }
+  });
 
   test("maps people and strips embeddings", async () => {
     restore = stubDeepFaceFetch(() =>

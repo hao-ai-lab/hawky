@@ -301,16 +301,23 @@ export class WebSocketClient {
   // ---------------------------------------------------------------------------
 
   private async doReauth(): Promise<void> {
-    if (!this.options.onAuthFailed) { this.scheduleReconnect(); return; }
+    if (!this.options.onAuthFailed) {
+      if (!this.closed) this.scheduleReconnect();
+      return;
+    }
     try {
       const newToken = await this.options.onAuthFailed();
+      if (this.closed) return;
       if (newToken) {
         this.options.token = newToken;
         this.backoffMs = INITIAL_BACKOFF_MS;
         await this.connect();
         return;
       }
-    } catch { /* fall through */ }
+    } catch {
+      if (this.closed) return;
+    }
+    if (this.closed) return;
     this.options.token = undefined;
     this.scheduleReconnect();
   }

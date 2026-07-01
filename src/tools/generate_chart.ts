@@ -141,16 +141,17 @@ export async function executeGenerateChart(
   if (usable.length === 0) {
     return { type: "error", content: "generate_chart needs at least one series with a non-empty `data` array of numbers." };
   }
-  // Coerce/guard the numbers — drop NaN/non-finite, keep the shape.
-  for (const s of usable) {
-    s.data = s.data.map((v) => (typeof v === "number" && Number.isFinite(v) ? v : 0));
-  }
+  // Coerce/guard the numbers without mutating caller-owned tool args.
+  const normalizedSeries = usable.map((s) => ({
+    ...s,
+    data: s.data.map((v) => (typeof v === "number" && Number.isFinite(v) ? v : 0)),
+  }));
 
   try {
-    const png = renderChartPng({ ...input, type, series: usable });
+    const png = renderChartPng({ ...input, type, series: normalizedSeries });
     const base64 = png.toString("base64");
-    const seriesDesc = usable.map((s) => s.label).filter(Boolean).join(", ");
-    log.info("generate_chart rendered", { type, series: usable.length, bytes: png.length });
+    const seriesDesc = normalizedSeries.map((s) => s.label).filter(Boolean).join(", ");
+    log.info("generate_chart rendered", { type, series: normalizedSeries.length, bytes: png.length });
     return {
       type: "image",
       content: `Generated a ${type} chart${input.title ? ` titled "${input.title}"` : ""}${seriesDesc ? ` (${seriesDesc})` : ""}.`,
@@ -159,8 +160,8 @@ export async function executeGenerateChart(
       metadata: {
         chart_type: type,
         title: input.title ?? null,
-        series_count: usable.length,
-        points: usable[0].data.length,
+        series_count: normalizedSeries.length,
+        points: normalizedSeries[0].data.length,
       },
     };
   } catch (err) {

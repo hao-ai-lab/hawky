@@ -97,7 +97,7 @@ describe("PermissionDialog", () => {
       },
     });
     render(<PermissionDialog />);
-    expect(screen.getByText(/\/Users\/hao\/test\.ts/)).toBeInTheDocument();
+    expect(screen.getByText(/\/Users\/example\/test\.ts/)).toBeInTheDocument();
   });
 
   it("shows 'Always allow this command' for bash tool", () => {

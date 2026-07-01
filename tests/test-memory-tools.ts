@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { memoryGetToolDefinition, memorySearchToolDefinition } from "../src/tools/memory.js";
+import { executeMemoryAppend } from "../src/tools/memory_append.js";
 import { setWorkspaceDir } from "../src/storage/workspace.js";
 import { WorkspaceManager } from "../src/storage/workspace.js";
 import { resetGlobalMemoryIndex, getGlobalMemoryIndex } from "../src/memory/global.js";
@@ -144,6 +145,26 @@ describe("memory_get — line ranges", () => {
     expect(parsed.text).toBe("");
     expect(parsed.lines).toBe(0);
   });
+
+  test("rejects malformed line ranges", async () => {
+    writeFileSync(join(wsDir, "memory", "test.md"), "line1\nline2", "utf-8");
+
+    const zeroFrom = await runMemoryGet({ path: "memory/test.md", from: 0 });
+    expect(zeroFrom.type).toBe("error");
+    expect(zeroFrom.content).toContain("from");
+
+    const fractionalFrom = await runMemoryGet({ path: "memory/test.md", from: 1.5 });
+    expect(fractionalFrom.type).toBe("error");
+    expect(fractionalFrom.content).toContain("from");
+
+    const stringLines = await runMemoryGet({ path: "memory/test.md", lines: "2" });
+    expect(stringLines.type).toBe("error");
+    expect(stringLines.content).toContain("lines");
+
+    const nanLines = await runMemoryGet({ path: "memory/test.md", lines: Number.NaN });
+    expect(nanLines.type).toBe("error");
+    expect(nanLines.content).toContain("lines");
+  });
 });
 
 // =============================================================================
@@ -151,6 +172,20 @@ describe("memory_get — line ranges", () => {
 // =============================================================================
 
 describe("memory_get — security", () => {
+  test("rejects malformed paths", async () => {
+    const missing = await runMemoryGet({});
+    expect(missing.type).toBe("error");
+    expect(missing.content).toContain("Path");
+
+    const nonString = await runMemoryGet({ path: 42 });
+    expect(nonString.type).toBe("error");
+    expect(nonString.content).toContain("Path");
+
+    const blank = await runMemoryGet({ path: "   " });
+    expect(blank.type).toBe("error");
+    expect(blank.content).toContain("Path");
+  });
+
   test("rejects absolute paths", async () => {
     const result = await runMemoryGet({ path: "/etc/passwd" });
     expect(result.type).toBe("error");
@@ -180,6 +215,13 @@ describe("memory_get — security", () => {
     const result = await runMemoryGet({ path: "config.json" });
     expect(result.type).toBe("error");
     expect(result.content).toContain(".md");
+  });
+
+  test("rejects jsonl files outside memory append logs", async () => {
+    writeFileSync(join(wsDir, "session.jsonl"), "{\"text\":\"secret\"}\n", "utf-8");
+    const result = await runMemoryGet({ path: "session.jsonl" });
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("memory/*.jsonl");
   });
 });
 
@@ -221,6 +263,48 @@ describe("memory_search — basic matching", () => {
 
     idx.close();
     rmSync(dailyDir, { recursive: true, force: true });
+  });
+
+  test("finds text written by memory_append JSONL logs", async () => {
+    const result = await executeMemoryAppend(
+      {
+        category: "observations",
+        text: "Remember the calypso orchid needs shade after lunch.",
+        ts_iso: "2026-06-30T12:00:00.000Z",
+      },
+      makeContext(),
+    );
+    expect(result.type).toBe("text");
+
+    const search = await runMemorySearch({ query: "calypso orchid" });
+    const parsed = JSON.parse(search.content);
+
+    expect(parsed.results.length).toBeGreaterThan(0);
+    expect(parsed.results[0].path).toMatch(/^memory\/observations\/.*\.jsonl$/);
+    expect(parsed.results[0].snippet).toContain("calypso orchid");
+  });
+
+  test("memory_get can read memory_append JSONL search results", async () => {
+    const result = await executeMemoryAppend(
+      {
+        category: "observations",
+        text: "Remember the night-blooming jasmine needs pruning tomorrow.",
+        ts_iso: "2026-06-30T13:00:00.000Z",
+      },
+      makeContext(),
+    );
+    expect(result.type).toBe("text");
+
+    const search = await runMemorySearch({ query: "night-blooming jasmine" });
+    const searchParsed = JSON.parse(search.content);
+    const path = searchParsed.results[0].path;
+    expect(path).toMatch(/^memory\/observations\/.*\.jsonl$/);
+
+    const get = await runMemoryGet({ path });
+    expect(get.type).toBe("text");
+    const getParsed = JSON.parse(get.content);
+    expect(getParsed.path).toBe(path);
+    expect(getParsed.text).toContain("[observations] Remember the night-blooming jasmine needs pruning tomorrow.");
   });
 
   test("returns path, line_number, and snippet", async () => {
@@ -276,6 +360,26 @@ describe("memory_search — limits and edge cases", () => {
     expect(parsed.results.length).toBeLessThanOrEqual(3);
   });
 
+  test("clamps negative max_results to one result", async () => {
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(wsDir, "memory", `negative-${i}.md`), `Negative limit match ${i}`, "utf-8");
+    }
+
+    const result = await runMemorySearch({ query: "Negative limit match", max_results: -10 });
+    const parsed = JSON.parse(result.content);
+    expect(parsed.results.length).toBe(1);
+  });
+
+  test("caps very large max_results", async () => {
+    for (let i = 0; i < 60; i++) {
+      writeFileSync(join(wsDir, "memory", `huge-${i}.md`), `Huge limit match ${i}`, "utf-8");
+    }
+
+    const result = await runMemorySearch({ query: "Huge limit match", max_results: 5_000 });
+    const parsed = JSON.parse(result.content);
+    expect(parsed.results.length).toBeLessThanOrEqual(50);
+  });
+
   test("default max_results caps results", async () => {
     for (let i = 0; i < 10; i++) {
       writeFileSync(join(wsDir, "memory", `hit-${i}.md`), `Hit number ${i} plus more words`, "utf-8");
@@ -312,6 +416,21 @@ describe("memory_search — limits and edge cases", () => {
   test("empty query returns error", async () => {
     const result = await runMemorySearch({ query: "" });
     expect(result.type).toBe("error");
+    expect(result.content).toContain("non-empty string");
+  });
+
+  test("rejects missing and non-string query values", async () => {
+    const missing = await runMemorySearch({});
+    expect(missing.type).toBe("error");
+    expect(missing.content).toContain("non-empty string");
+
+    const nonString = await runMemorySearch({ query: 42 });
+    expect(nonString.type).toBe("error");
+    expect(nonString.content).toContain("non-empty string");
+
+    const blank = await runMemorySearch({ query: "   " });
+    expect(blank.type).toBe("error");
+    expect(blank.content).toContain("non-empty string");
   });
 
   test("reports result count", async () => {

@@ -472,4 +472,17 @@ describe("session.list with meta", () => {
     expect(result.sessions[0].pinned).toBe(false);
     expect(result.sessions[0].archived).toBe(false);
   });
+
+  test("marks active sessions by exact storage id match", () => {
+    createTestSession("web:general", 1);
+    createTestSession("web:general-archive", 1);
+    sessions.getOrCreate("web:general-archive");
+
+    const result = server.call("session.list", mockConn, { limit: 10 });
+    const general = result.sessions.find((s: any) => s.id === "web/general");
+    const archive = result.sessions.find((s: any) => s.id === "web/general-archive");
+
+    expect(general?.active).toBe(false);
+    expect(archive?.active).toBe(true);
+  });
 });

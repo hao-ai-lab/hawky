@@ -51,17 +51,30 @@ const realtimeMintQuotas = new Map<string, {
   dayCount: number;
 }>();
 
+type RealtimeApiKeySelection = {
+  apiKey: string;
+  byokApiKey: string;
+};
+
+type RealtimeClientSecretRequest = {
+  model: string;
+  body: {
+    session: Record<string, unknown>;
+    expires_after: {
+      anchor: "created_at";
+      seconds: number;
+    };
+  };
+};
+
 export async function mintOpenAIRealtimeClientSecret(
   params: LiveRealtimeClientSecretParams,
   options: LiveRealtimeBrokerOptions = {},
 ): Promise<LiveRealtimeClientSecretResponse> {
   const cfg = loadConfig();
-  // Prefer a caller-supplied "bring your own key" (hosted web demo) when it is
-  // well-formed; otherwise fall back to the gateway's configured key.
-  const byok = sanitizeByokKey(params.byok_api_key);
-  const apiKey = byok || process.env.OPENAI_API_KEY || cfg.api_keys?.openai || "";
-  if (!apiKey) {
-    if (!byok && options.allowProviderGatewayForward !== false) {
+  const keySelection = selectRealtimeApiKey(params, cfg.api_keys?.openai);
+  if (!keySelection.apiKey) {
+    if (!keySelection.byokApiKey && options.allowProviderGatewayForward !== false) {
       const gatewayResponse = await mintViaProviderGateway(params, options);
       if (gatewayResponse) return gatewayResponse;
     }
@@ -70,12 +83,58 @@ export async function mintOpenAIRealtimeClientSecret(
       400,
     );
   }
-  if (!byok) {
+  if (!keySelection.byokApiKey) {
     enforceRealtimeMintQuota(options.quotaKey ?? "unknown");
   }
 
+  const request = buildRealtimeClientSecretRequest(params);
+
+  const upstream = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${keySelection.apiKey}`,
+      "Content-Type": "application/json",
+      "OpenAI-Safety-Identifier": "hawky-live-lab",
+    },
+    body: JSON.stringify(request.body),
+  });
+
+  const payload = await upstream.json().catch(() => null);
+  if (!upstream.ok) {
+    const message = extractOpenAIError(payload) ?? `OpenAI returned HTTP ${upstream.status}`;
+    throw new LiveRealtimeBrokerError(message, upstream.status);
+  }
+
+  return {
+    ok: true,
+    model: request.model,
+    websocket_url: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(request.model)}`,
+    client_secret: payload,
+  };
+}
+
+export function resetRealtimeMintQuotaForTests(): void {
+  realtimeMintQuotas.clear();
+}
+
+function selectRealtimeApiKey(
+  params: LiveRealtimeClientSecretParams,
+  configuredKey: string | undefined,
+): RealtimeApiKeySelection {
+  // Prefer a caller-supplied "bring your own key" (hosted web demo) when it is
+  // well-formed. If a non-empty BYOK value is supplied but malformed, reject it
+  // instead of silently consuming the gateway's configured key.
+  const byok = sanitizeByokKey(params.byok_api_key);
+  return {
+    apiKey: byok || process.env.OPENAI_API_KEY || configuredKey || "",
+    byokApiKey: byok,
+  };
+}
+
+function buildRealtimeClientSecretRequest(
+  params: LiveRealtimeClientSecretParams,
+): RealtimeClientSecretRequest {
   const model = sanitizeRealtimeModel(params.model);
-  const expiresAfterSeconds = sanitizeClientSecretTTL(params.expires_after_seconds);
   const session: Record<string, unknown> = {
     type: "realtime",
     model,
@@ -97,45 +156,23 @@ export async function mintOpenAIRealtimeClientSecret(
   session.tool_choice = sanitizeToolChoice(params.tool_choice);
   session.parallel_tool_calls = params.parallel_tool_calls !== false;
 
-  const upstream = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "OpenAI-Safety-Identifier": "hawky-live-lab",
-    },
-    body: JSON.stringify({
+  return {
+    model,
+    body: {
       session,
       expires_after: {
         anchor: "created_at",
-        seconds: expiresAfterSeconds,
+        seconds: sanitizeClientSecretTTL(params.expires_after_seconds),
       },
-    }),
-  });
-
-  const payload = await upstream.json().catch(() => null);
-  if (!upstream.ok) {
-    const message = extractOpenAIError(payload) ?? `OpenAI returned HTTP ${upstream.status}`;
-    throw new LiveRealtimeBrokerError(message, upstream.status);
-  }
-
-  return {
-    ok: true,
-    model,
-    websocket_url: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,
-    client_secret: payload,
+    },
   };
-}
-
-export function resetRealtimeMintQuotaForTests(): void {
-  realtimeMintQuotas.clear();
 }
 
 /**
  * Validate a caller-supplied BYOK key. Returns the trimmed key when it looks
- * like an OpenAI secret key (`sk-…`), otherwise an empty string so the broker
- * falls back to the gateway-configured key. Deliberately conservative: a
- * malformed key is ignored rather than forwarded upstream.
+ * like an OpenAI secret key (`sk-…`). Missing or blank input is treated as
+ * absent; malformed non-empty input is rejected so it cannot accidentally fall
+ * back to the gateway-configured key.
  */
 function sanitizeByokKey(raw: string | undefined): string {
   const key = (raw ?? "").trim();
@@ -143,7 +180,7 @@ function sanitizeByokKey(raw: string | undefined): string {
   // OpenAI keys start with "sk-" (incl. "sk-proj-…"); enforce a sane length and
   // charset so we never forward obviously-bogus input to the OpenAI API.
   if (/^sk-[A-Za-z0-9_-]{20,200}$/.test(key)) return key;
-  return "";
+  throw new LiveRealtimeBrokerError("Invalid BYOK OpenAI API key format.", 400);
 }
 
 function sanitizeRealtimeModel(raw: string | undefined): string {
@@ -185,10 +222,14 @@ function sanitizeToolChoice(raw: string | undefined): "auto" | "none" | "require
   }
 }
 
+function clampClientSecretTTL(value: number): number {
+  return Math.min(Math.max(Math.round(value), 10), 7200);
+}
+
 function sanitizeClientSecretTTL(raw: number | undefined): number {
-  const max = envInt("HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS", 600);
+  const max = clampClientSecretTTL(envInt("HAWKY_REALTIME_MAX_CLIENT_SECRET_TTL_SECONDS", 600));
   if (!Number.isFinite(raw)) return max;
-  return Math.min(Math.max(Math.round(raw!), 10), Math.min(Math.max(max, 10), 7200));
+  return Math.min(clampClientSecretTTL(raw!), max);
 }
 
 function extractOpenAIError(payload: unknown): string | null {

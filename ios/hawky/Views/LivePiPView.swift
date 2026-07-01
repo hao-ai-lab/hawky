@@ -141,31 +141,38 @@ struct LivePiPView: View {
     /// the video window back. (#415, ref: chayanforyou/calling-app-pip-demo-ios)
     private func hiddenTab(in container: CGSize) -> some View {
         let tabWidth: CGFloat = 22
+        let hitWidth: CGFloat = 44
         let tabHeight: CGFloat = 54
         let isTrailing = edge == .trailing
         // Half-pill: rounded on the inner side, flush to the screen edge.
         let centerX = isTrailing
-            ? container.width - tabWidth / 2
-            : tabWidth / 2
+            ? container.width - hitWidth / 2
+            : hitWidth / 2
         let centerY = min(max(container.height * verticalFraction, tabHeight),
                           container.height - tabHeight)
 
-        return Image(systemName: isTrailing ? "chevron.left" : "chevron.right")
-            .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(.white.opacity(0.9))
-            .frame(width: tabWidth, height: tabHeight)
-            .background(Color(white: 0.35).opacity(0.9))
-            .clipShape(
-                .rect(
-                    topLeadingRadius: isTrailing ? 12 : 0,
-                    bottomLeadingRadius: isTrailing ? 12 : 0,
-                    bottomTrailingRadius: isTrailing ? 0 : 12,
-                    topTrailingRadius: isTrailing ? 0 : 12
+        return Button {
+            setHidden(false)
+        } label: {
+            Image(systemName: isTrailing ? "chevron.left" : "chevron.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: tabWidth, height: tabHeight)
+                .background(Color(white: 0.35).opacity(0.9))
+                .clipShape(
+                    .rect(
+                        topLeadingRadius: isTrailing ? 12 : 0,
+                        bottomLeadingRadius: isTrailing ? 12 : 0,
+                        bottomTrailingRadius: isTrailing ? 0 : 12,
+                        topTrailingRadius: isTrailing ? 0 : 12
+                    )
                 )
-            )
-            .shadow(color: .black.opacity(0.3), radius: 4, x: isTrailing ? -2 : 2)
+                .shadow(color: .black.opacity(0.3), radius: 4, x: isTrailing ? -2 : 2)
+                .frame(width: hitWidth, height: tabHeight, alignment: isTrailing ? .trailing : .leading)
+        }
+            .buttonStyle(.plain)
+            .frame(width: hitWidth, height: tabHeight)
             .contentShape(Rectangle())
-            .onTapGesture { setHidden(false) }
             .position(x: centerX, y: centerY)
             .transition(.opacity)
             .accessibilityLabel("Show camera preview")

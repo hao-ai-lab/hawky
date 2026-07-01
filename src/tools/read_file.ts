@@ -11,7 +11,6 @@ import type {
   ToolDefinition,
   ToolContext,
   ToolResult,
-  ContentBlock,
 } from "../agent/types.js";
 
 // -----------------------------------------------------------------------------
@@ -92,6 +91,19 @@ function lineNumWidth(max_line: number): number {
   return Math.max(String(max_line).length, 4); // minimum 4 chars wide
 }
 
+function validatePositiveIntegerParam(name: "Offset" | "Limit", value: unknown): ToolResult | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    return { type: "error", content: `${name} must be a positive integer >= 1.` };
+  }
+  return undefined;
+}
+
+function validateReadWindow(offset: unknown, limit: unknown): ToolResult | undefined {
+  return validatePositiveIntegerParam("Offset", offset)
+    ?? validatePositiveIntegerParam("Limit", limit);
+}
+
 // -----------------------------------------------------------------------------
 // Core read logic (exported for testing)
 // -----------------------------------------------------------------------------
@@ -110,9 +122,6 @@ const MIME_MAP: Record<string, string> = {
   ".bmp": "image/bmp",
   ".ico": "image/x-icon",
 };
-
-/** Max pixels for Claude vision (recommended ~1.2M pixels) */
-const MAX_IMAGE_PIXELS = 1_200_000;
 
 async function readImageFile(resolved: string, filePath: string): Promise<ToolResult> {
   const ext = extname(resolved).toLowerCase();
@@ -233,10 +242,10 @@ async function readNotebookFile(
     ?? "python";
 
   // Apply offset/limit to cells (1-based)
+  const windowError = validateReadWindow(offset, limit);
+  if (windowError) return windowError;
+
   const effectiveOffset = offset ?? 1;
-  if (effectiveOffset < 1) {
-    return { type: "error", content: "Offset must be >= 1 (1-based cell numbering)." };
-  }
   if (effectiveOffset > cells.length) {
     return {
       type: "text",
@@ -459,10 +468,10 @@ async function executeReadFileInner(
   const total_lines = all_lines.length;
 
   // --- Validate offset ---
+  const windowError = validateReadWindow(offset, limit);
+  if (windowError) return windowError;
+
   const effective_offset = offset ?? 1; // default: start from line 1
-  if (effective_offset < 1) {
-    return { type: "error", content: "Offset must be >= 1 (1-based line numbering)." };
-  }
   if (effective_offset > total_lines) {
     return {
       type: "text",
@@ -520,7 +529,7 @@ export const readFileToolDefinition: ToolDefinition<ReadFileInput> = {
   name: "read_file",
   description:
     "Read the contents of a file at the given path. Supports text files (with line numbers), " +
-    "images (PNG, JPG, GIF, WebP — returns base64), PDFs (text extraction with page ranges), " +
+    "images (PNG, JPG, GIF, WebP — returns base64), PDFs (native document blocks), " +
     "and Jupyter notebooks (.ipynb — formatted cells with outputs).",
   input_schema: {
     type: "object",

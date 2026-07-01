@@ -91,35 +91,41 @@ export async function executeBash(opts: BashExecOptions): Promise<BashExecResult
 
   let timedOut = false;
   let killed = false;
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearForceKillTimer = () => {
+    if (forceKillTimer !== null) {
+      clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+    }
+  };
+
+  const terminate = () => {
+    if (killed) return;
+    killed = true;
+    proc.kill("SIGTERM");
+    clearForceKillTimer();
+    // Force kill after 2s grace period
+    forceKillTimer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch {}
+    }, 2000);
+  };
 
   // Timeout handler
   const timer = setTimeout(() => {
     timedOut = true;
-    killed = true;
-    proc.kill("SIGTERM");
-    // Force kill after 2s grace period
-    setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch {}
-    }, 2000);
+    terminate();
   }, timeoutMs);
 
   // Abort handler
   const onAbort = () => {
-    if (!killed) {
-      killed = true;
-      proc.kill("SIGTERM");
-      setTimeout(() => {
-        try { proc.kill("SIGKILL"); } catch {}
-      }, 2000);
-    }
+    terminate();
   };
   opts.abort_signal.addEventListener("abort", onAbort, { once: true });
 
   // Read stdout and stderr concurrently with line buffering
   const stdoutLines: string[] = [];
   const stderrLines: string[] = [];
-  let stdoutChars = 0;
-  let stderrChars = 0;
   let truncated = false;
 
   async function readStream(
@@ -180,24 +186,27 @@ export async function executeBash(opts: BashExecOptions): Promise<BashExecResult
   const stdoutCharCounter = { value: 0 };
   const stderrCharCounter = { value: 0 };
 
-  // Read both streams concurrently, then wait for process exit
-  await Promise.all([
-    readStream(proc.stdout, stdoutLines, "stdout", stdoutCharCounter),
-    readStream(proc.stderr, stderrLines, "stderr", stderrCharCounter),
-  ]);
+  try {
+    // Read both streams concurrently, then wait for process exit
+    await Promise.all([
+      readStream(proc.stdout, stdoutLines, "stdout", stdoutCharCounter),
+      readStream(proc.stderr, stderrLines, "stderr", stderrCharCounter),
+    ]);
 
-  const exitCode = await proc.exited;
+    const exitCode = await proc.exited;
 
-  clearTimeout(timer);
-  opts.abort_signal.removeEventListener("abort", onAbort);
-
-  return {
-    stdout: stdoutLines.join("\n"),
-    stderr: stderrLines.join("\n"),
-    exit_code: killed ? null : exitCode,
-    timed_out: timedOut,
-    truncated,
-  };
+    return {
+      stdout: stdoutLines.join("\n"),
+      stderr: stderrLines.join("\n"),
+      exit_code: killed ? null : exitCode,
+      timed_out: timedOut,
+      truncated,
+    };
+  } finally {
+    clearTimeout(timer);
+    clearForceKillTimer();
+    opts.abort_signal.removeEventListener("abort", onAbort);
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -246,27 +255,10 @@ async function executeOnNode(input: BashToolInput, context: ToolContext): Promis
     };
   }
 
-  // Invoke system.run on the node — race with abort signal
-  const invokePromise = _nodeRegistry.invoke(targetNodeId, "system.run", {
+  const result = await _nodeRegistry.invoke(targetNodeId, "system.run", {
     command: ["bash", "-c", input.command],
     timeoutMs: input.timeout_ms,
-  }, input.timeout_ms);
-
-  // Race invoke against abort signal so cancellation takes effect
-  // Race invoke against abort signal so the UI unblocks on cancel.
-  // NOTE: cancellation is local only — the remote process continues
-  // until its timeout. Full end-to-end cancel is tracked as a follow-up.
-  const abortPromise = new Promise<{ ok: false; error: string }>((resolve) => {
-    if (context.abort_signal.aborted) {
-      resolve({ ok: false, error: "Cancelled locally. The remote command may still be running on the node until its timeout." });
-      return;
-    }
-    context.abort_signal.addEventListener("abort", () => {
-      resolve({ ok: false, error: "Cancelled locally. The remote command may still be running on the node until its timeout." });
-    }, { once: true });
-  });
-
-  const result = await Promise.race([invokePromise, abortPromise]);
+  }, input.timeout_ms, context.abort_signal);
 
   if (!result.ok) {
     return { type: "error", content: result.error ?? "Node invoke failed" };

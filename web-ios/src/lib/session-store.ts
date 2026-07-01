@@ -139,7 +139,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const all: SessionEntry[] = (res.sessions ?? []).map((s) => ({ ...s, key: sessionKeyFromId(s.id) }));
       set({ sessions: cleanSessions(all, get().activeKey), loading: false });
     } catch {
-      set({ sessions: [], loading: false });
+      set({ loading: false });
     }
   },
 
@@ -151,7 +151,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   remove: async (key) => {
-    try { await rpc("session.delete", { sessionKey: key }); } catch { /* ignore */ }
+    try { await rpc("session.delete", { sessionKey: key }); } catch { return; }
     // If we deleted the active session, fall back to a fresh one.
     if (get().activeKey === key) get().newSession();
     await get().fetchSessions();

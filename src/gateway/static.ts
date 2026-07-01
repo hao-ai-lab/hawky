@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { existsSync, statSync } from "node:fs";
-import { join, extname, dirname } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSubsystemLogger } from "../logging/index.js";
 
@@ -53,9 +53,13 @@ export function serveStatic(
     return null;
   }
 
-  // Resolve and guard against path traversal (../../etc/passwd)
-  const filePath = join(webDistDir, pathname);
-  if (!filePath.startsWith(webDistDir)) {
+  // Resolve and guard against path traversal, including sibling-prefix paths
+  // such as "/../web-dist-secret/file" when the base is ".../web-dist".
+  const baseDir = resolve(webDistDir);
+  const requestPath = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+  const filePath = resolve(baseDir, requestPath);
+  const relFromBase = relative(baseDir, filePath);
+  if (relFromBase.startsWith("..") || isAbsolute(relFromBase)) {
     return null;
   }
 
@@ -76,7 +80,7 @@ export function serveStatic(
   }
 
   // SPA fallback: return index.html for non-file paths (client-side routing)
-  const indexPath = join(webDistDir, "index.html");
+  const indexPath = join(baseDir, "index.html");
   if (existsSync(indexPath) && !extname(pathname)) {
     return new Response(Bun.file(indexPath), {
       headers: {

@@ -141,7 +141,7 @@ function dotColor(status: string | null): string {
 // Dashboard
 // -----------------------------------------------------------------------------
 
-export function StatusDashboard({ onClose }: { onClose: () => void }) {
+export function StatusDashboard() {
   const [status, setStatus] = useState<GatewayStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const rpc = useSocketStore((s) => s.rpc);

@@ -844,6 +844,15 @@ export class GatewayServer {
 
     // Handle "connect" specially (auth + handshake)
     if (frame.method === "connect") {
+      if (conn.authenticated) {
+        conn.sendResponse({
+          type: "res",
+          id: frame.id,
+          ok: false,
+          error: { code: ErrorCodes.INVALID_REQUEST, message: "Connection is already authenticated" },
+        });
+        return;
+      }
       this.handleConnect(conn, frame);
       return;
     }

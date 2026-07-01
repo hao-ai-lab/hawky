@@ -300,12 +300,11 @@ export function App() {
           </div>
         ) : view === "status" ? (
           <div className="flex-1 overflow-hidden">
-            <StatusDashboard onClose={() => setView("chat")} />
+            <StatusDashboard />
           </div>
         ) : view === "settings" ? (
           <div className="flex-1 overflow-hidden">
             <SettingsPanel
-              onClose={() => setView("chat")}
               liveLabEnabled={liveLabEnabled}
               onLiveLabEnabledChange={setLiveLabEnabled}
             />

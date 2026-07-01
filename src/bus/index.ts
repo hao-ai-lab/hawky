@@ -57,8 +57,8 @@ class InProcessBus implements Bus {
   private subs: Subscription[] = [];
 
   publish<T>(topic: string, event: T): void {
-    for (const sub of this.subs) {
-      if (!sub.regex.test(topic)) continue;
+    const matches = this.subs.filter((sub) => sub.regex.test(topic));
+    for (const sub of matches) {
       // Fire-and-forget. Async handlers surface errors via the catch below;
       // sync throws are caught by the try/catch inline.
       try {

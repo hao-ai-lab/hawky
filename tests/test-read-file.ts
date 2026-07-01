@@ -79,6 +79,9 @@ beforeAll(async () => {
   await mkdir(join(tmpDir, "nested", "deep"), { recursive: true });
   await writeFile(join(tmpDir, "nested", "deep", "file.txt"), "deep content\n");
 
+  // --- sample.pdf: content validity is irrelevant for legacy parameter validation ---
+  await writeFile(join(tmpDir, "sample.pdf"), "%PDF-1.4\n%%EOF\n");
+
   // --- subdir (directory for testing) ---
   await mkdir(join(tmpDir, "subdir"));
 });
@@ -201,6 +204,26 @@ describe("read_file tool", () => {
     });
     expect(result.type).toBe("error");
     expect(result.content).toContain(">= 1");
+  });
+
+  test("fractional offset returns error", async () => {
+    const result = await readFile({
+      file_path: join(tmpDir, "simple.txt"),
+      offset: 1.5,
+    });
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("Offset must be a positive integer");
+  });
+
+  test("invalid limits return errors instead of empty or surprising ranges", async () => {
+    for (const limit of [0, -1, 1.5, Number.NaN, "2"] as any[]) {
+      const result = await readFile({
+        file_path: join(tmpDir, "simple.txt"),
+        limit,
+      } as any);
+      expect(result.type).toBe("error");
+      expect(result.content).toContain("Limit must be a positive integer");
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -329,6 +352,22 @@ describe("read_file tool", () => {
     expect(readFileToolDefinition.input_schema.properties.file_path).toBeDefined();
     expect(readFileToolDefinition.input_schema.properties.offset).toBeDefined();
     expect(readFileToolDefinition.input_schema.properties.limit).toBeDefined();
+  });
+
+  test("tool definition describes current native PDF behavior", () => {
+    expect(readFileToolDefinition.description).toContain("PDFs (native document blocks)");
+    expect(readFileToolDefinition.description).not.toContain("page ranges");
+    expect(readFileToolDefinition.input_schema.properties).not.toHaveProperty("pages");
+  });
+
+  test("legacy PDF pages parameter returns a clear error", async () => {
+    const result = await executeReadFile(
+      { file_path: join(tmpDir, "sample.pdf"), pages: "1-2" } as any,
+      makeContext(),
+    );
+
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("'pages' parameter is no longer supported");
   });
 
   test("tool registers and executes via registry", async () => {

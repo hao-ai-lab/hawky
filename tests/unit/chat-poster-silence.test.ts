@@ -7,7 +7,11 @@
 // =============================================================================
 
 import { describe, test, expect } from "bun:test";
-import { isLikelySilence, type ChatPosterConfig } from "../../src/consumers/chat-poster/index.js";
+import {
+  isLikelySilence,
+  likelySilenceDropLogMetadata,
+  type ChatPosterConfig,
+} from "../../src/consumers/chat-poster/index.js";
 import type { AsrFinalEvent } from "../../src/consumers/asr/events.js";
 
 const baseConfig: ChatPosterConfig = {
@@ -97,5 +101,29 @@ describe("isLikelySilence (default-on)", () => {
     expect(
       isLikelySilence("hello world this is a real sentence", e, baseConfig),
     ).toBe(false);
+  });
+});
+
+describe("likelySilenceDropLogMetadata", () => {
+  test("does not include dropped transcript text", () => {
+    const privatePhrase = "private phrase that should not reach logs";
+    const metadata = likelySilenceDropLogMetadata(mkEvent({
+      text: privatePhrase,
+      segments: [
+        { t0_ms: 0, t1_ms: 400, text: privatePhrase, confidence: 0.2 },
+      ],
+      media_duration_ms: 300,
+    }));
+
+    expect(metadata).not.toHaveProperty("text");
+    expect(metadata).not.toHaveProperty("transcript");
+    expect(JSON.stringify(metadata)).not.toContain(privatePhrase);
+    expect(metadata).toMatchObject({
+      media_id: "m-test",
+      media_duration_ms: 300,
+      transcript_chars: privatePhrase.length,
+      segment_count: 1,
+      mean_confidence: 0.2,
+    });
   });
 });

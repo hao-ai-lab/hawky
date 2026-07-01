@@ -7,10 +7,17 @@ import {
   assertIdentitySignalAllowedUsesSafe,
 } from "../src/identity/core/index.js";
 import {
+  buildIdentityCandidate,
   buildPersonCandidateReviewRecord,
   buildFaceIdentitySignal,
   buildPersonFact,
+  buildPersonProfile,
+  buildPersonRecap,
+  buildPersonTombstone,
+  FilePersonStore,
   FilePersonCandidateReviewStore,
+  InMemoryPersonStore,
+  importLegacyDeepFaceProfiles,
   normalizeLegacyDeepFaceProfile,
   personFactCanBeReadByMemoryDistill,
 } from "../src/identity/person/index.js";
@@ -196,6 +203,150 @@ describe("person identity contracts", () => {
       expect(record?.review.state).toBe("rejected");
       expect(record?.review.reason).toBe("not someone to remember");
       expect(record?.metadata.source).toBe("test");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("in-memory person store returns record copies instead of live references", () => {
+    const store = new InMemoryPersonStore();
+
+    const profile = buildPersonProfile({
+      id: "p-sarah",
+      createdAt: now,
+      updatedAt: now,
+      displayName: "Sarah",
+      source: "manual",
+      sourceSession: { sessionKey: "manual:profile" },
+      confidence: 0.92,
+      metadata: { nested: { marker: "profile" } },
+    });
+    const fact = buildPersonFact({
+      id: "fact-sarah-role",
+      createdAt: now,
+      updatedAt: now,
+      personId: "p-sarah",
+      text: "Sarah works on robotics",
+      origin: "manual",
+      source: "manual",
+      sourceSession: { sessionKey: "manual:fact" },
+      confidence: 0.9,
+      metadata: { nested: { marker: "fact" } },
+    });
+    const recap = buildPersonRecap({
+      id: "recap-sarah-lab",
+      createdAt: now,
+      updatedAt: now,
+      personId: "p-sarah",
+      summary: "Met at the robotics lab.",
+      origin: "manual",
+      source: "manual",
+      sourceSession: { sessionKey: "manual:recap" },
+      confidence: 0.88,
+      metadata: { nested: { marker: "recap" } },
+    });
+    const candidate = buildIdentityCandidate({
+      id: "cand-unknown-face",
+      createdAt: now,
+      updatedAt: now,
+      candidateType: "unknown_face",
+      modalities: ["face"],
+      source: "face_service",
+      sourceSession: { sessionKey: "manual:candidate" },
+      confidence: 0.81,
+      metadata: { nested: { marker: "candidate" } },
+    });
+    const tombstone = buildPersonTombstone({
+      id: "tombstone-candidate",
+      createdAt: now,
+      updatedAt: now,
+      subjectId: "cand-unknown-face",
+      subjectType: "identity_candidate",
+      review: { state: "rejected", reviewedAt: now, reason: "test rejection" },
+      sourceSession: { sessionKey: "manual:tombstone" },
+      metadata: { nested: { marker: "tombstone" } },
+    });
+
+    const returnedProfile = store.putProfile(profile);
+    const returnedFact = store.putFact(fact);
+    const returnedRecap = store.putRecap(recap);
+    const returnedCandidate = store.putCandidate(candidate);
+    const returnedTombstone = store.putTombstone(tombstone);
+
+    (profile as any).displayName = "Input Mutation";
+    (returnedProfile as any).displayName = "Return Mutation";
+    ((returnedProfile.metadata.nested as Record<string, unknown>).marker) = "return mutation";
+    (fact as any).text = "input mutation";
+    (returnedFact as any).text = "return mutation";
+    ((returnedFact.metadata.nested as Record<string, unknown>).marker) = "return mutation";
+    (recap as any).summary = "input mutation";
+    (returnedRecap as any).summary = "return mutation";
+    ((returnedRecap.metadata.nested as Record<string, unknown>).marker) = "return mutation";
+    (candidate as any).confidence = 0.01;
+    (returnedCandidate as any).confidence = 0.02;
+    ((returnedCandidate.metadata.nested as Record<string, unknown>).marker) = "return mutation";
+    (tombstone as any).subjectType = "legacy_profile";
+    (returnedTombstone as any).subjectType = "person_profile";
+    ((returnedTombstone.metadata.nested as Record<string, unknown>).marker) = "return mutation";
+
+    expect(store.getProfile("p-sarah")?.displayName).toBe("Sarah");
+    expect((store.getProfile("p-sarah")?.metadata.nested as Record<string, unknown>).marker).toBe("profile");
+    expect(store.getFact("fact-sarah-role")?.text).toBe("Sarah works on robotics");
+    expect((store.getFact("fact-sarah-role")?.metadata.nested as Record<string, unknown>).marker).toBe("fact");
+    expect(store.getRecap("recap-sarah-lab")?.summary).toBe("Met at the robotics lab.");
+    expect((store.getRecap("recap-sarah-lab")?.metadata.nested as Record<string, unknown>).marker).toBe("recap");
+    expect(store.getCandidate("cand-unknown-face")?.confidence).toBe(0.81);
+    expect((store.getCandidate("cand-unknown-face")?.metadata.nested as Record<string, unknown>).marker).toBe("candidate");
+    expect(store.getTombstone("cand-unknown-face")?.subjectType).toBe("identity_candidate");
+    expect((store.getTombstone("cand-unknown-face")?.metadata.nested as Record<string, unknown>).marker).toBe("tombstone");
+
+    const listedProfile = store.listProfiles()[0]!;
+    const listedFact = store.listFacts("p-sarah")[0]!;
+    const listedRecap = store.listRecaps("p-sarah")[0]!;
+    const listedCandidate = store.listCandidates()[0]!;
+    const listedTombstone = store.listTombstones()[0]!;
+    (listedProfile as any).displayName = "List Mutation";
+    (listedFact as any).text = "list mutation";
+    (listedRecap as any).summary = "list mutation";
+    (listedCandidate as any).confidence = 0.03;
+    (listedTombstone as any).subjectType = "legacy_profile";
+
+    expect(store.getProfile("p-sarah")?.displayName).toBe("Sarah");
+    expect(store.getFact("fact-sarah-role")?.text).toBe("Sarah works on robotics");
+    expect(store.getRecap("recap-sarah-lab")?.summary).toBe("Met at the robotics lab.");
+    expect(store.getCandidate("cand-unknown-face")?.confidence).toBe(0.81);
+    expect(store.getTombstone("cand-unknown-face")?.subjectType).toBe("identity_candidate");
+  });
+
+  test("imports legacy DeepFace people into a durable TypeScript person store", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hawky-person-store-"));
+    try {
+      const store = new FilePersonStore(dir);
+      const result = importLegacyDeepFaceProfiles(store, [
+        {
+          id: "p-sarah",
+          name: "Sarah",
+          facts: ["climber", "climber"],
+          recaps: [{ summary: "Met at the robotics lab.", at: now }],
+        },
+        {
+          id: "p-unknown",
+          name: "Unknown",
+          facts: ["should stay quarantined"],
+        },
+      ], { now });
+
+      expect(result.importedProfiles).toBe(1);
+      expect(result.importedFacts).toBe(1);
+      expect(result.importedRecaps).toBe(1);
+      expect(result.importedCandidates).toBe(1);
+
+      const reloaded = new FilePersonStore(dir);
+      expect(reloaded.getProfile("p-sarah")?.displayName).toBe("Sarah");
+      expect(reloaded.listFacts("p-sarah").map((fact) => fact.text)).toEqual(["climber"]);
+      expect(reloaded.listFacts("p-sarah")[0]?.origin).toBe("legacy_unverified");
+      expect(reloaded.listCandidates()[0]?.metadata.deepfaceProfileId).toBe("p-unknown");
+      expect(reloaded.getProfile("p-unknown")).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
