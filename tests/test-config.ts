@@ -338,27 +338,27 @@ describe("HAWKY_HOME env var", () => {
 
 describe("Caching", () => {
   test("loadConfig returns cached result on second call", () => {
-    writeTestConfig({ model: "claude-first-load" });
+    writeTestConfig({ model: "first-load" });
 
     const first = loadConfig(testConfigPath);
-    expect(first.model).toBe("claude-first-load");
+    expect(first.model).toBe("first-load");
 
     // Modify file — should not affect cached config
-    writeTestConfig({ model: "claude-second-load" });
+    writeTestConfig({ model: "second-load" });
     const second = loadConfig(testConfigPath);
-    expect(second.model).toBe("claude-first-load");
+    expect(second.model).toBe("first-load");
     expect(second).toBe(first); // same reference
   });
 
   test("resetConfig clears cache, next load reads fresh", () => {
-    writeTestConfig({ model: "claude-first-load" });
+    writeTestConfig({ model: "first-load" });
     const first = loadConfig(testConfigPath);
-    expect(first.model).toBe("claude-first-load");
+    expect(first.model).toBe("first-load");
 
     resetConfig();
-    writeTestConfig({ model: "claude-second-load" });
+    writeTestConfig({ model: "second-load" });
     const second = loadConfig(testConfigPath);
-    expect(second.model).toBe("claude-second-load");
+    expect(second.model).toBe("second-load");
     expect(second).not.toBe(first);
   });
 
@@ -587,16 +587,16 @@ describe("saveConfig", () => {
   });
 
   test("invalidates cache after save", () => {
-    writeTestConfig({ model: "claude-old-model" });
+    writeTestConfig({ model: "old-model" });
     const first = loadConfig(testConfigPath);
-    expect(first.model).toBe("claude-old-model");
+    expect(first.model).toBe("old-model");
 
-    const updated = { ...getDefaultConfig(), model: "claude-new-model" };
+    const updated = { ...getDefaultConfig(), model: "new-model" };
     saveConfig(updated, testConfigPath);
 
     // Cache should be cleared — next load reads from disk
     const second = loadConfig(testConfigPath);
-    expect(second.model).toBe("claude-new-model");
+    expect(second.model).toBe("new-model");
   });
 
   test("overwrites existing config file", () => {
@@ -618,10 +618,10 @@ describe("saveConfig", () => {
 
 describe("updateConfig", () => {
   test("merges updates into existing config", () => {
-    writeTestConfig({ model: "claude-original", max_tokens: 4096 });
+    writeTestConfig({ model: "original", max_tokens: 4096 });
 
-    const result = updateConfig({ model: "claude-updated" }, testConfigPath);
-    expect(result.model).toBe("claude-updated");
+    const result = updateConfig({ model: "updated" }, testConfigPath);
+    expect(result.model).toBe("updated");
     expect(result.max_tokens).toBe(4096); // preserved
   });
 
@@ -639,28 +639,28 @@ describe("updateConfig", () => {
   });
 
   test("persists updates to disk", () => {
-    writeTestConfig({ model: "claude-old" });
-    updateConfig({ model: "claude-new" }, testConfigPath);
+    writeTestConfig({ model: "old" });
+    updateConfig({ model: "new" }, testConfigPath);
 
     resetConfig();
     const reloaded = loadConfig(testConfigPath);
-    expect(reloaded.model).toBe("claude-new");
+    expect(reloaded.model).toBe("new");
   });
 
   test("creates config file if it does not exist", () => {
     const freshPath = join(testDir, "fresh-update.json");
     expect(existsSync(freshPath)).toBe(false);
 
-    const result = updateConfig({ model: "claude-from-update" }, freshPath);
-    expect(result.model).toBe("claude-from-update");
+    const result = updateConfig({ model: "from-update" }, freshPath);
+    expect(result.model).toBe("from-update");
     expect(existsSync(freshPath)).toBe(true);
   });
 
   test("fills in defaults for missing fields", () => {
-    writeTestConfig({ model: "claude-custom" });
+    writeTestConfig({ model: "custom" });
 
     const result = updateConfig({}, testConfigPath);
-    expect(result.model).toBe("claude-custom");
+    expect(result.model).toBe("custom");
     expect(result.gateway_port).toBe(4242); // default filled in
     expect(result.sandbox).toBeUndefined(); // sandbox not in defaults
   });
@@ -683,13 +683,13 @@ describe("updateConfig", () => {
   });
 
   test("invalidates cache so next loadConfig reads fresh", () => {
-    writeTestConfig({ model: "claude-cached" });
+    writeTestConfig({ model: "cached" });
     loadConfig(testConfigPath); // populate cache
 
-    updateConfig({ model: "claude-updated" }, testConfigPath);
+    updateConfig({ model: "updated" }, testConfigPath);
 
     const reloaded = loadConfig(testConfigPath);
-    expect(reloaded.model).toBe("claude-updated");
+    expect(reloaded.model).toBe("updated");
   });
 });
 

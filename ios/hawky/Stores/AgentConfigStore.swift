@@ -4,7 +4,6 @@ import Observation
 enum AgentProvider: String, CaseIterable, Identifiable {
     case anthropic
     case vertex
-    case openai
     case openaiCompatible = "openai_compatible"
 
     var id: String { rawValue }
@@ -13,7 +12,6 @@ enum AgentProvider: String, CaseIterable, Identifiable {
         switch self {
         case .anthropic: return "Anthropic"
         case .vertex: return "Vertex"
-        case .openai: return "OpenAI"
         case .openaiCompatible: return "OpenAI-compatible"
         }
     }
@@ -33,9 +31,6 @@ let kAgentModelOptions: [AgentModelOption] = [
     AgentModelOption(id: "claude-opus-4-7", label: "Claude Opus 4.7", provider: nil),
     AgentModelOption(id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: nil),
     AgentModelOption(id: "claude-haiku-4-5", label: "Claude Haiku 4.5", provider: nil),
-    AgentModelOption(id: "gpt-5.5", label: "GPT 5.5", provider: AgentProvider.openai.rawValue),
-    AgentModelOption(id: "gpt-5.4-mini", label: "GPT 5.4 Mini", provider: AgentProvider.openai.rawValue),
-    AgentModelOption(id: "gpt-5.3-chat-latest", label: "GPT 5.3 Chat Latest", provider: AgentProvider.openai.rawValue),
     AgentModelOption(id: "Qwen/Qwen3-Omni-30B-A3B-Instruct", label: "Qwen3 Omni 30B", provider: AgentProvider.openaiCompatible.rawValue),
     AgentModelOption(id: "Qwen/Qwen3.6-27B", label: "Qwen3.6 27B", provider: AgentProvider.openaiCompatible.rawValue),
 ]
@@ -93,8 +88,8 @@ final class AgentConfigStore {
         let trimmedProvider = newProvider.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedModel = newModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAPIBaseURL = newAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedProvider.isEmpty, !trimmedModel.isEmpty else {
-            saveState = .error("Provider and model are required.")
+        guard !trimmedProvider.isEmpty, !trimmedModel.isEmpty, !trimmedAPIBaseURL.isEmpty else {
+            saveState = .error("Provider, model, and API base URL are required.")
             return
         }
 
@@ -106,21 +101,19 @@ final class AgentConfigStore {
         apiBaseURL = trimmedAPIBaseURL
         saveState = .saving
 
-        var params: [String: JSONValue] = [
+        let params: [String: JSONValue] = [
             "provider": .string(trimmedProvider),
             "model": .string(trimmedModel),
+            "api_base_url": .string(trimmedAPIBaseURL),
         ]
-        if trimmedProvider == AgentProvider.openai.rawValue, !trimmedAPIBaseURL.isEmpty {
-            params["openai_base_url"] = .string(trimmedAPIBaseURL)
-        }
-        let frame = RequestFrame(id: UUID().uuidString, method: "gateway.swapProvider", params: params)
+        let frame = RequestFrame(id: UUID().uuidString, method: "config.update", params: params)
         do {
             let resp = try await transport.send(frame)
             guard resp.ok else {
                 provider = previousProvider
                 model = previousModel
                 apiBaseURL = previousAPIBaseURL
-                saveState = .error(message(for: resp.error, fallback: "provider swap failed"))
+                saveState = .error(message(for: resp.error, fallback: "config.update failed"))
                 return
             }
 
@@ -159,9 +152,6 @@ final class AgentConfigStore {
             model = s
         }
         if case .some(.string(let s)) = config["api_base_url"], !s.isEmpty {
-            apiBaseURL = s
-        }
-        if case .some(.string(let s)) = config["openai_base_url"] {
             apiBaseURL = s
         }
         if case .some(.object(let vertex)) = config["vertex"] {

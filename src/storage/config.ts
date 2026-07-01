@@ -18,7 +18,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { HawkyConfig } from "../agent/types.js";
-import { normalizeProviderModels } from "../agent/model-compat.js";
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -150,28 +149,16 @@ const ENV_MAPPINGS: EnvMapping[] = [
 // Deep merge utility
 // -----------------------------------------------------------------------------
 
-const NULLABLE_CONFIG_PATHS = new Set([
-  "effort",
-  "heartbeat.model",
-]);
-
 function deepMerge(
   defaults: Record<string, unknown>,
   overrides: Record<string, unknown>,
-  path: string[] = [],
 ): Record<string, unknown> {
-  const result = cloneConfigValue(defaults) as Record<string, unknown>;
+  const result = { ...defaults };
   for (const key of Object.keys(overrides)) {
     const val = overrides[key];
     const def = defaults[key];
-    const childPath = [...path, key];
-    if (val === null) {
-      if (NULLABLE_CONFIG_PATHS.has(childPath.join("."))) {
-        result[key] = null;
-      }
-      continue;
-    }
     if (
+      val !== null &&
       val !== undefined &&
       typeof val === "object" &&
       !Array.isArray(val) &&
@@ -183,27 +170,12 @@ function deepMerge(
       result[key] = deepMerge(
         def as Record<string, unknown>,
         val as Record<string, unknown>,
-        childPath,
       );
     } else if (val !== undefined && val !== null) {
       result[key] = val;
     }
   }
   return result;
-}
-
-function cloneConfigValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneConfigValue(item));
-  }
-  if (value && typeof value === "object") {
-    const clone: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      clone[key] = cloneConfigValue(child);
-    }
-    return clone;
-  }
-  return value;
 }
 
 // -----------------------------------------------------------------------------
@@ -324,9 +296,9 @@ export function loadConfig(configPath?: string): HawkyConfig {
     }
   }
 
-  cachedConfig = normalizeProviderModels(config);
+  cachedConfig = config;
   cachedConfigPath = filePath;
-  return cachedConfig;
+  return config;
 }
 
 /**

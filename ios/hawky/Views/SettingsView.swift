@@ -1142,7 +1142,7 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity)
             }
             .primaryPanelAction()
-            .disabled(container.transport == nil || providerDraft.trimmingCharacters(in: .whitespaces).isEmpty || modelDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(container.transport == nil || providerDraft.trimmingCharacters(in: .whitespaces).isEmpty || modelDraft.trimmingCharacters(in: .whitespaces).isEmpty || apiBaseURLDraft.trimmingCharacters(in: .whitespaces).isEmpty)
             .accessibilityIdentifier("settings.agent.save")
 
             switch agentConfig.saveState {
@@ -1172,7 +1172,7 @@ struct SettingsView: View {
                 }
             }
         } footer: {
-            Text("Provider, model, and OpenAI base URL are swapped on the gateway and apply to the next agent turn. Older gateways may reject provider changes.")
+            Text("Provider, model, and base URL are sent to the gateway config RPC and apply to the next agent turn. Older gateways may ignore provider or base URL changes.")
         }
     }
 
@@ -1408,12 +1408,7 @@ struct SettingsView: View {
     }
 
     private var agentModelOptionsForDraft: [AgentModelOption] {
-        var options = kAgentModelOptions.filter { option in
-            if option.provider == nil {
-                return providerDraft == AgentProvider.anthropic.rawValue || providerDraft == AgentProvider.vertex.rawValue
-            }
-            return option.provider == providerDraft
-        }
+        var options = kAgentModelOptions.filter { $0.provider == nil || $0.provider == providerDraft }
         let trimmed = modelDraft.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty && !options.contains(where: { $0.id == trimmed }) {
             options.insert(AgentModelOption(id: trimmed, label: trimmed, provider: providerDraft), at: 0)
@@ -1452,13 +1447,7 @@ struct SettingsView: View {
     }
 
     private func isKnownAgentModel(_ model: String) -> Bool {
-        kAgentModelOptions.contains {
-            guard $0.id == model else { return false }
-            if $0.provider == nil {
-                return providerDraft == AgentProvider.anthropic.rawValue || providerDraft == AgentProvider.vertex.rawValue
-            }
-            return $0.provider == providerDraft
-        }
+        kAgentModelOptions.contains { $0.id == model && ($0.provider == nil || $0.provider == providerDraft) }
     }
 
     private func updateTabConfiguration(_ update: (inout AppTabConfiguration) -> Void) {

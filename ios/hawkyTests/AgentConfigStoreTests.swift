@@ -48,31 +48,30 @@ struct AgentConfigStoreTests {
         #expect(store.loadState == .loaded)
     }
 
-    @Test func saveSwapsProviderAndModelThroughGateway() async throws {
+    @Test func saveSendsProviderAndModelAtTopLevel() async throws {
         let transport = AgentConfigMockTransport { frame in
-            #expect(frame.method == "gateway.swapProvider")
+            #expect(frame.method == "config.update")
             let params = try #require(frame.params)
-            #expect(params["provider"] == .string("openai"))
-            #expect(params["model"] == .string("gpt-5.5"))
-            #expect(params["openai_base_url"] == .string("https://control.example/internal/provider/openai/v1"))
-            #expect(params["api_base_url"] == nil)
+            #expect(params["provider"] == .string("openai_compatible"))
+            #expect(params["model"] == .string("Qwen/Qwen3-Omni-30B-A3B-Instruct"))
+            #expect(params["api_base_url"] == .string("https://api.hawky.live/v1"))
             return try Self.response(
                 id: frame.id,
-                json: #"{"type":"res","id":"ID","ok":true,"payload":{"ok":true}}"#
+                json: #"{"type":"res","id":"ID","ok":true,"payload":{"config":{"provider":"openai_compatible","model":"Qwen/Qwen3-Omni-30B-A3B-Instruct","api_base_url":"https://api.hawky.live/v1"}}}"#
             )
         }
         let store = AgentConfigStore()
 
         await store.save(
-            provider: "openai",
-            model: "gpt-5.5",
-            apiBaseURL: "https://control.example/internal/provider/openai/v1",
+            provider: "openai_compatible",
+            model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            apiBaseURL: "https://api.hawky.live/v1",
             transport: transport
         )
 
-        #expect(store.provider == "openai")
-        #expect(store.model == "gpt-5.5")
-        #expect(store.apiBaseURL == "https://control.example/internal/provider/openai/v1")
+        #expect(store.provider == "openai_compatible")
+        #expect(store.model == "Qwen/Qwen3-Omni-30B-A3B-Instruct")
+        #expect(store.apiBaseURL == "https://api.hawky.live/v1")
         #expect(store.saveState == .saved(nil))
     }
 
@@ -85,7 +84,7 @@ struct AgentConfigStoreTests {
         }
         let store = AgentConfigStore()
 
-        await store.save(provider: "vertex", model: "claude-sonnet-4-6", apiBaseURL: "", transport: transport)
+        await store.save(provider: "vertex", model: "claude-sonnet-4-6", apiBaseURL: "https://api.anthropic.com", transport: transport)
 
         #expect(store.provider == "anthropic")
         #expect(store.model == "claude-sonnet-4-6")

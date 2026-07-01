@@ -196,61 +196,6 @@ describe("swapProvider", () => {
     expect(cfg.openai_base_url).toBe("http://localhost:8000/v1");
   });
 
-  test("swap to openai normalizes stale Claude model and heartbeat override", () => {
-    delete process.env.OPENAI_API_KEY;
-    saveConfig(baseConfig({
-      api_keys: { anthropic: "sk-ant-test", brave_search: "", openai: "sk-openai-test" },
-      provider: "anthropic",
-      model: "claude-opus-4-7",
-      heartbeat: {
-        ...baseConfig().heartbeat,
-        model: "claude-sonnet-4-6",
-      },
-    }));
-    resetConfig();
-    sessions = new AgentSessionManager({
-      provider: makeProvider(),
-      config: loadConfig(),
-      workingDirectory: join(testDir, "workspace"),
-    });
-
-    const result = sessions.swapProvider({ provider: "openai" });
-
-    expect(result).toEqual({ ok: true });
-    resetConfig();
-    const cfg = loadConfig();
-    expect(cfg.provider).toBe("openai");
-    expect(cfg.model).toBe("gpt-5.5");
-    expect(cfg.heartbeat.model).toBeNull();
-  });
-
-  test("swap back to anthropic normalizes stale OpenAI model and heartbeat override", () => {
-    saveConfig(baseConfig({
-      api_keys: { anthropic: "sk-ant-test", brave_search: "", openai: "sk-openai-test" },
-      provider: "openai",
-      model: "gpt-5.5",
-      heartbeat: {
-        ...baseConfig().heartbeat,
-        model: "gpt-5.4-mini",
-      },
-    }));
-    resetConfig();
-    sessions = new AgentSessionManager({
-      provider: new OpenAIProvider("sk-openai-test"),
-      config: loadConfig(),
-      workingDirectory: join(testDir, "workspace"),
-    });
-
-    const result = sessions.swapProvider({ provider: "anthropic" });
-
-    expect(result).toEqual({ ok: true });
-    resetConfig();
-    const cfg = loadConfig();
-    expect(cfg.provider).toBe("anthropic");
-    expect(cfg.model).toBe("claude-opus-4-7");
-    expect(cfg.heartbeat.model).toBe("claude-sonnet-4-6");
-  });
-
   test("switches openai_compatible active_profile even when provider is unchanged", () => {
     saveConfig(baseConfig({
       provider: "openai_compatible",

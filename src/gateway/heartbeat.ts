@@ -47,7 +47,6 @@ import { executeInSession } from "./lanes.js";
 import { CommandLane } from "./types.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import { createProvider } from "../agent/provider-factory.js";
-import { resolveHeartbeatModel } from "../agent/model-compat.js";
 import { triggerAgentTurn, sanitizeDeliveredText, relayToBoundChannels } from "./agent-turn.js";
 import { broadcastNotification } from "./notification.js";
 import { deliver } from "./delivery.js";
@@ -214,7 +213,7 @@ export class HeartbeatService {
     return {
       enabled: hb.enabled,
       intervalMs: (hb.interval_minutes ?? 30) * 60_000,
-      model: hb.model ?? undefined,
+      model: hb.model,
       keepRecentMessages: hb.keep_recent_messages ?? 8,
       activeHours: hb.active_hours
         ? {
@@ -555,7 +554,7 @@ export class HeartbeatService {
     heartbeatContent: string,
     systemEvents: SystemEvent[],
   ): Promise<{ action: "skip" | "run"; tasks?: string; reason?: string }> {
-    const model = resolveHeartbeatModel(this.fullConfig);
+    const model = this.config.model ?? this.fullConfig.model;
 
     // Route through the shared provider factory so heartbeat uses the
     // same backend (Anthropic direct or Vertex AI) as the main gateway.

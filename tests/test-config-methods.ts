@@ -109,8 +109,6 @@ describe("config.update openai_api_key", () => {
     expect(result.ok).toBe(true);
     expect(result.config.provider).toBe("openai");
     expect(result.config.has_openai_key).toBe(true);
-    expect(result.config.model).toBe("gpt-5.5");
-    expect(result.config.heartbeat.model).toBe(null);
   });
 
   test("setting provider openai resolves key from OPENAI_API_KEY env", () => {
@@ -134,24 +132,6 @@ describe("config.update openai_api_key", () => {
     expect(result.config.provider).toBe("openai");
   });
 
-  test("setting provider openai preserves an explicit OpenAI model and clears incompatible heartbeat override", () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({
-      api_keys: { anthropic: "sk-ant-test", openai: "sk-existing-openai", brave_search: "" },
-      provider: "anthropic",
-      model: "claude-opus-4-7",
-      heartbeat: { model: "claude-sonnet-4-6" },
-    }));
-    resetConfig();
-    const server = makeConfigServer();
-    const result = server.call("config.update", { provider: "openai", model: "gpt-5.4-mini" }) as any;
-    expect(result.ok).toBe(true);
-    expect(result.config.provider).toBe("openai");
-    expect(result.config.model).toBe("gpt-5.4-mini");
-    expect(result.config.heartbeat.model).toBe(null);
-    resetConfig();
-    expect(loadConfig().heartbeat.model).toBeNull();
-  });
-
   test("bare openai_api_key update writes nested api_keys.openai", () => {
     const server = makeConfigServer();
     const result = server.call("config.update", { openai_api_key: "sk-new-key" }) as any;
@@ -171,17 +151,6 @@ describe("config.update openai_api_key", () => {
   test("openai_api_key must be a string", () => {
     const server = makeConfigServer();
     expect(() => server.call("config.update", { openai_api_key: 12345 })).toThrow(MethodError);
-  });
-});
-
-describe("config.update heartbeat model clearing", () => {
-  test("heartbeat.model null clears the override instead of restoring the built-in default", () => {
-    const server = makeConfigServer();
-    const result = server.call("config.update", { heartbeat: { model: null } }) as any;
-    expect(result.ok).toBe(true);
-    expect(result.config.heartbeat.model).toBe(null);
-    resetConfig();
-    expect(loadConfig().heartbeat.model).toBeNull();
   });
 });
 

@@ -583,7 +583,7 @@ export interface HawkyConfig {
     enabled: boolean;
     interval_minutes: number;
     /** Override model for heartbeat (cheaper model ok). Falls back to global model. */
-    model?: string | null;
+    model?: string;
     /** Max recent messages to keep in heartbeat session (prevents context bloat). */
     keep_recent_messages: number;
     /** Active hours window. Heartbeats skipped outside this range. */
