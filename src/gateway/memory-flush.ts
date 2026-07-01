@@ -108,14 +108,16 @@ export async function runMemoryFlush(opts: {
       // Inject the snapshot as context so the flush agent can review it.
       session.loop.setHistory(opts.historySnapshot);
 
-      await session.loop.sendMessage(fullMessage, { headless: true });
-
-      // Restore original history. The flush turn is NOT persisted to the
-      // session JSONL — its durable output is in memory/YYYY-MM-DD.md
-      // (written by the agent's tool calls). Persisting flush messages
-      // would leak internal maintenance turns into the user's context
-      // on gateway restart when the JSONL is reloaded.
-      session.loop.setHistory(originalHistory);
+      try {
+        await session.loop.sendMessage(fullMessage, { headless: true });
+      } finally {
+        // Restore original history. The flush turn is NOT persisted to the
+        // session JSONL — its durable output is in memory/YYYY-MM-DD.md
+        // (written by the agent's tool calls). Persisting flush messages
+        // would leak internal maintenance turns into the user's context
+        // on gateway restart when the JSONL is reloaded.
+        session.loop.setHistory(originalHistory);
+      }
     },
   );
 
