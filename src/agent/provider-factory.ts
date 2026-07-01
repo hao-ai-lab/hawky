@@ -14,6 +14,29 @@ import { VertexProvider } from "./vertex_provider.js";
 import { OpenAIProvider } from "./openai_provider.js";
 import { LLMError } from "./provider.js";
 
+export type ProviderAccess =
+  | {
+      kind: "anthropic";
+      apiKey: string;
+      baseURL?: string;
+      defaultHeaders?: Record<string, string>;
+    }
+  | {
+      kind: "openai";
+      apiKey: string;
+      baseURL?: string;
+    }
+  | {
+      kind: "openai_compatible";
+      apiKey: string;
+      baseURL: string;
+    }
+  | {
+      kind: "vertex";
+      projectId: string;
+      region: string;
+    };
+
 function providerSubjectHeaders(): Record<string, string> | undefined {
   const subject = (process.env.HAWKY_PROVIDER_SUBJECT || "").trim();
   if (!subject) return undefined;
@@ -22,11 +45,11 @@ function providerSubjectHeaders(): Record<string, string> | undefined {
 }
 
 /**
- * Build an LLM provider from config. Throws a friendly LLMError with
- * a link to deploy/VERTEX_SETUP.md when the Vertex path is requested
- * but missing required config.
+ * Resolve provider access from local config/env only. A future API-gateway
+ * credential resolver should plug in before this boundary and still return the
+ * same ProviderAccess shape.
  */
-export function createProvider(config: HawkyConfig): LLMProvider {
+export function resolveLocalProviderAccess(config: HawkyConfig): ProviderAccess {
   const provider = config.provider ?? "anthropic";
 
   if (provider === "openai_compatible") {
@@ -41,7 +64,6 @@ export function createProvider(config: HawkyConfig): LLMProvider {
     if (!profile.base_url) {
       throw new LLMError("auth_error", `openai_compatible: profile "${compat.active_profile}" has empty base_url`);
     }
-    // Key resolution chain: literal -> env-var-by-name -> api_keys.openai -> OPENAI_API_KEY env -> error.
     const apiKey =
       profile.api_key ||
       (profile.api_key_env ? process.env[profile.api_key_env] : "") ||
@@ -54,7 +76,7 @@ export function createProvider(config: HawkyConfig): LLMProvider {
         `openai_compatible: no API key resolvable for profile "${compat.active_profile}" (set api_key, api_key_env, api_keys.openai, or OPENAI_API_KEY)`,
       );
     }
-    return new OpenAIProvider(apiKey, { baseURL: profile.base_url });
+    return { kind: "openai_compatible", apiKey, baseURL: profile.base_url };
   }
 
   if (provider === "openai") {
@@ -65,8 +87,7 @@ export function createProvider(config: HawkyConfig): LLMProvider {
         "OpenAI API key is empty. Set OPENAI_API_KEY env var or api_keys.openai in ~/.hawky/config.json.",
       );
     }
-    const baseURL = config.openai_base_url || undefined;
-    return new OpenAIProvider(apiKey, { baseURL });
+    return { kind: "openai", apiKey, baseURL: config.openai_base_url || undefined };
   }
 
   if (provider === "vertex") {
@@ -79,13 +100,13 @@ export function createProvider(config: HawkyConfig): LLMProvider {
           "for the full GCP setup.",
       );
     }
-    return new VertexProvider({
+    return {
+      kind: "vertex",
       projectId: vertex.project_id,
       region: vertex.region ?? "global",
-    });
+    };
   }
 
-  // Default: direct Anthropic API
   const apiKey = config.api_keys?.anthropic;
   if (!apiKey) {
     throw new LLMError(
@@ -95,8 +116,37 @@ export function createProvider(config: HawkyConfig): LLMProvider {
         "(see deploy/VERTEX_SETUP.md).",
     );
   }
-  return new AnthropicProvider(apiKey, {
+  return {
+    kind: "anthropic",
+    apiKey,
     baseURL: config.api_base_url,
     defaultHeaders: providerSubjectHeaders(),
-  });
+  };
+}
+
+export function createProviderFromAccess(access: ProviderAccess): LLMProvider {
+  switch (access.kind) {
+    case "openai":
+    case "openai_compatible":
+      return new OpenAIProvider(access.apiKey, { baseURL: access.baseURL });
+    case "vertex":
+      return new VertexProvider({
+        projectId: access.projectId,
+        region: access.region,
+      });
+    case "anthropic":
+      return new AnthropicProvider(access.apiKey, {
+        baseURL: access.baseURL,
+        defaultHeaders: access.defaultHeaders,
+      });
+  }
+}
+
+/**
+ * Build an LLM provider from config. Throws a friendly LLMError with
+ * a link to deploy/VERTEX_SETUP.md when the Vertex path is requested
+ * but missing required config.
+ */
+export function createProvider(config: HawkyConfig): LLMProvider {
+  return createProviderFromAccess(resolveLocalProviderAccess(config));
 }

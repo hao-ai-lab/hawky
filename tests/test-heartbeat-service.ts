@@ -123,6 +123,26 @@ describe("HeartbeatService.resolveConfig", () => {
     expect(config.model).toBe("claude-haiku-4-5");
   });
 
+  test("resolves OpenAI heartbeat to the OpenAI main model when Claude override is stale", () => {
+    const config = HeartbeatService.resolveConfig({
+      ...makeConfig({ model: "claude-sonnet-4-6" }),
+      provider: "openai",
+      model: "gpt-5.5",
+      api_keys: { anthropic: "test-key", brave_search: "", openai: "sk-openai-test" },
+    });
+    expect(config.model).toBe("gpt-5.5");
+  });
+
+  test("keeps compatible OpenAI heartbeat override", () => {
+    const config = HeartbeatService.resolveConfig({
+      ...makeConfig({ model: "gpt-5.4-mini" }),
+      provider: "openai",
+      model: "gpt-5.5",
+      api_keys: { anthropic: "test-key", brave_search: "", openai: "sk-openai-test" },
+    });
+    expect(config.model).toBe("gpt-5.4-mini");
+  });
+
   test("disabled config", () => {
     const config = HeartbeatService.resolveConfig(makeConfig({ enabled: false }));
     expect(config.enabled).toBe(false);

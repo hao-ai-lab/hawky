@@ -47,6 +47,7 @@ import { executeInSession } from "./lanes.js";
 import { CommandLane } from "./types.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import { createProvider } from "../agent/provider-factory.js";
+import { resolveHeartbeatModel } from "../agent/model-compat.js";
 import { triggerAgentTurn, sanitizeDeliveredText, relayToBoundChannels } from "./agent-turn.js";
 import { broadcastNotification } from "./notification.js";
 import { deliver } from "./delivery.js";
@@ -213,7 +214,7 @@ export class HeartbeatService {
     return {
       enabled: hb.enabled,
       intervalMs: (hb.interval_minutes ?? 30) * 60_000,
-      model: hb.model,
+      model: resolveHeartbeatModel(config),
       keepRecentMessages: hb.keep_recent_messages ?? 8,
       activeHours: hb.active_hours
         ? {

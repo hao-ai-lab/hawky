@@ -47,6 +47,7 @@ import { getSessionsDir } from "./storage/session.js";
 import { getGlobalMemoryIndex } from "./memory/global.js";
 import { startSkillsWatcher } from "./skills/watcher.js";
 import { promptForLlmCredentials, promptForOpenAIKey } from "./storage/setup-prompt.js";
+import { normalizeProviderModels } from "./agent/model-compat.js";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   makeRetryingRecognizer,
@@ -495,9 +496,14 @@ async function main() {
 
       // Load config (let, not const, so we can reload after first-run setup)
       resetConfig();
-      let gwConfig = loadConfig();
-      const gwModel = getArg(args, "--model") ?? gwConfig.model ?? DEFAULT_MODEL;
-      gwConfig.model = gwModel;
+      const cliModel = getArg(args, "--model");
+      const loadGatewayConfig = () => {
+        const config = loadConfig(undefined, { normalize: false });
+        config.model = cliModel ?? config.model ?? DEFAULT_MODEL;
+        return normalizeProviderModels(config);
+      };
+      let gwConfig = loadGatewayConfig();
+      let gwModel = gwConfig.model;
 
       // Initialize logger (gateway mode = console transport enabled)
       const gwLogDir = gwConfig.logging?.dir ?? join(getConfigDir(), "logs");
@@ -533,8 +539,8 @@ async function main() {
         }
         await promptForOpenAIKey();
         resetConfig();
-        gwConfig = loadConfig();
-        gwConfig.model = gwModel;
+        gwConfig = loadGatewayConfig();
+        gwModel = gwConfig.model;
       } else if (gwActiveProvider !== "openai" && gwActiveProvider !== "openai_compatible" && !gwConfig.api_keys.anthropic) {
         if (!process.stdin.isTTY) {
           console.error("Error: ANTHROPIC_API_KEY is required. Set it in environment or ~/.hawky/config.json");
@@ -544,8 +550,8 @@ async function main() {
         resetConfig();
         // Reload — promptForLlmCredentials may have switched providers entirely,
         // and createProvider below needs the post-setup config.
-        gwConfig = loadConfig();
-        gwConfig.model = gwModel;
+        gwConfig = loadGatewayConfig();
+        gwModel = gwConfig.model;
       }
 
       // Initialize memory + skills

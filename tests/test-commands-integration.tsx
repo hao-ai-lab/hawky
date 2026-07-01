@@ -21,6 +21,37 @@ import { AgentLoopSource } from "./helpers/mock-agent-source.js";
 
 const tick = (ms = 150) => new Promise<void>((r) => setTimeout(r, ms));
 
+async function waitForFrame(
+  lastFrame: () => string | undefined,
+  predicate: string | ((frame: string) => boolean),
+  timeoutMs = 3000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let frame = lastFrame() ?? "";
+  const matches = typeof predicate === "string"
+    ? (value: string) => value.includes(predicate)
+    : predicate;
+
+  while (Date.now() < deadline) {
+    frame = lastFrame() ?? "";
+    if (matches(frame)) return frame;
+    await tick(50);
+  }
+
+  return frame;
+}
+
+async function waitForAgentIdle(source: AgentLoopSource, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (!source.getLoop().isRunning()) return;
+    await tick(50);
+  }
+
+  expect(source.getLoop().isRunning()).toBe(false);
+}
+
 // =============================================================================
 // Mock Provider
 // =============================================================================
@@ -175,24 +206,29 @@ describe("Commands via TUI", () => {
   test("/history shows stats", async () => {
     const provider = new MockProvider();
     provider.addResponse(textResponse("reply"));
+    const source = new AgentLoopSource(provider, makeConfig());
 
     const { lastFrame, stdin, unmount } = inkRender(
-      <App model="claude-sonnet-4-6" agentSource={new AgentLoopSource(provider, makeConfig())} sessionKey="test:main" />,
+      <App model="claude-sonnet-4-6" agentSource={source} sessionKey="test:main" />,
     );
 
     // Send a real message first to get some history
     stdin.write("hello");
     await tick();
     stdin.write("\r");
-    await tick(800); // Needs enough time for agent loop to complete
+    await waitForFrame(lastFrame, "reply");
+    await waitForAgentIdle(source);
+    await waitForFrame(lastFrame, "Type a message");
 
     // Now check history
     stdin.write("/history");
     await tick();
     stdin.write("\r");
-    await tick(200);
 
-    const output = lastFrame();
+    const output = await waitForFrame(
+      lastFrame,
+      (frame) => frame.includes("Messages:") && frame.includes("tokens"),
+    );
     expect(output).toContain("Messages:");
     expect(output).toContain("tokens");
 
