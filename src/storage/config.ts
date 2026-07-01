@@ -175,6 +175,7 @@ function deepMerge(
 // -----------------------------------------------------------------------------
 
 let cachedConfig: HawkyConfig | null = null;
+let cachedConfigPath: string | null = null;
 
 /**
  * Load configuration. Merges config file with defaults, then applies
@@ -183,9 +184,9 @@ let cachedConfig: HawkyConfig | null = null;
  * @param configPath - Override config file path (for testing)
  */
 export function loadConfig(configPath?: string): HawkyConfig {
-  if (cachedConfig) return cachedConfig;
-
   const filePath = configPath ?? CONFIG_PATH;
+  if (cachedConfig && cachedConfigPath === filePath) return cachedConfig;
+
   let fileConfig: Record<string, unknown> = {};
 
   if (existsSync(filePath)) {
@@ -287,6 +288,7 @@ export function loadConfig(configPath?: string): HawkyConfig {
   }
 
   cachedConfig = config;
+  cachedConfigPath = filePath;
   return config;
 }
 
@@ -295,6 +297,7 @@ export function loadConfig(configPath?: string): HawkyConfig {
  */
 export function resetConfig(): void {
   cachedConfig = null;
+  cachedConfigPath = null;
 }
 
 /**
@@ -328,6 +331,7 @@ export function setConfigDir(dir: string): string {
   const prev = HAWKY_DIR;
   HAWKY_DIR = dir;
   CONFIG_PATH = join(dir, "config.json");
+  resetConfig();
   return prev;
 }
 
@@ -337,6 +341,7 @@ export function setConfigDir(dir: string): string {
 export function resetConfigDir(): void {
   HAWKY_DIR = defaultHawkyDir();
   CONFIG_PATH = join(HAWKY_DIR, "config.json");
+  resetConfig();
 }
 
 /**
