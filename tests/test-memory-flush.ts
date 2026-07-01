@@ -303,6 +303,42 @@ describe("runMemoryFlush event broadcasting", () => {
     // Should see started but then skip inside (no history to review)
     expect(events.some((e) => e.event === "flush.started")).toBe(true);
   });
+
+  test("restores original history when sendMessage throws", async () => {
+    const originalHistory: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "current turn" }] },
+      { role: "assistant", content: [{ type: "text", text: "current answer" }] },
+    ];
+    const historySnapshot: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "snapshot turn" }] },
+      { role: "assistant", content: [{ type: "text", text: "snapshot answer" }] },
+    ];
+    let activeHistory = originalHistory;
+
+    const mockSessions = {
+      getOrCreate: () => ({
+        loop: {
+          getHistory: () => activeHistory,
+          setHistory: (history: ChatMessage[]) => { activeHistory = history; },
+          sendMessage: async () => {
+            expect(activeHistory).toBe(historySnapshot);
+            throw new Error("flush provider failed");
+          },
+        },
+        sessionManager: { appendMessage: () => {} },
+      }),
+    } as any;
+
+    await expect(runMemoryFlush({
+      sessionKey: "test:main",
+      trigger: "flush",
+      sessions: mockSessions,
+      config: makeFlushConfig(),
+      historySnapshot,
+    })).rejects.toThrow("flush provider failed");
+
+    expect(activeHistory).toBe(originalHistory);
+  });
 });
 
 // -----------------------------------------------------------------------------
