@@ -111,6 +111,62 @@ describe("config.update openai_api_key", () => {
     expect(result.config.has_openai_key).toBe(true);
   });
 
+  test("config.update caps OpenAI max_tokens to the selected model limit", () => {
+    const server = makeConfigServer();
+    const result = server.call("config.update", {
+      provider: "openai",
+      openai_api_key: "sk-openai-test-key",
+      model: "gpt-4o-mini",
+      max_tokens: 32768,
+    }) as any;
+
+    expect(result.ok).toBe(true);
+    expect(result.config.provider).toBe("openai");
+    expect(result.config.model).toBe("gpt-4o-mini");
+    expect(result.config.max_tokens).toBe(16384);
+
+    resetConfig();
+    const config = loadConfig();
+    expect(config.model).toBe("gpt-4o-mini");
+    expect(config.max_tokens).toBe(16384);
+  });
+
+  test("setting provider openai normalizes stale Claude model and heartbeat override", () => {
+    const server = makeConfigServer();
+    const result = server.call("config.update", {
+      provider: "openai",
+      openai_api_key: "sk-openai-test-key",
+    }) as any;
+
+    expect(result.ok).toBe(true);
+    expect(result.config.provider).toBe("openai");
+    expect(result.config.model.startsWith("gpt-")).toBe(true);
+    expect(result.config.heartbeat.model).toBeNull();
+
+    resetConfig();
+    const config = loadConfig();
+    expect(config.provider).toBe("openai");
+    expect(config.model.startsWith("gpt-")).toBe(true);
+    expect(config.heartbeat.model).toBeNull();
+  });
+
+  test("switching back to anthropic normalizes stale OpenAI model", () => {
+    writeFileSync(join(testDir, "config.json"), JSON.stringify({
+      api_keys: { anthropic: "sk-ant-test", openai: "sk-existing-openai", brave_search: "" },
+      provider: "openai",
+      model: "gpt-5.5",
+      heartbeat: { model: "gpt-5.4-mini" },
+    }));
+    resetConfig();
+    const server = makeConfigServer();
+    const result = server.call("config.update", { provider: "anthropic" }) as any;
+
+    expect(result.ok).toBe(true);
+    expect(result.config.provider).toBe("anthropic");
+    expect(result.config.model.startsWith("claude-")).toBe(true);
+    expect(result.config.heartbeat.model?.startsWith("claude-")).toBe(true);
+  });
+
   test("setting provider openai resolves key from OPENAI_API_KEY env", () => {
     process.env.OPENAI_API_KEY = "sk-from-env";
     resetConfig(); // pick up the env var
@@ -151,6 +207,21 @@ describe("config.update openai_api_key", () => {
   test("openai_api_key must be a string", () => {
     const server = makeConfigServer();
     expect(() => server.call("config.update", { openai_api_key: 12345 })).toThrow(MethodError);
+  });
+
+  test("heartbeat model null clears the override", () => {
+    const server = makeConfigServer();
+    const result = server.call("config.update", { heartbeat: { model: null } }) as any;
+    expect(result.ok).toBe(true);
+    expect(result.config.heartbeat.model).toBeNull();
+
+    resetConfig();
+    expect(loadConfig().heartbeat.model).toBeNull();
+  });
+
+  test("heartbeat model rejects non-string values", () => {
+    const server = makeConfigServer();
+    expect(() => server.call("config.update", { heartbeat: { model: 42 } })).toThrow(MethodError);
   });
 });
 
@@ -218,6 +289,49 @@ describe("config.update openai_compatible provider", () => {
     resetConfig();
     const server = makeConfigServer();
     expect(() => server.call("config.update", { provider: "openai_compatible" })).toThrow(MethodError);
+  });
+
+  test("rejects openai_compatible when profile has no resolvable key", () => {
+    writeFileSync(join(testDir, "config.json"), JSON.stringify({
+      api_keys: { anthropic: "sk-ant-test", openai: "", brave_search: "" },
+      provider: "anthropic",
+      openai_compatible: {
+        active_profile: "nokey",
+        profiles: { nokey: { base_url: "https://api.example.com/v1" } },
+      },
+    }));
+    resetConfig();
+    const server = makeConfigServer();
+    let err: unknown;
+    try {
+      server.call("config.update", { provider: "openai_compatible" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(MethodError);
+    expect((err as MethodError).code).toBe("INVALID_REQUEST");
+    expect((err as MethodError).message).toContain("no API key resolvable");
+  });
+
+  test("accepts openai_compatible when openai_api_key is supplied in the same update", () => {
+    writeFileSync(join(testDir, "config.json"), JSON.stringify({
+      api_keys: { anthropic: "sk-ant-test", openai: "", brave_search: "" },
+      provider: "anthropic",
+      openai_compatible: {
+        active_profile: "runpod",
+        profiles: { runpod: { base_url: "https://runpod.example/v1" } },
+      },
+    }));
+    resetConfig();
+    const server = makeConfigServer();
+    const result = server.call("config.update", {
+      provider: "openai_compatible",
+      openai_api_key: "sk-openai-fallback",
+    }) as any;
+
+    expect(result.ok).toBe(true);
+    expect(result.config.provider).toBe("openai_compatible");
+    expect(result.config.has_openai_key).toBe(true);
   });
 
   test("persists active_profile without allowing profile edits through config.update", () => {

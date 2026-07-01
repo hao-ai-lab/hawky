@@ -11,6 +11,7 @@
 import { AgentLoop } from "../agent/loop.js";
 import type { LLMProvider } from "../agent/provider.js";
 import { createProvider } from "../agent/provider-factory.js";
+import { normalizeProviderModels } from "../agent/model-compat.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { registerBuiltinTools } from "../tools/builtin.js";
 import type { HawkyConfig, StreamEvent } from "../agent/types.js";
@@ -130,11 +131,12 @@ export class AgentSessionManager {
       } else if (spec.active_profile) {
         candidate.openai_compatible = { active_profile: spec.active_profile, profiles: {} };
       }
+      const normalizedCandidate = normalizeProviderModels(candidate);
 
       // Validate — throws if config is bad (e.g. unknown profile, missing key)
       let newProvider: LLMProvider;
       try {
-        newProvider = createProvider(candidate);
+        newProvider = createProvider(normalizedCandidate);
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
@@ -149,6 +151,12 @@ export class AgentSessionManager {
       }
       if (spec.active_profile) {
         updates.openai_compatible = { active_profile: spec.active_profile };
+      }
+      if (updates.model !== normalizedCandidate.model) {
+        updates.model = normalizedCandidate.model;
+      }
+      if (normalizedCandidate.heartbeat?.model !== this.config.heartbeat?.model) {
+        updates.heartbeat = { model: normalizedCandidate.heartbeat?.model ?? null };
       }
       updateConfig(updates);
       resetConfig();

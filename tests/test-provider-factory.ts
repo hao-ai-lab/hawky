@@ -7,7 +7,11 @@
 // =============================================================================
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { createProvider } from "../src/agent/provider-factory.js";
+import {
+  createProvider,
+  createProviderFromAccess,
+  resolveLocalProviderAccess,
+} from "../src/agent/provider-factory.js";
 import { AnthropicProvider } from "../src/agent/anthropic_provider.js";
 import { VertexProvider } from "../src/agent/vertex_provider.js";
 import { OpenAIProvider } from "../src/agent/openai_provider.js";
@@ -47,6 +51,17 @@ describe("createProvider", () => {
   test("returns AnthropicProvider when provider is explicitly 'anthropic'", () => {
     const p = createProvider(baseConfig({ provider: "anthropic" }));
     expect(p).toBeInstanceOf(AnthropicProvider);
+  });
+
+  test("resolves local Anthropic access without constructing a provider", () => {
+    process.env.HAWKY_PROVIDER_SUBJECT = "user:juc049@ucsd.edu";
+    const access = resolveLocalProviderAccess(baseConfig({ provider: "anthropic" }));
+    expect(access).toEqual({
+      kind: "anthropic",
+      apiKey: "sk-ant-test",
+      baseURL: "https://api.anthropic.com",
+      defaultHeaders: { "X-Hawky-Provider-Subject": "user:juc049@ucsd.edu" },
+    });
   });
 
   test("passes provider subject header to AnthropicProvider", () => {
@@ -149,6 +164,28 @@ describe("createProvider", () => {
         provider: "openai",
         api_keys: { anthropic: "", brave_search: "", openai: "sk-test" },
       }));
+      expect(p).toBeInstanceOf(OpenAIProvider);
+    });
+
+    test("resolves local OpenAI access from env before config", () => {
+      process.env.OPENAI_API_KEY = "sk-env";
+      const access = resolveLocalProviderAccess(baseConfig({
+        provider: "openai",
+        api_keys: { anthropic: "", brave_search: "", openai: "sk-config" },
+        openai_base_url: "https://api.deepinfra.com/v1/openai",
+      }));
+      expect(access).toEqual({
+        kind: "openai",
+        apiKey: "sk-env",
+        baseURL: "https://api.deepinfra.com/v1/openai",
+      });
+    });
+
+    test("creates providers from resolved access", () => {
+      const p = createProviderFromAccess({
+        kind: "openai",
+        apiKey: "sk-test",
+      });
       expect(p).toBeInstanceOf(OpenAIProvider);
     });
 

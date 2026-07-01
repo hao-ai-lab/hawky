@@ -196,6 +196,35 @@ describe("swapProvider", () => {
     expect(cfg.openai_base_url).toBe("http://localhost:8000/v1");
   });
 
+  test("swap to openai without explicit model normalizes stale Claude model and heartbeat override", () => {
+    delete process.env.OPENAI_API_KEY;
+    saveConfig(baseConfig({
+      api_keys: { anthropic: "sk-ant-test", brave_search: "", openai: "sk-openai-test" },
+      provider: "anthropic",
+      model: "claude-opus-4-7",
+      heartbeat: {
+        ...baseConfig().heartbeat,
+        model: "claude-sonnet-4-6",
+      },
+    }));
+    resetConfig();
+    sessions = new AgentSessionManager({
+      provider: makeProvider(),
+      config: loadConfig(),
+      workingDirectory: join(testDir, "workspace"),
+    });
+
+    const result = sessions.swapProvider({ provider: "openai" });
+
+    expect(result).toEqual({ ok: true });
+    expect(sessions.getActiveProvider()).toBeInstanceOf(OpenAIProvider);
+    resetConfig();
+    const cfg = loadConfig();
+    expect(cfg.provider).toBe("openai");
+    expect(cfg.model.startsWith("gpt-")).toBe(true);
+    expect(cfg.heartbeat.model).toBeNull();
+  });
+
   test("switches openai_compatible active_profile even when provider is unchanged", () => {
     saveConfig(baseConfig({
       provider: "openai_compatible",

@@ -640,7 +640,10 @@ describe("E2E: production gateway path", () => {
     srv.start(p);
 
     try {
-      const ws = await connectAndHandshake(p, "prod:perm-test");
+      const sessionKey = "prod:perm-test";
+      const ws = await connectAndHandshake(p, sessionKey);
+      await sendRequest(ws, "session.resolve", { sessionKey });
+      await sendRequest(ws, "permission.mode", { mode: "default" });
       const events = collectEvents(ws);
 
       // Send chat — agent will call bash, which needs permission
@@ -684,7 +687,10 @@ describe("E2E: production gateway path", () => {
     srv.start(p);
 
     try {
-      const ws = await connectAndHandshake(p, "prod:perm-deny");
+      const sessionKey = "prod:perm-deny";
+      const ws = await connectAndHandshake(p, sessionKey);
+      await sendRequest(ws, "session.resolve", { sessionKey });
+      await sendRequest(ws, "permission.mode", { mode: "default" });
       const events = collectEvents(ws);
 
       void sendRequest(ws, "chat.send", { message: "delete" });
