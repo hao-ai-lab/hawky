@@ -29,6 +29,8 @@ export type LiveRealtimeClientSecretResponse = {
 
 export type LiveRealtimeBrokerOptions = {
   quotaKey?: string;
+  allowProviderGatewayForward?: boolean;
+  preferProviderGatewayForward?: boolean;
 };
 
 export class LiveRealtimeBrokerError extends Error {
@@ -72,7 +74,15 @@ export async function mintOpenAIRealtimeClientSecret(
 ): Promise<LiveRealtimeClientSecretResponse> {
   const cfg = loadConfig();
   const keySelection = selectRealtimeApiKey(params, cfg.api_keys?.openai);
+  if (!keySelection.byokApiKey && options.preferProviderGatewayForward && options.allowProviderGatewayForward !== false) {
+    const gatewayResponse = await mintViaProviderGateway(params, options);
+    if (gatewayResponse) return gatewayResponse;
+  }
   if (!keySelection.apiKey) {
+    if (!keySelection.byokApiKey && options.allowProviderGatewayForward !== false) {
+      const gatewayResponse = await mintViaProviderGateway(params, options);
+      if (gatewayResponse) return gatewayResponse;
+    }
     throw new LiveRealtimeBrokerError(
       "No OpenAI API key available. Add your own key in Settings (BYOK) or configure one on the gateway.",
       400,
@@ -233,6 +243,38 @@ function extractOpenAIError(payload: unknown): string | null {
   if (!error || typeof error !== "object") return null;
   const message = (error as { message?: unknown }).message;
   return typeof message === "string" && message.trim() ? message : null;
+}
+
+async function mintViaProviderGateway(
+  params: LiveRealtimeClientSecretParams,
+  options: LiveRealtimeBrokerOptions,
+): Promise<LiveRealtimeClientSecretResponse | null> {
+  const baseUrl = (process.env.HAWKY_PROVIDER_GATEWAY_URL || "").trim();
+  const token = (process.env.HAWKY_PROVIDER_GATEWAY_TOKEN || "").trim();
+  if (!baseUrl || !token) return null;
+
+  const target = new URL("/internal/provider/openai/realtime/client-secret", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const upstream = await fetch(target, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Hawky-Provider-Subject": options.quotaKey ?? "unknown",
+    },
+    body: JSON.stringify({ ...params, byok_api_key: undefined }),
+  });
+  const payload = await upstream.json().catch(() => null);
+  if (!upstream.ok) {
+    const message = extractOpenAIError(payload) ?? extractJsonError(payload) ?? `Provider gateway returned HTTP ${upstream.status}`;
+    throw new LiveRealtimeBrokerError(message, upstream.status);
+  }
+  return payload as LiveRealtimeClientSecretResponse;
+}
+
+function extractJsonError(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const error = (payload as { error?: unknown }).error;
+  return typeof error === "string" && error.trim() ? error : null;
 }
 
 function enforceRealtimeMintQuota(rawKey: string): void {

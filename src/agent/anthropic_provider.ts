@@ -55,7 +55,7 @@ export class AnthropicProvider implements LLMProvider {
   private client: Anthropic;
   private _warnedEffortDrop = false;
 
-  constructor(apiKey: string, options?: { baseURL?: string; timeout?: number }) {
+  constructor(apiKey: string, options?: { baseURL?: string; timeout?: number; defaultHeaders?: Record<string, string> }) {
     if (!apiKey) {
       throw new LLMError("auth_error", "Anthropic API key is required");
     }
@@ -64,6 +64,7 @@ export class AnthropicProvider implements LLMProvider {
       // Always set baseURL explicitly to avoid inheriting ANTHROPIC_BASE_URL from shell env
       baseURL: options?.baseURL ?? "https://api.anthropic.com",
       timeout: options?.timeout ?? 300_000, // 5 min default (streaming can be long)
+      defaultHeaders: options?.defaultHeaders,
     });
   }
 

@@ -21,12 +21,15 @@ import type { MethodHandler, MethodRegistry } from "./methods.js";
 import { createMethodRegistry } from "./methods.js";
 import { NodeRegistry } from "./node-registry.js";
 import { DeviceAuth, callbackRedirectHtml, manualTokenHtml, webAuthRedirectHtml, type DeviceTokenPayload } from "./device-auth.js";
-import { AppAuth, sanitizeReturnUrl } from "./app-auth.js";
+import { AppAuth, sanitizeReturnUrl, type AppAuthUser } from "./app-auth.js";
 import {
   LiveRealtimeBrokerError,
   mintOpenAIRealtimeClientSecret,
   type LiveRealtimeClientSecretParams,
 } from "./live-realtime-broker.js";
+import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
+import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
+import { isAdminHost, isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -60,6 +63,27 @@ function redirect(location: string, extraHeaders: Array<[string, string]> = []):
   return new Response(null, { status: 303, headers });
 }
 
+function logoutRedirectHtml(returnUrl: string): string {
+  const safeReturn = JSON.stringify(returnUrl);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signing out</title>
+</head>
+<body>
+  <script>
+    for (const key of ["hawky_device_token", "hawky-device-token", "hawky-auth-token", "gateway-token"]) {
+      try { localStorage.removeItem(key); } catch {}
+    }
+    window.location.replace(${safeReturn});
+  </script>
+  <noscript><a href="${returnUrl}">Continue</a></noscript>
+</body>
+</html>`;
+}
+
 function requestIp(req: Request): string {
   return req.headers.get("CF-Connecting-IP")
     ?? req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim()
@@ -68,6 +92,14 @@ function requestIp(req: Request): string {
 
 function loginThrottleKey(req: Request): string {
   return requestIp(req) || "unknown";
+}
+
+function proxyHeaders(headers: Headers): Headers {
+  const out = new Headers(headers);
+  out.delete("host");
+  out.delete("connection");
+  out.delete("upgrade");
+  return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -122,6 +154,17 @@ export class GatewayServer {
       fetch(req, server) {
         // WebSocket upgrade — check FIRST, before any URL parsing.
         if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const proxyTarget = self.workspaceProxyTarget(req, new URL(req.url));
+          if (proxyTarget) {
+            const url = new URL(req.url);
+            const upgraded = server.upgrade(req, {
+              data: {
+                connId: "",
+                proxyTarget: `ws://${proxyTarget}${url.pathname}${url.search}`,
+              } as WSData,
+            });
+            return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
+          }
           const upgraded = server.upgrade(req, {
             data: { connId: "" } as WSData,
           });
@@ -132,6 +175,12 @@ export class GatewayServer {
         }
 
         const url = new URL(req.url);
+
+        // Internal provider gateway — used by per-user gateway processes so
+        // they never need raw OpenAI/Anthropic provider keys in their env.
+        if (isProviderGatewayPath(url.pathname)) {
+          return handleProviderGatewayRequest(req, url);
+        }
 
         // Health endpoints — always unauthenticated (needed for probes/monitoring)
         if (url.pathname === "/health" || url.pathname === "/healthz") {
@@ -171,6 +220,9 @@ export class GatewayServer {
         if (self.appAuth && url.pathname === "/auth/me" && req.method === "GET") {
           return self.handleAppMe(req);
         }
+        if (self.appAuth && url.pathname === "/" && isAdminHost(req.headers.get("Host") ?? "")) {
+          return redirect("/admin");
+        }
         if (self.appAuth && url.pathname === "/admin") {
           return self.handleAdmin(req, url);
         }
@@ -187,6 +239,8 @@ export class GatewayServer {
             headers: { "Content-Type": "text/html; charset=utf-8" },
           });
         }
+        const workspaceProxy = self.proxyWorkspaceRequest(req, url);
+        if (workspaceProxy) return workspaceProxy;
 
         // Device auth endpoint — issues signed device tokens.
         // For remote access, Cloudflare Access gates this endpoint (email OTP).
@@ -230,6 +284,25 @@ export class GatewayServer {
         sendPings: true,
 
         open(ws) {
+          if (ws.data?.proxyTarget) {
+            const pending: Array<string | Buffer> = [];
+            const upstream = new WebSocket(ws.data.proxyTarget);
+            ws.data.proxyUpstream = upstream;
+            ws.data.proxyPending = pending;
+            upstream.addEventListener("open", () => {
+              for (const message of pending.splice(0)) upstream.send(message);
+            });
+            upstream.addEventListener("message", (event) => {
+              ws.send(event.data);
+            });
+            upstream.addEventListener("close", (event) => {
+              ws.close(event.code || 1000, event.reason || "");
+            });
+            upstream.addEventListener("error", () => {
+              ws.close(1011, "upstream websocket error");
+            });
+            return;
+          }
           const remoteAddress = ws.remoteAddress || "unknown";
           const conn = new GatewayConnection(ws, remoteAddress);
           self.connections.set(conn.connId, conn);
@@ -238,6 +311,15 @@ export class GatewayServer {
         },
 
         message(ws, raw) {
+          const upstream = ws.data?.proxyUpstream;
+          if (upstream) {
+            if (upstream.readyState === WebSocket.OPEN) {
+              upstream.send(raw);
+            } else {
+              ws.data?.proxyPending?.push(typeof raw === "string" ? raw : Buffer.from(raw));
+            }
+            return;
+          }
           const connId = ws.data?.connId;
           if (!connId) return;
 
@@ -249,6 +331,13 @@ export class GatewayServer {
         },
 
         close(ws, code, reason) {
+          const upstream = ws.data?.proxyUpstream;
+          if (upstream) {
+            if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
+              upstream.close(code || 1000, reason || "");
+            }
+            return;
+          }
           const connId = ws.data?.connId;
           if (!connId) return;
 
@@ -501,8 +590,8 @@ export class GatewayServer {
     const body = await readFormOrJson(req);
     const returnUrl = sanitizeReturnUrl(body.return_url ?? "/");
     try {
-      const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
-      return redirect(returnUrl, [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+      const { user, token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
+      return redirect(this.postLoginRedirect(req, user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.loginPage(returnUrl, err instanceof Error ? err.message : "Login failed."), {
         status: 401,
@@ -526,12 +615,12 @@ export class GatewayServer {
     try {
       const result = this.appAuth.register(body.email ?? "", body.password ?? "", body.registration_code ?? "");
       if (result.approvalRequired) {
-        return new Response(this.appAuth.registerPage(returnUrl, "Request received. An admin will review it before you can sign in."), {
+        return new Response(this.appAuth.loginPage(returnUrl, "", "Sign-up received. An admin will review it before you can sign in."), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
       const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
-      return redirect(result.user.role === "admin" ? "/admin" : returnUrl, [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+      return redirect(result.user.role === "admin" ? "/admin" : this.postLoginRedirect(req, result.user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.registerPage(returnUrl, "", err instanceof Error ? err.message : "Registration failed."), {
         status: 400,
@@ -542,9 +631,15 @@ export class GatewayServer {
 
   private handleAppLogout(url: URL): Response {
     if (!this.appAuth) return new Response("Not found", { status: 404 });
-    return redirect(sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/"), [
-      ["Set-Cookie", this.appAuth.clearSessionCookie()],
-    ]);
+    const returnUrl = sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/auth/login");
+    const headers = new Headers({ "Content-Type": "text/html; charset=utf-8" });
+    for (const cookie of this.appAuth.clearSessionCookies()) {
+      headers.append("Set-Cookie", cookie);
+    }
+    return new Response(logoutRedirectHtml(returnUrl), {
+      status: 200,
+      headers,
+    });
   }
 
   private handleAppMe(req: Request): Response {
@@ -552,6 +647,12 @@ export class GatewayServer {
     const user = this.appAuth.userFromRequest(req);
     if (!user) return Response.json({ ok: false, error: "Login required" }, { status: 401 });
     return Response.json({ ok: true, user });
+  }
+
+  private postLoginRedirect(req: Request, user: AppAuthUser, returnUrl: string): string {
+    if (isAdminHost(req.headers.get("Host") ?? "") && returnUrl === "/") return "/admin";
+    if (user.role === "admin" && returnUrl === "/") return "/admin";
+    return returnUrl;
   }
 
   private async handleAdmin(req: Request, url: URL): Promise<Response> {
@@ -585,8 +686,14 @@ export class GatewayServer {
       if (action === "approve") {
         const body = await readFormOrJson(req);
         const role = body.role === "admin" ? "admin" : "user";
-        this.appAuth.approveUser(admin, userId, role);
-        return redirect("/admin?message=User%20approved");
+        const approved = this.appAuth.approveUser(admin, userId, role);
+        const provision = await provisionWorkspaceForUser({ user: approved, role, admin });
+        const message = provision.ok
+          ? provision.skipped
+            ? "User approved"
+            : "User approved and workspace provisioned"
+          : `User approved, but workspace provisioning failed: ${provision.message}`;
+        return redirect(`/admin?message=${encodeURIComponent(message)}`);
       }
       this.appAuth.disableUser(admin, userId);
       return redirect("/admin?message=User%20disabled");
@@ -602,6 +709,39 @@ export class GatewayServer {
     if (url.pathname.startsWith("/auth/")) return false;
     if (url.pathname === "/ws") return false;
     return true;
+  }
+
+  private workspaceProxyTarget(req: Request, url: URL): string | null {
+    if (!this.appAuth) return null;
+    if (!isControlHost(req.headers.get("Host") ?? "")) return null;
+    if (isAdminHost(req.headers.get("Host") ?? "")) return null;
+    if (url.pathname === "/health" || url.pathname === "/healthz") return null;
+    if (url.pathname === "/ready" || url.pathname === "/readyz") return null;
+    if (url.pathname === "/auth/login") return null;
+    if (url.pathname === "/auth/register") return null;
+    if (url.pathname === "/auth/logout") return null;
+    if (url.pathname === "/auth/me") return null;
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return null;
+    if (isProviderGatewayPath(url.pathname)) return null;
+    const user = this.appAuth.userFromRequest(req);
+    if (!user) return null;
+    return workspaceLocalTargetForUser(user);
+  }
+
+  private proxyWorkspaceRequest(req: Request, url: URL): Promise<Response> | null {
+    const target = this.workspaceProxyTarget(req, url);
+    if (!target) return null;
+    const upstreamUrl = `http://${target}${url.pathname}${url.search}`;
+    return fetch(upstreamUrl, {
+      method: req.method,
+      headers: proxyHeaders(req.headers),
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+      signal: req.signal,
+    }).then((upstream) => new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: upstream.headers,
+    }));
   }
 
   private isAuthorizedHealthRequest(req: Request): boolean {

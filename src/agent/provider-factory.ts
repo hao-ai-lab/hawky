@@ -14,6 +14,13 @@ import { VertexProvider } from "./vertex_provider.js";
 import { OpenAIProvider } from "./openai_provider.js";
 import { LLMError } from "./provider.js";
 
+function providerSubjectHeaders(): Record<string, string> | undefined {
+  const subject = (process.env.HAWKY_PROVIDER_SUBJECT || "").trim();
+  if (!subject) return undefined;
+  if (!/^[a-zA-Z0-9:._@-]{1,120}$/.test(subject)) return undefined;
+  return { "X-Hawky-Provider-Subject": subject };
+}
+
 /**
  * Build an LLM provider from config. Throws a friendly LLMError with
  * a link to deploy/VERTEX_SETUP.md when the Vertex path is requested
@@ -90,5 +97,6 @@ export function createProvider(config: HawkyConfig): LLMProvider {
   }
   return new AnthropicProvider(apiKey, {
     baseURL: config.api_base_url,
+    defaultHeaders: providerSubjectHeaders(),
   });
 }

@@ -20,6 +20,13 @@ cd website && python3 -m http.server 8011
 # open http://localhost:8011
 ```
 
+## Production routing
+
+- `www.hawky.live` serves this public homepage.
+- `hawky.live` redirects to `www.hawky.live`.
+- `app.hawky.live` serves the authenticated Hawk app.
+- `admin.hawky.live` serves the admin portal.
+
 ## Deploy (Modal)
 
 ```bash
@@ -30,7 +37,8 @@ cd website && modal deploy deploy_modal.py
 ## Notes
 
 - Brand name `Hawk` is kept easy to swap (reserved name, may change).
-- Placeholders pending real values: GitHub/citation URL (`github.com/hawk-agent/hawk`),
-  install URL (`hawk.sh`), and the TestFlight invite link.
+- Placeholders pending real values: GitHub/citation URL (`github.com/hawk-agent/hawk`)
+  and install URL (`hawk.sh`). The public iOS URL is `https://ios.hawky.live/`;
+  update its redirect target from the deployment repo when the TestFlight invite changes.
 - Five of the six demo cells are styled placeholders (each has a `data-demo` hook);
   the Coding cell plays a real recording. Drop clips in to light up the rest.

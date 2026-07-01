@@ -35,6 +35,12 @@ function storeDeviceToken(token: string): void {
   } catch { /* localStorage unavailable */ }
 }
 
+export function clearStoredDeviceTokens(): void {
+  try {
+    for (const key of DEVICE_TOKEN_KEYS) localStorage.removeItem(key);
+  } catch { /* localStorage unavailable */ }
+}
+
 interface SocketState {
   status: ConnectionStatus;
   error: string | null;
@@ -136,6 +142,7 @@ export const useSocketStore = create<SocketState>((set, get) => ({
 
   disconnect: () => {
     get().client?.close();
+    clearStoredDeviceTokens();
     set({ client: null, status: "disconnected", error: null });
   },
 

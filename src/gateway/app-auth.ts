@@ -111,6 +111,30 @@ function parseCookies(header: string | null): Record<string, string> {
   return out;
 }
 
+function sessionCookieDomain(): string {
+  const domain = (process.env.HAWKY_SESSION_COOKIE_DOMAIN || "").trim();
+  if (!domain) return "";
+  if (!/^\.?[a-z0-9.-]+$/i.test(domain)) return "";
+  return domain;
+}
+
+function sessionCookieDomainAttribute(): string[] {
+  const domain = sessionCookieDomain();
+  return domain ? [`Domain=${domain}`] : [];
+}
+
+function expiredSessionCookie(domain = ""): string {
+  return [
+    `${SESSION_COOKIE}=`,
+    "Path=/",
+    ...(domain ? [`Domain=${domain}`] : []),
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Max-Age=0",
+  ].join("; ");
+}
+
 function hashPassword(password: string): StoredUser["password"] {
   const salt = randomBytes(16);
   const params = { N: 131072, r: 8, p: 1, keyLen: 64 };
@@ -330,6 +354,7 @@ export class AppAuth {
     return [
       `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
       "Path=/",
+      ...sessionCookieDomainAttribute(),
       "HttpOnly",
       "Secure",
       "SameSite=Lax",
@@ -338,10 +363,15 @@ export class AppAuth {
   }
 
   clearSessionCookie(): string {
-    return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+    return expiredSessionCookie(sessionCookieDomain());
   }
 
-  loginPage(returnUrl: string, error = ""): string {
+  clearSessionCookies(): string[] {
+    const domain = sessionCookieDomain();
+    return domain ? [expiredSessionCookie(), expiredSessionCookie(domain)] : [expiredSessionCookie()];
+  }
+
+  loginPage(returnUrl: string, error = "", message = ""): string {
     const safeReturn = sanitizeReturnUrl(returnUrl);
     const allowRegister = this.canRegister();
     return `<!doctype html>
@@ -359,10 +389,17 @@ export class AppAuth {
     form { display: grid; gap: 12px; }
     label { display: grid; gap: 6px; color: #d7d8d2; font-size: 13px; }
     input { height: 44px; border: 1px solid #30352f; border-radius: 8px; padding: 0 12px; background: #171b18; color: #fff; font: inherit; }
-    button { height: 44px; border: 0; border-radius: 8px; background: #f5f3ee; color: #101310; font-weight: 650; cursor: pointer; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+    button, .button { height: 44px; border: 0; border-radius: 8px; background: #f5f3ee; color: #101310; font-weight: 650; cursor: pointer; display: grid; place-items: center; text-decoration: none; font: inherit; }
+    button.secondary, .button.secondary { background: #252a26; color: #f5f3ee; border: 1px solid #3a403a; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+    .actions button:only-child { grid-column: 1 / -1; }
     .muted { color: #888d86; font-size: 12px; margin-top: 14px; }
     .error { padding: 10px 12px; border: 1px solid #6f2e2e; border-radius: 8px; background: #301919; color: #ffd8d8; margin-bottom: 14px; }
+    .notice { padding: 10px 12px; border: 1px solid #335d3d; border-radius: 8px; background: #172619; color: #d9f7df; margin-bottom: 14px; }
+    .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .58); }
+    .modal { width: min(390px, 100%); border: 1px solid #335d3d; border-radius: 14px; background: #151a16; padding: 22px; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
+    .modal h2 { margin: 0 0 8px; font-size: 20px; }
+    .modal p { margin-bottom: 18px; }
   </style>
 </head>
 <body>
@@ -374,10 +411,19 @@ export class AppAuth {
       <input type="hidden" name="return_url" value="${escapeHtml(safeReturn)}" />
       <label>Email <input name="email" type="email" autocomplete="email" required /></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
-      <button type="submit">Sign in</button>
+      ${this.registrationCode ? `<label>Invite code <input name="registration_code" type="password" autocomplete="off" /></label>` : ""}
+      <div class="actions">
+        <button type="submit">Sign in</button>
+        ${allowRegister ? `<button type="submit" class="secondary" formaction="/auth/register">Sign up</button>` : ""}
+      </div>
     </form>
-    ${allowRegister ? `<p class="muted"><a href="/auth/register?return_url=${encodeURIComponent(safeReturn)}">Request access</a></p>` : ""}
-    <p class="muted">Registration is ${allowRegister ? "open by admin approval" : "closed"} on this gateway.</p>
+    ${message ? `<div class="modal-backdrop" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+        <h2 id="approval-title">Sign-up received</h2>
+        <p>${escapeHtml(message)}</p>
+        <a class="button" href="/auth/login?return_url=${encodeURIComponent(safeReturn)}">OK</a>
+      </div>
+    </div>` : ""}
   </main>
 </body>
 </html>`;
@@ -388,19 +434,7 @@ export class AppAuth {
     if (!this.canRegister()) {
       return this.loginPage(safeReturn, "Registration is closed.");
     }
-    return this.shellPage("Request Access", `
-      <p>Request access to Hawky. An admin reviews new accounts before sign-in is enabled.</p>
-      ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
-      ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-      <form method="post" action="/auth/register">
-        <input type="hidden" name="return_url" value="${escapeHtml(safeReturn)}" />
-        <label>Email <input name="email" type="email" autocomplete="email" required /></label>
-        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD_LENGTH}" maxlength="${MAX_PASSWORD_LENGTH}" required /></label>
-        ${this.registrationCode ? `<label>Invite code <input name="registration_code" type="password" autocomplete="off" /></label>` : ""}
-        <button type="submit">Request access</button>
-      </form>
-      <p class="muted"><a href="/auth/login?return_url=${encodeURIComponent(safeReturn)}">Back to sign in</a></p>
-    `);
+    return this.loginPage(safeReturn, error, message);
   }
 
   adminPage(admin: AppAuthUser, message = "", error = ""): string {
@@ -442,7 +476,7 @@ export class AppAuth {
           `).join("")}
         </tbody>
       </table>
-      <p class="muted"><a href="/">Back to app</a></p>
+      <p class="muted"><a href="/">Back to app</a> · <a href="/auth/logout?return_url=/auth/login">Log out</a></p>
     `, true);
   }
 

@@ -81,7 +81,7 @@ body::before{
     radial-gradient(720px 520px at 6% 12%, color-mix(in srgb,var(--accent-2) 6%, transparent), transparent 55%);
 }
 
-h1,h2,h3,h4{font-family:var(--font-display);letter-spacing:-0.02em;line-height:1.1;margin:0}
+h1,h2,h3,h4{font-family:var(--font-display);letter-spacing:0;line-height:1.1;margin:0}
 p{margin:0}
 a{color:inherit;text-decoration:none}
 img,video,svg{max-width:100%;display:block}
@@ -92,8 +92,8 @@ img,video,svg{max-width:100%;display:block}
 .wrap{max-width:var(--maxw);margin:0 auto;padding:0 var(--gutter)}
 .section{padding-block:clamp(72px,10vw,128px)}
 .eyebrow{
-  font-family:var(--font-mono);font-size:0.75rem;letter-spacing:0.16em;
-  text-transform:uppercase;color:var(--accent);margin:0 0 14px;font-weight:500;
+  font-family:var(--font-mono);font-size:0.75rem;letter-spacing:0;
+  color:var(--accent);margin:0 0 14px;font-weight:500;
   display:inline-flex;align-items:center;gap:10px;
 }
 .eyebrow::before{content:"";width:18px;height:1px;background:var(--accent)}
@@ -141,7 +141,7 @@ a:focus-visible,button:focus-visible,
 .nav{display:flex;align-items:center;gap:24px;height:66px}
 .nav__brand{display:inline-flex;align-items:center;gap:11px;color:var(--text);flex-shrink:0}
 .nav__brand-icon{width:30px;height:30px;border-radius:8px;display:block;box-shadow:0 0 0 1px var(--line-2)}
-.nav__brand-name{font-family:var(--font-display);font-weight:700;font-size:1.32rem;letter-spacing:-0.01em;line-height:1}
+.nav__brand-name{font-family:var(--font-display);font-weight:700;font-size:1.32rem;letter-spacing:0;line-height:1}
 .nav__links{display:flex;align-items:center;gap:4px;margin-left:auto}
 .nav__link{
   position:relative;color:var(--muted);font-size:0.92rem;font-weight:450;
@@ -191,11 +191,11 @@ a:focus-visible,button:focus-visible,
 .hero__eyebrow{font-size:0.78rem}
 .hero h1{
   font-size:clamp(2.6rem,6vw,4.5rem);font-weight:700;line-height:0.96;
-  margin:0 0 10px;letter-spacing:-0.03em;
+  margin:0 0 10px;letter-spacing:0;
 }
 .hero__tagline{
   font-family:var(--font-display);font-weight:500;
-  font-size:clamp(1.25rem,2.5vw,1.7rem);line-height:1.22;letter-spacing:-0.02em;
+  font-size:clamp(1.25rem,2.5vw,1.7rem);line-height:1.22;letter-spacing:0;
   margin:18px 0 0;max-width:30ch;
 }
 .hero__tagline .hl{color:var(--accent)}
@@ -204,7 +204,7 @@ a:focus-visible,button:focus-visible,
 .hero__chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:30px}
 .chip{
   display:inline-flex;align-items:center;gap:8px;
-  font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.04em;
+  font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0;
   color:var(--muted);background:var(--bg-elev);border:1px solid var(--line);
   padding:7px 12px;border-radius:999px;
 }
@@ -242,7 +242,7 @@ a:focus-visible,button:focus-visible,
 .phone__live{
   position:absolute;left:14px;top:42px;z-index:3;
   display:inline-flex;align-items:center;gap:6px;
-  font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.08em;
+  font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0;
   background:color-mix(in srgb,var(--bg) 64%,transparent);
   border:1px solid color-mix(in srgb,var(--good) 40%,transparent);
   color:var(--good);padding:4px 9px;border-radius:999px;backdrop-filter:blur(6px);
@@ -338,7 +338,7 @@ a:focus-visible,button:focus-visible,
 
 /* "Hawk" wordmark rises in below the icon (BEAT 3) */
 .hero__logoname{
-  font-family:var(--font-display);font-weight:700;letter-spacing:-0.015em;
+  font-family:var(--font-display);font-weight:700;letter-spacing:0;
   font-size:clamp(2.1rem,7vw,3.1rem);line-height:1;color:var(--text);
   opacity:0;transform:translateY(10px);
   animation:wordRise .55s cubic-bezier(.2,.7,.3,1) .78s forwards;
@@ -372,12 +372,12 @@ a:focus-visible,button:focus-visible,
 .getsel{padding-block:28px 34px;display:flex;flex-direction:column;gap:20px}
 .getsel__head{display:flex;flex-direction:column;gap:6px}
 .getsel__title{font-family:var(--font-display);font-size:clamp(1.3rem,3.4vw,1.55rem);
-  font-weight:600;line-height:1.2;letter-spacing:-0.01em}
+  font-weight:600;line-height:1.2;letter-spacing:0}
 .getsel__matrix{display:flex;flex-direction:column;gap:12px}
 .getsel__row{display:grid;grid-template-columns:148px 1fr;align-items:center;gap:14px}
 .getsel__row[hidden]{display:none}
-.getsel__label{font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.1em;
-  text-transform:uppercase;color:var(--muted)}
+.getsel__label{font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0;
+  color:var(--muted)}
 .getsel__opts{display:flex;flex-wrap:wrap;gap:8px}
 .opt{
   font-family:var(--font-mono);font-size:0.82rem;line-height:1;
@@ -394,7 +394,7 @@ a:focus-visible,button:focus-visible,
   border-radius:var(--radius);padding:18px 20px;
 }
 .getsel__outlabel{display:block;font-family:var(--font-mono);font-size:0.72rem;
-  letter-spacing:0.08em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+  letter-spacing:0;color:var(--accent);margin-bottom:10px}
 .getsel__out pre{margin:0;overflow-x:auto}
 .getsel__out code{font-family:var(--font-mono);font-size:0.82rem;color:var(--text);
   white-space:pre;line-height:1.7}
@@ -421,7 +421,7 @@ a:focus-visible,button:focus-visible,
 .pillar p{color:var(--muted);font-size:1rem}
 .pillar__tag{
   display:inline-block;margin-top:16px;font-family:var(--font-mono);
-  font-size:0.66rem;letter-spacing:0.08em;color:var(--faint);
+  font-size:0.66rem;letter-spacing:0;color:var(--faint);
   border:1px solid var(--line);border-radius:var(--radius-sm);padding:3px 8px;
 }
 @media (max-width:860px){.pillars{grid-template-columns:1fr}}
@@ -429,7 +429,7 @@ a:focus-visible,button:focus-visible,
 
 /* ---------- status badge ---------- */
 .badge{display:inline-flex;gap:6px;align-items:center;
-  font:500 0.7rem/1 var(--font-mono);letter-spacing:0.08em;
+  font:500 0.7rem/1 var(--font-mono);letter-spacing:0;
   padding:4px 8px;border-radius:var(--radius-sm);border:1px solid;}
 .badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;}
 .badge--live{color:var(--good);background:color-mix(in srgb,var(--good) 14%,transparent);border-color:color-mix(in srgb,var(--good) 32%,transparent);}
@@ -447,32 +447,25 @@ a:focus-visible,button:focus-visible,
 }
 .demo:hover{border-color:var(--line-2);transform:translateY(-3px)}
 .demo__media{
-  position:relative;aspect-ratio:4/3;background:var(--bg);
+  position:relative;aspect-ratio:1284/2778;background:var(--bg);
   border-bottom:1px solid var(--line);overflow:hidden;
   display:flex;align-items:center;justify-content:center;
 }
 .demo__media video{position:relative;z-index:0;width:100%;height:100%;object-fit:cover;
   filter:saturate(.9) brightness(.82);transition:filter .25s ease}
-/* pull the bright poster into the dark tonal family of the other cells */
-.demo--coding .demo__media::before{
-  content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
-  background:linear-gradient(180deg,
-    color-mix(in srgb,var(--bg) 30%,transparent) 0%,
-    transparent 28% 60%,
-    color-mix(in srgb,var(--bg) 62%,transparent) 100%);
-  transition:opacity .25s ease;
-}
+/* clip/coding cells carry a designed dark poster — show it at full strength,
+   and only dim the live video frames once playback starts */
+.demo--coding .demo__media video,
+.demo--clip .demo__media video{filter:none}
+.demo--coding.is-playing .demo__media video,
+.demo--clip.is-playing .demo__media video{filter:saturate(.96) brightness(.92)}
 /* faint amber inner frame so it shares the aperture language */
-.demo--coding .demo__media{
+.demo--coding .demo__media,
+.demo--clip .demo__media{
   box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 22%,transparent);
 }
-/* restore full brightness on hover / while playing */
-.demo--coding:hover .demo__media video,
-.demo--coding.is-playing .demo__media video{filter:none}
-.demo--coding:hover .demo__media::before,
-.demo--coding.is-playing .demo__media::before{opacity:0}
-/* aperture scan frame over each cell */
-.demo__media::after{
+/* aperture scan frame — only on placeholder cells; clip posters draw their own */
+.demo:not(.demo--coding):not(.demo--clip) .demo__media::after{
   content:"";position:absolute;inset:14px;z-index:2;pointer-events:none;border-radius:6px;
   background:
     linear-gradient(currentColor 0 0) left top, linear-gradient(currentColor 0 0) left top,
@@ -500,8 +493,8 @@ a:focus-visible,button:focus-visible,
 }
 .demo:hover .demo__glyph{transform:scale(1.08);background:var(--accent-soft)}
 .demo__glyph svg{width:20px;height:20px;margin-left:2px}
-.demo__phlabel{font-family:var(--font-mono);font-size:0.66rem;letter-spacing:0.12em;
-  text-transform:uppercase;color:var(--faint)}
+.demo__phlabel{font-family:var(--font-mono);font-size:0.66rem;letter-spacing:0;
+  color:var(--faint)}
 .demo__body{padding:18px 18px 20px;display:flex;flex-direction:column;gap:8px}
 .demo__top{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .demo__body h3{font-size:1.15rem;font-weight:600}
@@ -573,8 +566,8 @@ a:focus-visible,button:focus-visible,
 }
 .track__head{padding:22px 22px 18px;border-bottom:1px solid var(--line)}
 .track__kicker{display:inline-flex;align-items:center;gap:8px;
-  font-family:var(--font-mono);font-size:0.68rem;letter-spacing:0.1em;
-  text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+  font-family:var(--font-mono);font-size:0.68rem;letter-spacing:0;
+  color:var(--accent);margin-bottom:10px}
 .track__kicker svg{width:14px;height:14px}
 .track__head h3{font-size:1.2rem;font-weight:600}
 .track__head p{color:var(--muted);font-size:0.9rem;margin-top:6px}
@@ -587,7 +580,7 @@ a:focus-visible,button:focus-visible,
 .copybtn{
   position:absolute;top:12px;right:12px;z-index:2;
   display:inline-flex;align-items:center;gap:6px;cursor:pointer;
-  font-family:var(--font-mono);font-size:0.7rem;letter-spacing:0.04em;
+  font-family:var(--font-mono);font-size:0.7rem;letter-spacing:0;
   background:var(--bg-elev-2);border:1px solid var(--line-2);color:var(--muted);
   padding:6px 10px;border-radius:var(--radius-sm);transition:color .15s, border-color .15s;
 }
@@ -622,7 +615,7 @@ a:focus-visible,button:focus-visible,
 }
 .road:hover{border-color:var(--line-2);transform:translateY(-2px)}
 .road__num{font-family:var(--font-mono);color:var(--accent);font-size:0.8rem;
-  letter-spacing:0.06em;line-height:1.5}
+  letter-spacing:0;line-height:1.5}
 .road__main h3{font-size:1.02rem;font-weight:600;margin-bottom:4px;line-height:1.25}
 .road__main p{color:var(--muted);font-size:0.9rem;line-height:1.45;margin:0}
 @media (max-width:560px){.roadmap{grid-template-columns:1fr}}
@@ -651,13 +644,12 @@ a:focus-visible,button:focus-visible,
   align-items:flex-start;padding-block:48px}
 .footer__brand svg{height:30px;width:auto;color:var(--text)}
 .footer__tag{color:var(--muted);margin-top:14px;max-width:34ch;font-size:0.95rem}
-.footer__nav{display:flex;flex-wrap:wrap;gap:18px}
-.footer__nav a{color:var(--muted);font-size:0.9rem;transition:color .15s}
-.footer__nav a:hover{color:var(--accent)}
 .footer__meta{width:100%;border-top:1px solid var(--line);padding-top:22px;
   display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;
   color:var(--faint);font-size:0.82rem}
 .footer__meta .copy{font-family:var(--font-mono)}
+.footer__meta a{color:var(--muted);transition:color .15s}
+.footer__meta a:hover{color:var(--accent)}
 
 /* ---------- reveal on scroll ---------- */
 .reveal{opacity:0;transform:translateY(18px);transition:opacity .6s ease, transform .6s ease}
@@ -683,10 +675,9 @@ a:focus-visible,button:focus-visible,
         <a class="nav__link" href="#demos">Demos</a>
         <a class="nav__link" href="#features">Features</a>
         <a class="nav__link" href="#architecture">Architecture</a>
-        <a class="nav__link" href="#install">Install</a>
+        <a class="nav__link" href="#get">Install</a>
         <a class="nav__link" href="#roadmap">Roadmap</a>
-        <a class="nav__gh" href="https://github.com/hawk-agent/hawk" rel="noopener" aria-label="Hawk on GitHub">
-          <!-- PLACEHOLDER repo URL — swap on release -->
+        <a class="nav__gh" href="https://github.com/hao-ai-lab/hawky" rel="noopener" aria-label="Hawk on GitHub">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11 11 0 0 1 6 0C16.9 5 17.9 5.3 17.9 5.3c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5Z"/></svg>
           <span>GitHub</span>
         </a>
@@ -714,16 +705,20 @@ a:focus-visible,button:focus-visible,
           An ambient AI agent that <span class="hl">sees what you see</span>, remembers your day, and acts — live across your glasses, your phone, and a powerful backend brain.
         </p>
         <p class="hero__sub">
-          Hawk wears your world: an iOS frontend on iPhone and Ray-Ban Meta glasses is the eyes and ears, while a long-lived backend agent does the thinking and the acting. One system, always circling — and six concrete flows it already runs.
+          Hawk wears your world: an iOS frontend on iPhone and Ray-Ban Meta glasses is the eyes and ears, while a long-lived backend agent does the thinking and the acting. One system, always ready to help across your day.
         </p>
         <div class="hero__ctas">
-          <a class="btn btn--primary" href="#get">
+          <a class="btn btn--primary" href="https://app.hawky.live/auth/login" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Try Hawk
+          </a>
+          <a class="btn btn--ghost" href="#get">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Install Hawk
           </a>
           <a class="btn btn--ghost" href="#demos">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 4 13 8-13 8V4Z" stroke-linejoin="round"/></svg>
-            See the demos
+            Demos
           </a>
         </div>
       </div>
@@ -783,7 +778,7 @@ a:focus-visible,button:focus-visible,
           <div class="getsel__opts" role="radiogroup" aria-labelledby="gl-surface" aria-label="Surface">
             <button type="button" class="opt is-on" data-k="surface" data-v="iphone" aria-pressed="true">iPhone app</button>
             <button type="button" class="opt" data-k="surface" data-v="android" aria-pressed="false" disabled aria-disabled="true">Android · soon</button>
-            <button type="button" class="opt" data-k="surface" data-v="backend" aria-pressed="false">Backend · Mac/Linux</button>
+            <button type="button" class="opt" data-k="surface" data-v="backend" aria-pressed="false">Mac or Linux</button>
           </div>
         </div>
         <div class="getsel__row" data-aud="human" id="row-method">
@@ -859,6 +854,7 @@ a:focus-visible,button:focus-visible,
         <h3>Worn on your world</h3>
         <p>The Hawk iOS app turns your iPhone and Ray-Ban Meta glasses into a first-person camera and microphone. Live conversation, visual memory, a multi-panel carousel, and a lock-screen widget — the eyes and ears you carry into the room.</p>
         <span class="pillar__tag">iOS frontend</span>
+        <span class="pillar__tag">Web frontend</span>
       </article>
       <article class="pillar reveal">
         <div class="pillar__icon" aria-hidden="true">
@@ -872,9 +868,9 @@ a:focus-visible,button:focus-visible,
         <div class="pillar__icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </div>
-        <h3>Six flows, one agent</h3>
-        <p>Not a promise deck — real flows. From whispering names across a noisy room to shipping a feature you asked for out loud, Hawk runs six concrete demos today, with more circling in.</p>
-        <span class="pillar__tag">Multiple demo flows</span>
+        <h3>All-in-one personal assistant</h3>
+        <p>From whispering names across a noisy room to shipping a feature you asked for out loud, Hawk brings perception, memory, and action into one assistant.</p>
+        <span class="pillar__tag">Personal assistant</span>
       </article>
     </div>
   </div>
@@ -884,20 +880,22 @@ a:focus-visible,button:focus-visible,
 <section class="section" id="demos" aria-labelledby="demos-h">
   <div class="wrap">
     <div class="sec-head reveal">
-      <p class="eyebrow">Six flows, one agent</p>
+      <p class="eyebrow">Demos</p>
       <h2 id="demos-h">What Hawk actually does</h2>
-      <p class="lede">Six flows from the same agent — three live, two in progress, one in preview. The Coding cell is a real recording; the rest are wired to drop in their clips.</p>
+      <p class="lede">A look at what Hawk can do today, from live context and reminders to coding help and visual memory.</p>
     </div>
 
     <div class="demos">
       <!-- Cell 1 — Cocktail Meeting -->
-      <article class="demo reveal" data-demo="cocktail">
+      <article class="demo demo--clip reveal" data-demo="cocktail">
         <div class="demo__media">
-          <div class="demo__ph">
-            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
-            <span class="demo__phlabel">Demo clip soon</span>
-          </div>
-          <!-- clip hook: drop <video> here -->
+          <video class="demo__video" poster="assets/demo-cocktail.png?v=3" src="assets/demo-cocktail.mp4?v=3" muted loop playsinline preload="metadata" aria-label="Hawk listening in a noisy room, picking out who's talking and quietly briefing the wearer.">
+            Hawk listening in a noisy room, picking out who's talking and quietly briefing the wearer.
+          </video>
+          <button class="demo__vctrl" aria-pressed="false" aria-label="Play the Cocktail Meeting demo video">
+            <svg class="ico-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m6 4 14 8-14 8V4Z"/></svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          </button>
         </div>
         <div class="demo__body">
           <div class="demo__top"><h3>Cocktail Meeting</h3><span class="badge badge--live">Live</span></div>
@@ -906,13 +904,15 @@ a:focus-visible,button:focus-visible,
       </article>
 
       <!-- Cell 2 — Safety -->
-      <article class="demo reveal" data-demo="safety">
+      <article class="demo demo--clip reveal" data-demo="safety">
         <div class="demo__media">
-          <div class="demo__ph">
-            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
-            <span class="demo__phlabel">Demo clip soon</span>
-          </div>
-          <!-- clip hook: drop <video> here -->
+          <video class="demo__video" poster="assets/demo-safety.png?v=3" src="assets/demo-safety.mp4?v=3" muted loop playsinline preload="metadata" aria-label="Hawk watching the surroundings and warning the wearer about a hazard in real time.">
+            Hawk watching the surroundings and warning the wearer about a hazard in real time.
+          </video>
+          <button class="demo__vctrl" aria-pressed="false" aria-label="Play the Safety demo video">
+            <svg class="ico-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m6 4 14 8-14 8V4Z"/></svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          </button>
         </div>
         <div class="demo__body">
           <div class="demo__top"><h3>Safety</h3><span class="badge badge--live">Live</span></div>
@@ -921,13 +921,15 @@ a:focus-visible,button:focus-visible,
       </article>
 
       <!-- Cell 3 — Reminder -->
-      <article class="demo reveal" data-demo="reminder">
+      <article class="demo demo--clip reveal" data-demo="reminder">
         <div class="demo__media">
-          <div class="demo__ph">
-            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
-            <span class="demo__phlabel">Demo clip soon</span>
-          </div>
-          <!-- clip hook: drop <video> here -->
+          <video class="demo__video" poster="assets/demo-reminder.png?v=3" src="assets/demo-reminder.mp4?v=3" muted loop playsinline preload="metadata" aria-label="Hawk noticing a commitment in conversation and surfacing the reminder at the right moment.">
+            Hawk noticing a commitment in conversation and surfacing the reminder at the right moment.
+          </video>
+          <button class="demo__vctrl" aria-pressed="false" aria-label="Play the Reminder demo video">
+            <svg class="ico-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m6 4 14 8-14 8V4Z"/></svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          </button>
         </div>
         <div class="demo__body">
           <div class="demo__top"><h3>Reminder</h3><span class="badge badge--prog">In progress</span></div>
@@ -936,13 +938,15 @@ a:focus-visible,button:focus-visible,
       </article>
 
       <!-- Cell 4 — Silent -->
-      <article class="demo reveal" data-demo="silent">
+      <article class="demo demo--clip reveal" data-demo="silent">
         <div class="demo__media">
-          <div class="demo__ph">
-            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
-            <span class="demo__phlabel">Demo clip soon</span>
-          </div>
-          <!-- clip hook: drop <video> here -->
+          <video class="demo__video" poster="assets/demo-silent.png?v=3" src="assets/demo-silent.mp4?v=3" muted loop playsinline preload="metadata" aria-label="Hawk in hands-free silent mode, reading the scene and assisting on the display without speaking.">
+            Hawk in hands-free silent mode, reading the scene and assisting on the display without speaking.
+          </video>
+          <button class="demo__vctrl" aria-pressed="false" aria-label="Play the Silent demo video">
+            <svg class="ico-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m6 4 14 8-14 8V4Z"/></svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          </button>
         </div>
         <div class="demo__body">
           <div class="demo__top"><h3>Silent</h3><span class="badge badge--prog">In progress</span></div>
@@ -953,7 +957,7 @@ a:focus-visible,button:focus-visible,
       <!-- Cell 5 — Coding (REAL VIDEO) -->
       <article class="demo demo--coding reveal" data-demo="coding">
         <div class="demo__media">
-          <video id="codingVideo" poster="assets/demo-coding.png" src="assets/demo-coding.mp4" muted loop playsinline preload="metadata" aria-label="Screen recording of Hawk's backend agent writing and shipping a feature from a spoken request.">
+          <video id="codingVideo" poster="assets/demo-coding.png?v=3" src="assets/demo-coding.mp4?v=3" muted loop playsinline preload="metadata" aria-label="Screen recording of Hawk's backend agent writing and shipping a feature from a spoken request.">
             Screen recording of Hawk's backend agent writing and shipping a feature from a spoken request.
           </video>
           <button class="demo__vctrl" id="codingCtrl" aria-pressed="false" aria-label="Play the Coding demo video">
@@ -968,13 +972,15 @@ a:focus-visible,button:focus-visible,
       </article>
 
       <!-- Cell 6 — Visual Memory -->
-      <article class="demo reveal" data-demo="visual-memory">
+      <article class="demo demo--clip reveal" data-demo="visual-memory">
         <div class="demo__media">
-          <div class="demo__ph">
-            <span class="demo__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m6 4 14 8-14 8V4Z"/></svg></span>
-            <span class="demo__phlabel">Demo clip soon</span>
-          </div>
-          <!-- clip hook: drop <video> here -->
+          <video class="demo__video" poster="assets/demo-memory.png?v=3" src="assets/demo-memory.mp4?v=3" muted loop playsinline preload="metadata" aria-label="Hawk answering questions about the wearer's day from a searchable visual record.">
+            Hawk answering questions about the wearer's day from a searchable visual record.
+          </video>
+          <button class="demo__vctrl" aria-pressed="false" aria-label="Play the Visual Memory demo video">
+            <svg class="ico-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m6 4 14 8-14 8V4Z"/></svg>
+            <svg class="ico-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          </button>
         </div>
         <div class="demo__body">
           <div class="demo__top"><h3>Visual Memory</h3><span class="badge badge--prev">Preview</span></div>
@@ -1047,7 +1053,7 @@ a:focus-visible,button:focus-visible,
     </p>
     <div class="arch__diagram reveal">
       <!-- architecture diagram pasted inline; themes via :root CSS vars -->
-      <svg viewBox="0 0 1100 620" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg"
+      <svg viewBox="0 0 1100 620" width="100%" xmlns="http://www.w3.org/2000/svg"
            fill="none" role="img" aria-labelledby="hawk-arch-title hawk-arch-desc"
            font-family="inherit" color="var(--text)" stroke="var(--line-2)">
         <title id="hawk-arch-title">Hawk system architecture</title>
@@ -1057,13 +1063,13 @@ a:focus-visible,button:focus-visible,
           /* light-muted label tone — readable on the near-black panel */
           /* node cards a notch lighter than the elevated panel, strokes at higher contrast */
           svg { --label: #AEB7C2; --bg-elev-2: #232A33; --line-2: #44505C; }
-          .lane-label { font-family: inherit; font-size: 12.5px; letter-spacing: .16em;
-            fill: var(--accent); text-transform: uppercase; font-weight: 700; }
+          .lane-label { font-family: inherit; font-size: 12.5px; letter-spacing:0;
+            fill: var(--accent); font-weight: 700; }
           .node-title { font-family: inherit; font-size: 15px; font-weight: 600; fill: var(--text); }
           .node-sub   { font-family: inherit; font-size: 11.5px; fill: var(--label); }
           .chip-txt   { font-family: inherit; font-size: 11.5px; fill: var(--label); }
           .flow-label { font-family: inherit; font-size: 11.5px; fill: var(--label); }
-          .grp-label  { font-family: inherit; font-size: 11px; letter-spacing: .08em;
+          .grp-label  { font-family: inherit; font-size: 11px; letter-spacing:0;
             fill: var(--label); font-weight: 700; }
           .strike { stroke: var(--accent); stroke-width: 1.6; }
           text { color: var(--text); }
@@ -1249,69 +1255,12 @@ a:focus-visible,button:focus-visible,
   </div>
 </section>
 
-<!-- ============ INSTALL ============ -->
-<section class="section" id="install" aria-labelledby="install-h">
-  <div class="wrap">
-    <div class="sec-head reveal">
-      <p class="eyebrow">Install</p>
-      <h2 id="install-h">Two tracks: the brain, and you</h2>
-      <p class="lede">Stand up the backend in one line, then point the iOS app at it. URLs and names below are placeholders — keep them tidy and swap when you ship.</p>
-    </div>
-
-    <div class="install">
-      <!-- Track A — Agent (backend) -->
-      <article class="track reveal">
-        <div class="track__head">
-          <span class="track__kicker">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M8 9l3 2-3 2M13 13h3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Agent · backend
-          </span>
-          <h3>Agent — backend (Mac / server)</h3>
-          <p>The long-lived brain. Requires Bun ≥ 1.3.</p>
-        </div>
-        <div class="codeblock">
-          <button class="copybtn" data-copy="#install-agent" aria-label="Copy backend install commands">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
-            <span class="copybtn__txt">Copy</span>
-          </button>
-          <pre><code id="install-agent"><span class="c-comment"># install</span>
-<span class="c-cmd">bun install -g hawk</span>            <span class="c-comment"># requires Bun >= 1.3</span>
-<span class="c-comment"># or one-line:</span>
-<span class="c-cmd">curl -fsSL https://hawk.sh/install.sh | bash</span>
-
-<span class="c-comment"># run</span>
-<span class="c-cmd">hawk gateway</span>                   <span class="c-comment"># start the long-lived backend</span>
-<span class="c-cmd">hawk</span>                           <span class="c-comment"># open the terminal client</span></code></pre>
-        </div>
-      </article>
-
-      <!-- Track B — Human (iOS) -->
-      <article class="track reveal">
-        <div class="track__head">
-          <span class="track__kicker">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2" stroke-linecap="round"/></svg>
-            Human · iOS frontend
-          </span>
-          <h3>Human — iOS frontend</h3>
-          <p>The eyes and ears you carry.</p>
-        </div>
-        <ol class="steps">
-          <li>Install the Hawk iOS app on your iPhone.</li>
-          <li>Point it at your gateway: <code>ws://&lt;your-tailscale-ip&gt;:4242</code></li>
-          <li>Pair your Ray-Ban Meta glasses in the Glasses tab.</li>
-        </ol>
-      </article>
-    </div>
-    <p class="install__note">Placeholder URLs and names (<code>hawk.sh</code>, <code>ws://&lt;your-tailscale-ip&gt;:4242</code>) — swap for your own when you deploy.</p>
-  </div>
-</section>
-
 <!-- ============ ROADMAP ============ -->
 <section class="section" id="roadmap" aria-labelledby="roadmap-h">
   <div class="wrap">
     <div class="sec-head reveal">
       <p class="eyebrow">Roadmap</p>
-      <h2 id="roadmap-h">Always circling forward</h2>
+      <h2 id="roadmap-h">What's next?</h2>
       <p class="lede">Where Hawk's vision and reach widen next.</p>
     </div>
     <ul class="roadmap reveal">
@@ -1378,10 +1327,9 @@ a:focus-visible,button:focus-visible,
     <div class="cite">
       <div class="cite__left reveal">
         <p>Hawk is open at the link below. If it helps your work, cite it — the BibTeX is ready to copy.</p>
-        <!-- PLACEHOLDER repo URL — swap on release -->
-        <a class="cite__gh" href="https://github.com/hawk-agent/hawk" rel="noopener">
+        <a class="cite__gh" href="https://github.com/hao-ai-lab/hawky" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11 11 0 0 1 6 0C16.9 5 17.9 5.3 17.9 5.3c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5Z"/></svg>
-          github.com/hawk-agent/hawk
+          github.com/hao-ai-lab/hawky
         </a>
       </div>
       <div class="bibtex reveal">
@@ -1393,8 +1341,7 @@ a:focus-visible,button:focus-visible,
   <span class="b-field">title</span>  = {Hawk: An Ambient AI Agent},
   <span class="b-field">author</span> = {The Hawk Team},
   <span class="b-field">year</span>   = {2026},
-  <span class="b-field">url</span>    = {https://github.com/hawk-agent/hawk},
-  <span class="b-field">note</span>   = {Placeholder URL — see project page}
+  <span class="b-field">url</span>    = {https://github.com/hao-ai-lab/hawky}
 }</code></pre>
       </div>
     </div>
@@ -1428,17 +1375,10 @@ a:focus-visible,button:focus-visible,
         </svg>
         <p class="footer__tag">Eyes on your world. Hawk sees, remembers, and acts.</p>
       </div>
-      <nav class="footer__nav" aria-label="Footer">
-        <a href="#demos">Demos</a>
-        <a href="#features">Features</a>
-        <a href="#architecture">Architecture</a>
-        <a href="#install">Install</a>
-        <a href="#roadmap">Roadmap</a>
-      </nav>
     </div>
     <div class="footer__meta">
       <span class="copy">© 2026 Hawk</span>
-      <span>"Hawk" is a working name and may change; product names and URLs on this page are placeholders.</span>
+      <a href="privacy.html">Privacy</a>
     </div>
   </div>
 </footer>
@@ -1573,18 +1513,23 @@ const BRAND = "Hawk";
     document.body.removeChild(ta);
   }
 
-  /* ---- coding video play/pause ---- */
-  const video = document.getElementById("codingVideo");
-  const ctrl = document.getElementById("codingCtrl");
-  if (video && ctrl) {
-    const cell = ctrl.closest(".demo");
+  /* ---- demo video play/pause (every clip cell) ---- */
+  const demoCells = Array.prototype.slice.call(document.querySelectorAll(".demo"));
+  const demoClips = [];
+  demoCells.forEach(function (cell) {
+    const video = cell.querySelector(".demo__media video");
+    const ctrl = cell.querySelector(".demo__vctrl");
+    if (!video || !ctrl) return;
+    const title = (cell.querySelector("h3") && cell.querySelector("h3").textContent.trim()) || "demo";
     const setState = function (playing) {
       ctrl.setAttribute("aria-pressed", String(playing));
-      ctrl.setAttribute("aria-label", (playing ? "Pause" : "Play") + " the Coding demo video");
-      if (cell) cell.classList.toggle("is-playing", playing);
+      ctrl.setAttribute("aria-label", (playing ? "Pause" : "Play") + " the " + title + " demo video");
+      cell.classList.toggle("is-playing", playing);
     };
     const toggleVideo = function () {
       if (video.paused) {
+        // only one clip plays at a time
+        demoClips.forEach(function (other) { if (other.video !== video) other.video.pause(); });
         const p = video.play();
         if (p && p.catch) p.catch(function () {});
         setState(true);
@@ -1597,7 +1542,8 @@ const BRAND = "Hawk";
     video.addEventListener("click", toggleVideo);
     video.addEventListener("play", function () { setState(true); });
     video.addEventListener("pause", function () { setState(false); });
-  }
+    demoClips.push({ video: video, setState: setState });
+  });
 
   /* ---- active-nav highlight via scroll-spy ---- */
   const navLinks = Array.prototype.slice.call(document.querySelectorAll(".nav__link[href^='#']"));
@@ -1666,9 +1612,9 @@ const BRAND = "Hawk";
 "2. Hawk → Settings → Gateway:  ws://<your-gateway>:4242\n" +
 "3. Glasses tab → pair your Ray-Ban Meta glasses",
       "iphone|xcode":
-"git clone https://github.com/hawk-agent/hawk\n" +
-"cd hawk/ios && xcodegen generate\n" +
-"open hawk.xcodeproj          # set Team + bundle id, then ⌘R to your iPhone\n" +
+"git clone https://github.com/hao-ai-lab/hawky\n" +
+"cd hawky/ios && xcodegen generate\n" +
+"open hawky.xcodeproj        # set Team + bundle id, then ⌘R to your iPhone\n" +
 "# then Settings → Gateway → ws://<your-gateway>:4242, pair glasses",
       "backend|bun":
 "bun install -g hawk          # requires Bun >= 1.3\n" +
@@ -1683,7 +1629,7 @@ const BRAND = "Hawk";
       if (state.goal === "setup") {
         return (
 "Set up Hawk — an ambient AI agent (iOS frontend + backend gateway) — on this machine.\n" +
-"1. Clone https://github.com/hawk-agent/hawk and install deps with Bun (>= 1.3).\n" +
+"1. Clone https://github.com/hao-ai-lab/hawky and install deps with Bun (>= 1.3).\n" +
 "2. Start the backend:  hawk gateway   — confirm GET /health returns ok.\n" +
 "3. Build & install the iOS app on the paired iPhone, point it at the gateway\n" +
 "   (ws://<tailscale-ip>:4242), and verify it connects.\n" +
