@@ -106,15 +106,10 @@ export async function executeChannelSend(
       void executeInSession(to, CommandLane.Main, async () => {
         const session = _sessions!.getOrCreate(to);
         const prevLen = session.loop.getHistory().length;
-        // Empty string user message ("") would be a duplicate append; instead,
-        // call sendMessage with "" but rely on the already-appended history.
-        // AgentLoop.sendMessage appends the given userText to history and then
-        // runs the loop — we already appended, so call sendMessage with ""
-        // to just run the loop over existing history.
-        //
-        // sendMessage prepends the user message; to avoid a double-append we
-        // pop our synthetic message, then call sendMessage(text) which will
-        // re-append (keeping timestamps consistent with chat.send behaviour).
+        let runStart = prevLen;
+        // sendMessage appends a user message before running the loop. We already
+        // persisted a synthetic user message for immediate visibility, so pop it
+        // from in-memory history and let sendMessage replay it for the run.
         const current = session.loop.getHistory();
         if (
           prevLen > 0 &&
@@ -122,8 +117,29 @@ export async function executeChannelSend(
           (current[prevLen - 1] as any).content?.[0]?.text === text
         ) {
           session.loop.setHistory(current.slice(0, prevLen - 1));
+          runStart = prevLen - 1;
         }
         await session.loop.sendMessage(text, { headless: true });
+
+        const generatedMessages = session.loop.getHistory().slice(runStart);
+        let persistedCount = 0;
+        for (const [index, msg] of generatedMessages.entries()) {
+          const isReplayedUserMessage =
+            index === 0 &&
+            msg.role === "user" &&
+            (msg as any).content?.[0]?.text === text;
+          if (isReplayedUserMessage) continue;
+          session.sessionManager.appendMessage(msg);
+          persistedCount += 1;
+        }
+
+        if (persistedCount > 0 && _server) {
+          try {
+            _server.broadcast("session.updated", { sessionKey: to });
+          } catch {
+            /* non-fatal */
+          }
+        }
       }).catch((err) => {
         log.warn("channel.send trigger_run failed", {
           to,

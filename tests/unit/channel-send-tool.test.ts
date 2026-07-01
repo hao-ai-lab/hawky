@@ -45,6 +45,7 @@ class MockLoop {
     this.history = [
       ...this.history,
       { role: "user", content: [{ type: "text", text }] },
+      { role: "assistant", content: [{ type: "text", text: `acted on: ${text}` }] },
     ];
   }
 }
@@ -152,6 +153,22 @@ describe("channel.send tool", () => {
     expect(target).toBeDefined();
     expect(target!.loop.sendMessageCalls.length).toBe(1);
     expect(target!.loop.sendMessageCalls[0]).toBe("please act");
+  });
+
+  test("trigger_run persists generated messages without duplicating the user message", async () => {
+    const result = await executeChannelSend(
+      { to: "web:general", text: "please persist", trigger_run: true },
+      makeCtx(),
+    );
+    expect(result.type).toBe("text");
+
+    await new Promise((r) => setTimeout(r, 50));
+    const target = sessions.sessions.get("web:general");
+    expect(target).toBeDefined();
+    expect(target!.loop.getHistory().map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(target!.sessionManager.appended.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(target!.sessionManager.appended[0].content[0].text).toBe("please persist");
+    expect(target!.sessionManager.appended[1].content[0].text).toBe("acted on: please persist");
   });
 
   test("trigger_run=false does NOT run the loop", async () => {
