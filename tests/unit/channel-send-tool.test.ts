@@ -165,6 +165,7 @@ describe("channel.send tool", () => {
     await new Promise((r) => setTimeout(r, 50));
     const target = sessions.sessions.get("web:general");
     expect(target).toBeDefined();
+    expect(target!.loop.getHistory().map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(target!.sessionManager.appended.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(target!.sessionManager.appended[0].content[0].text).toBe("please persist");
     expect(target!.sessionManager.appended[1].content[0].text).toBe("acted on: please persist");
