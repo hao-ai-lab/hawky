@@ -465,6 +465,82 @@ describe("media.chunk.upload — video/mp4", () => {
       // No seq_gaps — all 4 chunks arrived, just out of order
       expect(sidecar.seq_gaps).toBeUndefined();
     });
+
+    test("rejects duplicate and regressing seq without recording stale gaps", async () => {
+      if (!ffmpegPresent) {
+        console.log("SKIP: ffmpeg not available");
+        return;
+      }
+
+      const mediaId = `test-video-replay-${Date.now()}`;
+      const chunkSize = Math.ceil(fixture.length / 3);
+      const chunks = [
+        fixture.slice(0, chunkSize),
+        fixture.slice(chunkSize, chunkSize * 2),
+        fixture.slice(chunkSize * 2),
+      ];
+
+      const r1 = await sendRequest(ws, "media.chunk.upload", {
+        media_id: mediaId,
+        seq: 1,
+        bytes: chunks[1].toString("base64"),
+        mime: "video/mp4",
+        captured_at_ns: 33_000_000,
+        final: false,
+      });
+      expect(r1.ok).toBe(true);
+
+      const rDuplicateBuffered = await sendRequest(ws, "media.chunk.upload", {
+        media_id: mediaId,
+        seq: 1,
+        bytes: chunks[1].toString("base64"),
+        mime: "video/mp4",
+        captured_at_ns: 33_000_000,
+        final: false,
+      });
+      expect(rDuplicateBuffered.ok).toBe(false);
+      expect((rDuplicateBuffered.error as { code: string }).code).toBe("INVALID_REQUEST");
+
+      const r0 = await sendRequest(ws, "media.chunk.upload", {
+        media_id: mediaId,
+        seq: 0,
+        bytes: chunks[0].toString("base64"),
+        mime: "video/mp4",
+        captured_at_ns: 0,
+        final: false,
+      });
+      expect(r0.ok).toBe(true);
+
+      const rRegressing = await sendRequest(ws, "media.chunk.upload", {
+        media_id: mediaId,
+        seq: 1,
+        bytes: chunks[1].toString("base64"),
+        mime: "video/mp4",
+        captured_at_ns: 33_000_000,
+        final: false,
+      });
+      expect(rRegressing.ok).toBe(false);
+      expect((rRegressing.error as { code: string }).code).toBe("INVALID_REQUEST");
+
+      const r2 = await sendRequest(ws, "media.chunk.upload", {
+        media_id: mediaId,
+        seq: 2,
+        bytes: chunks[2].toString("base64"),
+        mime: "video/mp4",
+        captured_at_ns: 66_000_000,
+        final: true,
+      });
+      expect(r2.ok).toBe(true);
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      const today = new Date().toISOString().slice(0, 10);
+      const sidecarPath = join(mediaRoot, today, `${mediaId}.json`);
+      expect(existsSync(sidecarPath)).toBe(true);
+
+      const sidecar = JSON.parse(readFileSync(sidecarPath, "utf-8"));
+      expect(sidecar.seq_gaps).toBeUndefined();
+    });
   });
 
   // =============================================================================
