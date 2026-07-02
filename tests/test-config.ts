@@ -95,7 +95,11 @@ describe("Default config", () => {
     const b = getDefaultConfig();
     expect(a).toEqual(b);
     a.model = "modified";
+    a.api_keys.anthropic = "sk-mutated";
+    a.heartbeat.enabled = false;
     expect(b.model).toBe("claude-opus-4-7");
+    expect(b.api_keys.anthropic).toBe("");
+    expect(b.heartbeat.enabled).toBe(true);
   });
 });
 

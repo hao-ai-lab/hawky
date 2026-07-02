@@ -145,7 +145,7 @@ function deepMerge(
   defaults: Record<string, unknown>,
   overrides: Record<string, unknown>,
 ): Record<string, unknown> {
-  const result = { ...defaults };
+  const result = cloneConfigValue(defaults) as Record<string, unknown>;
   for (const key of Object.keys(overrides)) {
     const val = overrides[key];
     const def = defaults[key];
@@ -168,6 +168,20 @@ function deepMerge(
     }
   }
   return result;
+}
+
+function cloneConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneConfigValue(item));
+  }
+  if (value && typeof value === "object") {
+    const clone: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      clone[key] = cloneConfigValue(child);
+    }
+    return clone;
+  }
+  return value;
 }
 
 // -----------------------------------------------------------------------------
