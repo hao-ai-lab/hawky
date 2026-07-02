@@ -71,7 +71,9 @@ async function isBinaryFile(filePath: string): Promise<boolean> {
  * Convert a simple glob pattern like "*.ts" to a RegExp for filename matching.
  */
 function globToRegex(pattern: string): RegExp {
-  const escaped = pattern.replace(/\./g, "\\.").replace(/\*/g, ".*");
+  const escaped = Array.from(pattern, (ch) =>
+    ch === "*" ? ".*" : ch.replace(/[\\^$+?.()|[\]{}]/g, "\\$&"),
+  ).join("");
   return new RegExp(`^${escaped}$`);
 }
 

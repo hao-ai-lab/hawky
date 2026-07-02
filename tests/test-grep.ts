@@ -41,6 +41,8 @@ beforeAll(async () => {
   //   app.ts          — has "function main", "TODO: fix", "import { foo }"
   //   utils.ts        — has "export function helper", "TODO: refactor"
   //   data.json       — has "version"
+  //   foo[bar].txt    — tests literal include glob escaping
+  //   foob.txt        — must not match foo[bar].txt include
   // tests/
   //   app.test.ts     — has "describe", "expect"
   // node_modules/
@@ -81,6 +83,8 @@ beforeAll(async () => {
   ].join("\n"));
 
   await writeFile(join(tmpDir, "src", "data.json"), '{\n  "version": "1.0.0"\n}\n');
+  await writeFile(join(tmpDir, "src", "foo[bar].txt"), "literal bracket token\n");
+  await writeFile(join(tmpDir, "src", "foob.txt"), "regex class token\n");
 
   await writeFile(join(tmpDir, "tests", "app.test.ts"), [
     'import { describe, test, expect } from "bun:test";',
@@ -195,6 +199,13 @@ describe("Include filter", () => {
     expect(r.type).toBe("text");
     expect(r.content).toContain("data.json");
     expect(r.content).not.toContain(".ts");
+  });
+
+  test("include treats regex metacharacters as literal filename characters", async () => {
+    const r = await grep({ pattern: "token", include: "foo[bar].txt" });
+    expect(r.type).toBe("text");
+    expect(r.content).toContain("foo[bar].txt");
+    expect(r.content).not.toContain("foob.txt");
   });
 });
 
