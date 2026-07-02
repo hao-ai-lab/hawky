@@ -30,6 +30,7 @@ import {
 import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
 import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
 import { isAdminHost, isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
+import { isLoopbackHost } from "./loopback.js";
 
 const log = createSubsystemLogger("gateway/server");
 
@@ -142,7 +143,7 @@ export class GatewayServer {
   start(port: number, hostname = "127.0.0.1"): void {
     if (this.started) return;
     this.started = true;
-    this.boundToLoopback = hostname === "127.0.0.1" || hostname === "::1" || hostname === "localhost";
+    this.boundToLoopback = isLoopbackHost(hostname);
 
     const self = this;
 

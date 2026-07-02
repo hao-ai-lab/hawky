@@ -7,6 +7,7 @@
 // =============================================================================
 
 import type { HawkyConfig } from "../agent/types.js";
+import { isLoopbackHost } from "./loopback.js";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -30,7 +31,7 @@ interface BannerParams {
 export function printGatewayBanner(params: BannerParams): void {
   const { version, port, bindHost, model, config, configPath, logDir, cronJobCount } = params;
   const hb = config.heartbeat;
-  const isLoopback = bindHost === "127.0.0.1" || bindHost === "::1" || bindHost === "localhost";
+  const isLoopback = isLoopbackHost(bindHost);
 
   // Build rows: [label, value]
   const rows: Array<[string, string]> = [];

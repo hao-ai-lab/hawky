@@ -14,6 +14,7 @@
 import type { AgentEventSource, ConnectionStatus } from "./agent-source.js";
 import type { StreamEvent, StreamEventCallback, ChatMessage } from "../agent/types.js";
 import type { ResponseFrame, EventFrame, HelloPayload } from "./protocol.js";
+import { isLoopbackUrl } from "./loopback.js";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -603,7 +604,7 @@ export interface DeviceLoginOptions {
  */
 export async function acquireDeviceToken(opts: DeviceLoginOptions): Promise<string> {
   const httpUrl = wsUrlToHttp(opts.gatewayUrl);
-  const isLocal = isLocalhostUrl(httpUrl);
+  const isLocal = isLoopbackUrl(httpUrl);
 
   if (isLocal) {
     // Localhost: fetch token directly (no browser needed — SSH is the auth layer)
@@ -780,14 +781,4 @@ function ensureWsPath(url: string): string {
 /** Convert ws:// or wss:// URL to http:// or https:// */
 function wsUrlToHttp(url: string): string {
   return url.replace(/^ws(s?):\/\//, "http$1://").replace(/\/ws$/, "");
-}
-
-/** Check if a URL points to localhost */
-function isLocalhostUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
-  } catch {
-    return false;
-  }
 }
