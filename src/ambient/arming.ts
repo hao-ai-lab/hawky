@@ -7,6 +7,9 @@ import type { Intention, TriggerTerm } from "./intention.js";
 import type { ArmAdapter } from "./trigger.js";
 import { termKey, isArmable } from "./trigger.js";
 import type { IntentionStore } from "./intention-store.js";
+import { createSubsystemLogger } from "../logging/index.js";
+
+const log = createSubsystemLogger("ambient/arming");
 
 // -----------------------------------------------------------------------------
 // armIntention
@@ -47,7 +50,18 @@ export async function armIntention(
   const preparedAdapters: ArmAdapter[] = [];
   async function rollback(): Promise<void> {
     for (const adapter of preparedAdapters) {
-      await adapter.disarm(intention);
+      try {
+        await adapter.disarm(intention);
+      } catch (err) {
+        // Rollback is best-effort: a failing cleanup must not mask the
+        // original arm failure or prevent other prepared adapters from
+        // being disarmed.
+        log.warn("arming rollback disarm failed", {
+          intentionId: intention.id,
+          adapterKind: adapter.kind,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
