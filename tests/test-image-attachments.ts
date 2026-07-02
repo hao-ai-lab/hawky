@@ -15,6 +15,7 @@ import { registerAgentMethods } from "../src/gateway/agent-methods.js";
 import { AgentSessionManager } from "../src/gateway/agent-sessions.js";
 import { applyDefaultLaneConcurrency } from "../src/gateway/lanes.js";
 import { resetGatewayState } from "../src/gateway/server.js";
+import { MAX_SINGLE_IMAGE_BASE64 } from "../src/agent/image-sanitize.js";
 
 // =============================================================================
 // Mock server
@@ -157,10 +158,31 @@ describe("chat.send with attachments", () => {
     expect(imageBlock).toBeUndefined();
   });
 
-  test("rejects oversized attachments (>3MB) with error", async () => {
+  test("accepts image attachments up to the shared sanitizer per-image cap", async () => {
+    createTestSession("web:sanitizer-cap-img");
+    const nearCapBase64 = "A".repeat(MAX_SINGLE_IMAGE_BASE64);
+
+    const result = await server.call("chat.send", mockConn, {
+      message: "Large but valid image",
+      sessionKey: "web:sanitizer-cap-img",
+      attachments: [{
+        base64: nearCapBase64,
+        media_type: "image/png",
+      }],
+    });
+
+    expect(result.completed).toBe(true);
+
+    const session = sessions.get("web:sanitizer-cap-img");
+    const history = session!.loop.getHistory();
+    const userMsg = history.find((m) => m.role === "user");
+    const imageBlock = userMsg!.content.find((b) => b.type === "image") as any;
+    expect(imageBlock?.source?.data).toHaveLength(MAX_SINGLE_IMAGE_BASE64);
+  });
+
+  test("rejects oversized attachments above the shared sanitizer cap", async () => {
     createTestSession("web:big-img");
-    // Create a base64 string that exceeds 3MB when decoded
-    const bigBase64 = "A".repeat(5 * 1024 * 1024); // ~3.75MB decoded
+    const bigBase64 = "A".repeat(MAX_SINGLE_IMAGE_BASE64 + 4);
     try {
       await server.call("chat.send", mockConn, {
         message: "Big image",
