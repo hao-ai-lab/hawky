@@ -170,6 +170,11 @@ private let frame = Data([0xFF, 0xD8, 0xFF])
 
 @MainActor
 @Suite struct SafetyCheckPersistenceTests {
+    @Test func enabledMessageDoesNotExposeBuildStamp() {
+        #expect(SafetyCheckCopy.enabledMessage == "Safety Check on — watching for hazards.")
+        #expect(!SafetyCheckCopy.enabledMessage.contains("build:"))
+    }
+
     @Test func defaultsOffAndPersists() {
         let d = UserDefaults(suiteName: "safety-test-\(UUID().uuidString)")!
         #expect(LiveProfileDefaults.load(defaults: d).safetyCheckEnabled == false)
