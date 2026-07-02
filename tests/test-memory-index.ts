@@ -6,7 +6,7 @@
 // =============================================================================
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -348,6 +348,27 @@ describe("MemoryIndex — sync and FTS search", () => {
       expect(results.length).toBeGreaterThan(0);
       expect(results[0].path).toBe("MEMORY.md");
       expect(results[0].snippet).toContain("blue");
+    } finally {
+      index.close();
+    }
+  });
+
+  test("skips memory symlinks that escape the workspace", async () => {
+    const wsDir = makeWorkspace({});
+    const outside = join(tempDir, "outside.md");
+    writeFileSync(outside, "outside-search-secret", "utf-8");
+    symlinkSync(outside, join(wsDir, "memory", "linked.md"));
+
+    const index = new MemoryIndex({
+      dbPath: join(tempDir, "test.db"),
+      workspacePath: wsDir,
+      enableWatcher: false,
+    });
+
+    try {
+      await index.sync();
+      const results = await index.search("outside-search-secret");
+      expect(results.length).toBe(0);
     } finally {
       index.close();
     }

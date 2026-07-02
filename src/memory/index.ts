@@ -28,6 +28,7 @@ import { mergeHybridResults, applyTemporalDecay, applyMMR, type HybridResult } f
 import { createMemoryWatcher, type MemoryWatcher } from "./watcher.js";
 import { extractSessionText } from "./session-extract.js";
 import { extractMemoryAppendJsonlText } from "./append-jsonl-extract.js";
+import { isRealPathInsideRoot } from "./path-security.js";
 import {
   type SearchResult,
   type SearchConfig,
@@ -605,6 +606,7 @@ export class MemoryIndex {
         if (entry.endsWith(".md")) {
           const absPath = join(wsPath, entry);
           try {
+            if (!isRealPathInsideRoot(wsPath, absPath)) continue;
             const stat = statSync(absPath);
             if (stat.isFile()) {
               const content = readFileSync(absPath, "utf-8");
@@ -648,6 +650,7 @@ export class MemoryIndex {
     for (const entry of entries) {
       const absPath = join(dir, entry);
       try {
+        if (!isRealPathInsideRoot(this.workspacePath, absPath)) continue;
         const stat = statSync(absPath);
         if (stat.isDirectory()) {
           this.scanMemoryFiles(absPath, rootDir, out);
@@ -696,6 +699,7 @@ export class MemoryIndex {
 
       const absPath = join(dir, entry);
       try {
+        if (!isRealPathInsideRoot(rootDir, absPath)) continue;
         const stat = statSync(absPath);
 
         if (stat.isDirectory()) {

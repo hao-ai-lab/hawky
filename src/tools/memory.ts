@@ -11,8 +11,8 @@
 // workspace path and enforce security boundaries.
 // =============================================================================
 
-import { readdirSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
+import { join, normalize, resolve } from "node:path";
 import type {
   ToolDefinition,
   ToolContext,
@@ -21,6 +21,7 @@ import type {
 import { getWorkspaceDir } from "../storage/workspace.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import { extractMemoryAppendJsonlText } from "../memory/append-jsonl-extract.js";
+import { isRealPathInsideRoot } from "../memory/path-security.js";
 
 const log = createSubsystemLogger("tools/memory");
 
@@ -112,7 +113,7 @@ async function executeMemoryGet(
     return { type: "text", content: JSON.stringify({ path: relPath, text: "", error: "File not found" }) };
   }
 
-  if (!isRealPathInsideWorkspace(workspaceDir, fullPath)) {
+  if (!isRealPathInsideRoot(workspaceDir, fullPath)) {
     return { type: "error", content: "Path must not traverse outside workspace" };
   }
 
@@ -153,17 +154,6 @@ async function executeMemoryGet(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { type: "error", content: `Failed to read ${relPath}: ${message}` };
-  }
-}
-
-function isRealPathInsideWorkspace(workspaceDir: string, filePath: string): boolean {
-  try {
-    const root = realpathSync(workspaceDir);
-    const target = realpathSync(filePath);
-    const rel = relative(root, target);
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-  } catch {
-    return false;
   }
 }
 
@@ -339,14 +329,14 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
 
   for (const filename of SEARCHABLE_ROOT_FILES) {
     const fullPath = join(workspaceDir, filename);
-    if (existsSync(fullPath)) {
+    if (existsSync(fullPath) && isRealPathInsideRoot(workspaceDir, fullPath)) {
       filesToSearch.push({ relPath: filename, fullPath });
     }
   }
 
   const memoryDir = join(workspaceDir, "memory");
   if (existsSync(memoryDir)) {
-    collectSearchableMemoryFiles(memoryDir, memoryDir, filesToSearch);
+    collectSearchableMemoryFiles(memoryDir, memoryDir, workspaceDir, filesToSearch);
   }
 
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -401,6 +391,7 @@ function fallbackGrepSearch(query: string, maxResults: number): ToolResult {
 function collectSearchableMemoryFiles(
   dir: string,
   rootDir: string,
+  boundaryRoot: string,
   out: Array<{ relPath: string; fullPath: string }>,
 ): void {
   let entries: string[];
@@ -413,9 +404,10 @@ function collectSearchableMemoryFiles(
   for (const entry of entries) {
     const fullPath = join(dir, entry);
     try {
+      if (!isRealPathInsideRoot(boundaryRoot, fullPath)) continue;
       const stat = statSync(fullPath);
       if (stat.isDirectory()) {
-        collectSearchableMemoryFiles(fullPath, rootDir, out);
+        collectSearchableMemoryFiles(fullPath, rootDir, boundaryRoot, out);
         continue;
       }
       if (!stat.isFile() || (!entry.endsWith(".md") && !entry.endsWith(".jsonl"))) {
