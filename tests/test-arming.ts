@@ -380,6 +380,38 @@ describe("two-phase arm throw-safety (codex review)", () => {
     expect(result).toBe("arm_failed");
     expect((await store.get(intention.id))?.state).toBe("arm_failed");
   });
+
+  test("rollback continues disarming remaining adapters after one disarm fails", async () => {
+    const disarmed: string[] = [];
+    const whenAdapter: ArmAdapter = {
+      kind: "when",
+      async prepare(): Promise<ArmResult> { return { ok: true, state: "armed" }; },
+      activate(): void { throw new Error("activate failed"); },
+      async disarm(): Promise<void> { throw new Error("cancel failed"); },
+    };
+    const whereAdapter: ArmAdapter = {
+      kind: "where",
+      async prepare(): Promise<ArmResult> { return { ok: true, state: "armed" }; },
+      activate(): void {},
+      async disarm(intention: Intention): Promise<void> { disarmed.push(intention.id); },
+    };
+    const store = new InMemoryIntentionStore();
+    const intention = await store.create(
+      baseIntention({
+        trigger: { all: [{ kind: "when", at: "2026-06-06T10:00:00Z" }, { kind: "where", place: "grocery" }] },
+      }),
+    );
+
+    const result = await armIntention(
+      intention,
+      new Map<string, ArmAdapter>([["when", whenAdapter], ["where", whereAdapter]]),
+      store,
+    );
+
+    expect(result).toBe("arm_failed");
+    expect(disarmed).toEqual([intention.id]);
+    expect((await store.get(intention.id))?.state).toBe("arm_failed");
+  });
 });
 
 // -----------------------------------------------------------------------------
