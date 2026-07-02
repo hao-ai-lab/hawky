@@ -47,7 +47,13 @@ export async function armIntention(
   const preparedAdapters: ArmAdapter[] = [];
   async function rollback(): Promise<void> {
     for (const adapter of preparedAdapters) {
-      await adapter.disarm(intention);
+      try {
+        await adapter.disarm(intention);
+      } catch {
+        // Rollback is best-effort: a failing cleanup must not mask the
+        // original arm failure or prevent other prepared adapters from
+        // being disarmed.
+      }
     }
   }
 
