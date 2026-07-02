@@ -306,6 +306,17 @@ describe("memory_search — basic matching", () => {
     expect(parsed.results[0].snippet).toContain("calypso orchid");
   });
 
+  test("does not return symlinked memory files that escape the workspace", async () => {
+    const outside = join(tempDir, "outside-search.md");
+    writeFileSync(outside, "outside memory search secret", "utf-8");
+    symlinkSync(outside, join(wsDir, "memory", "linked.md"));
+
+    const search = await runMemorySearch({ query: "outside memory search secret" });
+    const parsed = JSON.parse(search.content);
+
+    expect(parsed.results.length).toBe(0);
+  });
+
   test("memory_get can read memory_append JSONL search results", async () => {
     const result = await executeMemoryAppend(
       {
