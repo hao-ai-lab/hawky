@@ -12,7 +12,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { canTransition, type Intention, type IntentionOrigin, type IntentionState, type TriggerPredicate, type TriggerTerm } from "./intention.js";
+import { canTransition, type Intention, type IntentionState, type TriggerPredicate, type TriggerTerm } from "./intention.js";
 import type { IntentionQuery, IntentionStore } from "./intention-store.js";
 import { clampConfidence, normalizeTopic, normalizeTrigger } from "./intention-normalize.js";
 
