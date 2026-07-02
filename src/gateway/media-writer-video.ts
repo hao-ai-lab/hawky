@@ -34,23 +34,20 @@
 import { mkdirSync } from "node:fs";
 import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createSubsystemLogger } from "../logging/index.js";
-import { loadConfig } from "../storage/config.js";
 import { getNodeId } from "../storage/node-id.js";
 import { getBus } from "../bus/index.js";
 import type { MediaFinalizedEvent } from "../bus/events.js";
+import { resolveMediaRoot } from "./media-root.js";
 
 const log = createSubsystemLogger("gateway/media-writer-video");
 
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
-
-const DEFAULT_MEDIA_ROOT = join(homedir(), ".hawky", "workspace", "media");
 
 /**
  * Maximum buffered chunks per media_id before seq=0 has arrived.
@@ -137,22 +134,6 @@ interface MediaSidecar {
   duration_ms?: number;
   sha256?: string;
   final_iso?: string;
-}
-
-// -----------------------------------------------------------------------------
-// Media root resolution
-// -----------------------------------------------------------------------------
-
-function resolveMediaRoot(): string {
-  if (process.env.HAWKY_MEDIA_ROOT) return process.env.HAWKY_MEDIA_ROOT;
-  try {
-    const cfg = loadConfig();
-    const mediaRoot = cfg.media?.root;
-    if (typeof mediaRoot === "string" && mediaRoot.trim()) return mediaRoot;
-  } catch {
-    // fall through to default
-  }
-  return DEFAULT_MEDIA_ROOT;
 }
 
 // -----------------------------------------------------------------------------
