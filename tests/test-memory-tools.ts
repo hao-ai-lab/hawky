@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { memoryGetToolDefinition, memorySearchToolDefinition } from "../src/tools/memory.js";
@@ -207,6 +207,28 @@ describe("memory_get — security", () => {
 
   test("rejects traversal via dot-slash prefix", async () => {
     const result = await runMemoryGet({ path: "./../../etc/passwd.md" });
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("traverse");
+  });
+
+  test("rejects symlinked Markdown files that escape the workspace", async () => {
+    const outside = join(tempDir, "outside.md");
+    writeFileSync(outside, "outside secret", "utf-8");
+    symlinkSync(outside, join(wsDir, "linked.md"));
+
+    const result = await runMemoryGet({ path: "linked.md" });
+
+    expect(result.type).toBe("error");
+    expect(result.content).toContain("traverse");
+  });
+
+  test("rejects symlinked memory append JSONL files that escape the workspace", async () => {
+    const outside = join(tempDir, "outside-memory.jsonl");
+    writeFileSync(outside, JSON.stringify({ text: "outside secret" }) + "\n", "utf-8");
+    symlinkSync(outside, join(wsDir, "memory", "linked.jsonl"));
+
+    const result = await runMemoryGet({ path: "memory/linked.jsonl" });
+
     expect(result.type).toBe("error");
     expect(result.content).toContain("traverse");
   });
