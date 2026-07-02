@@ -19,12 +19,12 @@ import type { ChatMessage } from "./types.js";
 /** Max total image payload (base64 string length) across all messages.
  *  The Anthropic API counts base64 string bytes, not raw bytes.
  *  10MB base64 ≈ 7.5MB raw. Leaves headroom within the API request limit. */
-const MAX_TOTAL_IMAGE_BASE64 = 10 * 1024 * 1024;
+export const MAX_TOTAL_IMAGE_BASE64 = 10 * 1024 * 1024;
 
 /** Max per-image base64 string length. The Anthropic API rejects images
  *  where the base64 field exceeds 5,242,880 bytes (5MB base64 = ~3.75MB raw).
  *  Any single image exceeding this is always replaced, regardless of budget. */
-const MAX_SINGLE_IMAGE_BASE64 = 5 * 1024 * 1024;
+export const MAX_SINGLE_IMAGE_BASE64 = 5 * 1024 * 1024;
 
 /** Placeholder text for images removed due to budget. */
 const IMAGE_PLACEHOLDER = "[image was previously shown to you]";

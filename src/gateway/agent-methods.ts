@@ -15,6 +15,7 @@ import type { GatewayServer } from "./server.js";
 import type { AgentSessionManager } from "./agent-sessions.js";
 import type { StreamEvent } from "../agent/types.js";
 import { getCostTracker } from "../agent/cost-tracker.js";
+import { MAX_SINGLE_IMAGE_BASE64, MAX_TOTAL_IMAGE_BASE64 } from "../agent/image-sanitize.js";
 import { executeInSession } from "./lanes.js";
 import { CommandLane } from "./types.js";
 import { MethodError } from "./methods.js";
@@ -627,30 +628,36 @@ export function registerAgentMethods(
       throw new MethodError("INVALID_REQUEST", "message is required");
     }
 
-    // Validate image attachments (bounded per-image + total)
-    const MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3MB per image (aligned with sanitizer per-image cap)
+    // Validate image attachments using the same base64 budgets the agent
+    // sanitizer applies before provider calls.
     const MAX_ATTACHMENT_COUNT = 10;
-    const MAX_TOTAL_BYTES = 10 * 1024 * 1024; // 10MB total (aligned with sanitizer budget)
     const VALID_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
     const validatedAttachments: Array<{ base64: string; media_type: string }> = [];
     if (p.attachments && Array.isArray(p.attachments)) {
       if (p.attachments.length > MAX_ATTACHMENT_COUNT) {
         throw new MethodError("INVALID_REQUEST", `Too many attachments (${p.attachments.length}). Max ${MAX_ATTACHMENT_COUNT}.`);
       }
-      let totalBytes = 0;
+      let totalBase64 = 0;
       for (const att of p.attachments) {
         if (!att.base64 || !att.media_type) continue;
         if (!VALID_MEDIA_TYPES.includes(att.media_type)) {
           log.warn("skipping attachment with unsupported media type", { media_type: att.media_type });
           continue;
         }
-        const rawBytes = Math.ceil(att.base64.length * 3 / 4);
-        if (rawBytes > MAX_IMAGE_BYTES) {
-          throw new MethodError("INVALID_REQUEST", `Attachment too large (${(rawBytes / 1024 / 1024).toFixed(1)}MB). Max ${MAX_IMAGE_BYTES / 1024 / 1024}MB per image.`);
+        const base64Len = att.base64.length;
+        if (base64Len > MAX_SINGLE_IMAGE_BASE64) {
+          const rawMb = (base64Len * 3 / 4) / 1024 / 1024;
+          throw new MethodError(
+            "INVALID_REQUEST",
+            `Attachment too large (${rawMb.toFixed(1)}MB raw). Max ${MAX_SINGLE_IMAGE_BASE64 / 1024 / 1024}MB base64 per image.`,
+          );
         }
-        totalBytes += rawBytes;
-        if (totalBytes > MAX_TOTAL_BYTES) {
-          throw new MethodError("INVALID_REQUEST", `Total attachment size exceeds ${MAX_TOTAL_BYTES / 1024 / 1024}MB limit.`);
+        totalBase64 += base64Len;
+        if (totalBase64 > MAX_TOTAL_IMAGE_BASE64) {
+          throw new MethodError(
+            "INVALID_REQUEST",
+            `Total attachment size exceeds ${MAX_TOTAL_IMAGE_BASE64 / 1024 / 1024}MB base64 limit.`,
+          );
         }
         validatedAttachments.push({ base64: att.base64, media_type: att.media_type });
       }
@@ -840,7 +847,7 @@ export function registerAgentMethods(
         // Attachments mirror the shape siblings already render for their own
         // optimistic sends (SessionMessage.images / .documents):
         //   - Images carry base64 so the sibling can render the thumbnail.
-        //     Bounded by the ingress caps above (3MB/image, 10MB total).
+        //     Bounded by the shared ingress/sanitizer caps above.
         //   - Documents are metadata only (media_type, filename, sizeBytes);
         //     PDF bytes can be ~50MB and would be wasted wire traffic — the
         //     pill only needs filename/size, matching how local history
