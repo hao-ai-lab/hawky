@@ -10,7 +10,7 @@
 // replay, preventive rather than reactive.
 // =============================================================================
 
-import type { ChatMessage, ContentBlock } from "./types.js";
+import type { ChatMessage } from "./types.js";
 
 // -----------------------------------------------------------------------------
 // Constants
