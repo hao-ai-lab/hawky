@@ -15,6 +15,7 @@ import {
   listSessions,
   writeLastSession,
   readLastSession,
+  deleteSessionFile,
   validateMessages,
   setSessionsDir,
   resetSessionsDir,
@@ -164,6 +165,40 @@ describe("SessionManager — basic", () => {
     expect(data.messages).toHaveLength(4);
     expect(data.messages[1].content[0].type).toBe("tool_use");
     expect(data.messages[2].content[0].type).toBe("tool_result");
+  });
+});
+
+describe("SessionManager — path containment", () => {
+  test("rejects session ids that would escape the sessions directory", () => {
+    const invalidIds = [
+      "../escape",
+      "web/../escape",
+      "/tmp/escape",
+      "web//escape",
+      "web/./escape",
+      "web\\escape",
+    ];
+
+    for (const id of invalidIds) {
+      expect(() => new SessionManager(id, testDir)).toThrow(/invalid session id/);
+    }
+  });
+
+  test("writeLastSession rejects traversal ids", () => {
+    expect(() => writeLastSession("../escape")).toThrow(/invalid session id/);
+  });
+
+  test("deleteSessionFile refuses traversal ids without touching outside files", () => {
+    const outsideName = `outside-${generateSessionId()}`;
+    const outsidePath = join(testDir, "..", `${outsideName}.jsonl`);
+    writeFileSync(outsidePath, "keep", "utf-8");
+
+    try {
+      expect(deleteSessionFile(`../${outsideName}`)).toBe(false);
+      expect(readFileSync(outsidePath, "utf-8")).toBe("keep");
+    } finally {
+      rmSync(outsidePath, { force: true });
+    }
   });
 });
 
