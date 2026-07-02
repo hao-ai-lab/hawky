@@ -6,7 +6,7 @@
 // =============================================================================
 
 import { stat } from "node:fs/promises";
-import { resolve, relative } from "node:path";
+import { resolve } from "node:path";
 import type {
   ToolDefinition,
   ToolContext,

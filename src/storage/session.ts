@@ -11,7 +11,7 @@
 
 import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, basename, dirname } from "node:path";
+import { isAbsolute, join, dirname } from "node:path";
 import type { ChatMessage } from "../agent/types.js";
 import type { PermissionCacheData } from "../agent/tool_executor.js";
 import { createSubsystemLogger } from "../logging/index.js";
