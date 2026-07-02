@@ -11,8 +11,8 @@
 // workspace path and enforce security boundaries.
 // =============================================================================
 
-import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
-import { join, normalize, resolve } from "node:path";
+import { readdirSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import type {
   ToolDefinition,
   ToolContext,
@@ -112,6 +112,10 @@ async function executeMemoryGet(
     return { type: "text", content: JSON.stringify({ path: relPath, text: "", error: "File not found" }) };
   }
 
+  if (!isRealPathInsideWorkspace(workspaceDir, fullPath)) {
+    return { type: "error", content: "Path must not traverse outside workspace" };
+  }
+
   try {
     const content = isAppendJsonl
       ? extractMemoryAppendJsonlText(fullPath).text
@@ -149,6 +153,17 @@ async function executeMemoryGet(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { type: "error", content: `Failed to read ${relPath}: ${message}` };
+  }
+}
+
+function isRealPathInsideWorkspace(workspaceDir: string, filePath: string): boolean {
+  try {
+    const root = realpathSync(workspaceDir);
+    const target = realpathSync(filePath);
+    const rel = relative(root, target);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  } catch {
+    return false;
   }
 }
 
