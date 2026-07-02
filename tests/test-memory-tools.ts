@@ -317,6 +317,20 @@ describe("memory_search — basic matching", () => {
     expect(parsed.results.length).toBe(0);
   });
 
+  test("grep fallback does not return symlinked memory files that escape the workspace", async () => {
+    const outside = join(tempDir, "outside-fallback-search.md");
+    writeFileSync(outside, "outside fallback memory search secret", "utf-8");
+    symlinkSync(outside, join(wsDir, "memory", "fallback-linked.md"));
+
+    getGlobalMemoryIndex(wsDir, undefined, join(tempDir, "test-memory.db")).close();
+
+    const search = await runMemorySearch({ query: "outside fallback memory search secret" });
+    const parsed = JSON.parse(search.content);
+
+    expect(search.display_content).toContain("[grep-fallback]");
+    expect(parsed.results.length).toBe(0);
+  });
+
   test("memory_get can read memory_append JSONL search results", async () => {
     const result = await executeMemoryAppend(
       {
