@@ -660,6 +660,36 @@ describe("safe bash command allowlist", () => {
     await loop.sendMessage("test");
     expect(askCalled).toBe(true);
   });
+
+  test("accept-edits bash auto-approval rejects path-bearing flag values", async () => {
+    const provider = createToolCallProvider("bash", {
+      command: "cp src.txt --target-directory=/tmp/hawky-outside",
+    });
+    const registry = new ToolRegistry();
+    const { bashToolDefinition } = await import("../src/tools/bash.js");
+    registry.register(bashToolDefinition as any);
+
+    let askCalled = false;
+    const permissionResolver = {
+      ask: async () => {
+        askCalled = true;
+        return { decision: "deny" as const };
+      },
+    };
+
+    const loop = new AgentLoop({
+      provider,
+      registry,
+      config: makeConfig(),
+      working_directory: "/tmp/hawky-workspace",
+      permissionResolver,
+    });
+    loop.getPermissionCache().recordDecision("bash", "accept_edits");
+    collectEvents(loop);
+
+    await loop.sendMessage("test");
+    expect(askCalled).toBe(true);
+  });
 });
 
 describe("WS permission: getPendingPermissionForSession (late-join lookup)", () => {
