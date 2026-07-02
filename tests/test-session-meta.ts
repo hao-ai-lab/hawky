@@ -386,6 +386,15 @@ describe("renameSessionStorage", () => {
     expect(() => renameSessionStorage("web:foo", "tui:foo")).toThrow(/cross-prefix/);
   });
 
+  test("rejects traversal in the target key before moving files", () => {
+    const oldPath = seedSession("web:foo");
+    const outsidePath = join(testDir, "..", "escape.jsonl");
+
+    expect(() => renameSessionStorage("web:foo", "web:../escape")).toThrow(/invalid session id/);
+    expect(existsSync(oldPath)).toBe(true);
+    expect(existsSync(outsidePath)).toBe(false);
+  });
+
   test("no-op for identical old and new keys", () => {
     const path = seedSession("web:unchanged");
     renameSessionStorage("web:unchanged", "web:unchanged");

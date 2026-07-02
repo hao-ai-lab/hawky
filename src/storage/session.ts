@@ -11,7 +11,7 @@
 
 import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, basename, dirname } from "node:path";
+import { isAbsolute, join, basename, dirname } from "node:path";
 import type { ChatMessage } from "../agent/types.js";
 import type { PermissionCacheData } from "../agent/tool_executor.js";
 import { createSubsystemLogger } from "../logging/index.js";
@@ -173,10 +173,32 @@ function ensureSessionsDir(): void {
   }
 }
 
+function assertSafeSessionId(sessionId: string): void {
+  if (sessionId.length === 0) {
+    throw new Error("invalid session id for storage path: empty id");
+  }
+  if (
+    sessionId.includes("\0") ||
+    sessionId.includes("\\") ||
+    isAbsolute(sessionId)
+  ) {
+    throw new Error(`invalid session id for storage path: ${sessionId}`);
+  }
+  const segments = sessionId.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`invalid session id for storage path: ${sessionId}`);
+  }
+}
+
+function sessionPathInDir(sessionsDir: string, sessionId: string): string {
+  assertSafeSessionId(sessionId);
+  return join(sessionsDir, `${sessionId}.jsonl`);
+}
+
 function sessionPath(sessionId: string): string {
   // Ensure legacy files are migrated before any path resolution
   migrateOldSessions();
-  return join(SESSIONS_DIR, `${sessionId}.jsonl`);
+  return sessionPathInDir(SESSIONS_DIR, sessionId);
 }
 
 // -----------------------------------------------------------------------------
@@ -193,7 +215,7 @@ export class SessionManager {
     this.sessionId = sessionId;
     this.customDir = !!customDir;
     this.filePath = customDir
-      ? join(customDir, `${sessionId}.jsonl`)
+      ? sessionPathInDir(customDir, sessionId)
       : sessionPath(sessionId);
   }
 
@@ -667,6 +689,7 @@ export function sessionKeyToId(sessionKey: string): string {
 /** Write the last-used session ID to a marker file */
 export function writeLastSession(sessionId: string): void {
   ensureSessionsDir();
+  assertSafeSessionId(sessionId);
   writeFileSync(LAST_SESSION_FILE, sessionId, "utf-8");
 }
 
@@ -856,8 +879,8 @@ export function renameSessionStorage(oldKey: string, newKey: string): void {
 
   const oldId = sessionKeyToId(oldKey);
   const newId = sessionKeyToId(newKey);
-  const oldPath = join(SESSIONS_DIR, `${oldId}.jsonl`);
-  const newPath = join(SESSIONS_DIR, `${newId}.jsonl`);
+  const oldPath = sessionPathInDir(SESSIONS_DIR, oldId);
+  const newPath = sessionPathInDir(SESSIONS_DIR, newId);
 
   if (!existsSync(oldPath)) {
     throw new Error(`session file not found: ${oldPath}`);
@@ -919,8 +942,8 @@ export function renameSessionStorage(oldKey: string, newKey: string): void {
 
 /** Delete a session JSONL file from disk. Returns true if file was deleted. */
 export function deleteSessionFile(sessionId: string): boolean {
-  const filePath = sessionPath(sessionId);
   try {
+    const filePath = sessionPath(sessionId);
     if (!existsSync(filePath)) return false;
     unlinkSync(filePath);
     log.info("session file deleted", { sessionId, filePath });
