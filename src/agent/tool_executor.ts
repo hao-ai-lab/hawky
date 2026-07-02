@@ -946,6 +946,10 @@ const ACCEPT_EDITS_BASH_COMMANDS = new Set([
   "mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed",
 ]);
 
+function hasPathBearingFlag(parts: string[]): boolean {
+  return parts.some((part) => part.startsWith("-") && (part.includes("=") || part.includes("/")));
+}
+
 /**
  * Check if a bash command is a filesystem operation auto-approved in acceptEdits mode.
  * Validates that the command targets paths within the allowed working directories
@@ -965,6 +969,7 @@ function isFilesystemBashCommand(
   const parts = cmd.split(/\s+/);
   const baseCmd = parts[0] ?? "";
   if (!ACCEPT_EDITS_BASH_COMMANDS.has(baseCmd)) return false;
+  if (hasPathBearingFlag(parts.slice(1))) return false;
 
   // Extract path arguments (skip flags starting with -)
   const pathArgs = parts.slice(1).filter((p) => !p.startsWith("-"));
