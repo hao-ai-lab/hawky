@@ -1,14 +1,12 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createSubsystemLogger } from "../logging/index.js";
-import { loadConfig } from "../storage/config.js";
+import { resolveMediaRoot } from "./media-root.js";
 
 const log = createSubsystemLogger("gateway/vision-frame-store");
 
-const DEFAULT_MEDIA_ROOT = join(homedir(), ".hawky", "workspace", "media");
 const MAX_FRAMES_PER_CAPTURE = 12;
 const AUDIO_SEGMENT_SECONDS = 3;
 
@@ -35,18 +33,6 @@ export interface VisionFrameEntry {
 }
 
 const framesByCapture = new Map<string, VisionFrameEntry[]>();
-
-function resolveMediaRoot(): string {
-  if (process.env.HAWKY_MEDIA_ROOT) return process.env.HAWKY_MEDIA_ROOT;
-  try {
-    const cfg = loadConfig();
-    const mediaRoot = cfg.media?.root;
-    if (typeof mediaRoot === "string" && mediaRoot.trim()) return mediaRoot;
-  } catch {
-    // Fall back to the default path when config is unavailable.
-  }
-  return DEFAULT_MEDIA_ROOT;
-}
 
 export function captureIdFromMediaId(mediaId: string): string {
   return mediaId

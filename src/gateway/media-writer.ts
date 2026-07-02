@@ -14,14 +14,13 @@
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { open, writeFile, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { createSubsystemLogger } from "../logging/index.js";
-import { loadConfig } from "../storage/config.js";
 import { getNodeId } from "../storage/node-id.js";
 import { MethodError } from "./methods.js";
 import { getBus } from "../bus/index.js";
 import type { MediaFinalizedEvent, MediaLiveChunkEvent } from "../bus/events.js";
+import { resolveMediaRoot } from "./media-root.js";
 
 const log = createSubsystemLogger("gateway/media-writer");
 
@@ -29,7 +28,6 @@ const log = createSubsystemLogger("gateway/media-writer");
 // Constants
 // -----------------------------------------------------------------------------
 
-const DEFAULT_MEDIA_ROOT = join(homedir(), ".hawky", "workspace", "media");
 const WAV_HEADER_SIZE = 44;
 // Placeholder sizes in WAV header: max u32 so mid-recording reads are valid.
 // Both RIFF size (offset 4) and data chunk size (offset 40) use this value.
@@ -171,23 +169,6 @@ function parseSampleRate(mime: string): number {
     if (!isNaN(rate) && rate > 0) return rate;
   }
   return DEFAULT_SAMPLE_RATE;
-}
-
-// -----------------------------------------------------------------------------
-// Media root resolution
-// -----------------------------------------------------------------------------
-
-function resolveMediaRoot(): string {
-  // Allow test override via env var
-  if (process.env.HAWKY_MEDIA_ROOT) return process.env.HAWKY_MEDIA_ROOT;
-  try {
-    const cfg = loadConfig();
-    const mediaRoot = cfg.media?.root;
-    if (typeof mediaRoot === "string" && mediaRoot.trim()) return mediaRoot;
-  } catch {
-    // fall through to default
-  }
-  return DEFAULT_MEDIA_ROOT;
 }
 
 // -----------------------------------------------------------------------------
