@@ -6,6 +6,20 @@ import UserNotifications
 import UIKit
 #endif
 
+private enum LiveToolArgumentError: LocalizedError {
+    case invalidJSON
+    case argumentsMustBeObject
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidJSON:
+            return "Tool arguments must be valid JSON."
+        case .argumentsMustBeObject:
+            return "Tool arguments must be a JSON object."
+        }
+    }
+}
+
 protocol LiveTool {
     var name: String { get }
     var kind: LiveToolKind { get }
@@ -272,7 +286,17 @@ struct LiveToolRegistry {
     }
 
     func execute(name: String, argumentsJSON: String, context: LiveToolContext) async -> String {
-        let arguments = Self.parseJSONObject(argumentsJSON)
+        let arguments: [String: Any]
+        do {
+            arguments = try Self.parseJSONObject(argumentsJSON)
+        } catch {
+            return Self.jsonString([
+                "ok": false,
+                "tool": name,
+                "error": error.localizedDescription,
+            ])
+        }
+
         guard let tool = toolsByName[name] else {
             return Self.jsonString([
                 "ok": false,
@@ -314,12 +338,20 @@ struct LiveToolRegistry {
         }
     }
 
-    private static func parseJSONObject(_ raw: String) -> [String: Any] {
-        guard let data = raw.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return [:]
+    private static func parseJSONObject(_ raw: String) throws -> [String: Any] {
+        guard let data = raw.data(using: .utf8) else {
+            throw LiveToolArgumentError.invalidJSON
         }
-        return object
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw LiveToolArgumentError.invalidJSON
+        }
+        guard let dictionary = object as? [String: Any] else {
+            throw LiveToolArgumentError.argumentsMustBeObject
+        }
+        return dictionary
     }
 
     static func jsonString(_ object: [String: Any]) -> String {

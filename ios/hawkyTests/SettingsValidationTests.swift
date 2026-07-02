@@ -435,6 +435,48 @@ import Foundation
         #expect(!json.contains("hawky_"))
     }
 
+    @MainActor
+    @Test func liveToolRegistryRejectsMalformedArgumentJSON() async throws {
+        let context = LiveToolContext(config: LiveSessionConfig(), gatewayBridge: nil, awaitPendingTranscriptAppend: nil)
+
+        let malformed = await LiveToolRegistry.default.execute(
+            name: "get_current_time",
+            argumentsJSON: "{",
+            context: context
+        )
+        let malformedOutput = try jsonObject(malformed)
+
+        #expect(malformedOutput["ok"] as? Bool == false)
+        #expect(malformedOutput["tool"] as? String == "get_current_time")
+        #expect(malformedOutput["error"] as? String == "Tool arguments must be valid JSON.")
+
+        let nonObject = await LiveToolRegistry.default.execute(
+            name: "get_current_time",
+            argumentsJSON: "[]",
+            context: context
+        )
+        let nonObjectOutput = try jsonObject(nonObject)
+
+        #expect(nonObjectOutput["ok"] as? Bool == false)
+        #expect(nonObjectOutput["tool"] as? String == "get_current_time")
+        #expect(nonObjectOutput["error"] as? String == "Tool arguments must be a JSON object.")
+    }
+
+    @MainActor
+    @Test func liveToolRegistryStillAcceptsEmptyObjectArguments() async throws {
+        let context = LiveToolContext(config: LiveSessionConfig(), gatewayBridge: nil, awaitPendingTranscriptAppend: nil)
+
+        let json = await LiveToolRegistry.default.execute(
+            name: "get_current_time",
+            argumentsJSON: "{}",
+            context: context
+        )
+        let output = try jsonObject(json)
+
+        #expect(output["ok"] as? Bool == true)
+        #expect(output["tool"] as? String == "get_current_time")
+    }
+
     @Test func offlineBridgeInstructionsReplaceBridgeToolContract() {
         var config = LiveSessionConfig()
         config.gatewayBridgeEnabled = true
@@ -561,4 +603,9 @@ private func uiTestLaunchConfiguration(seed: LaunchConfiguration.SeedProfile) ->
         defaultDeviceName: "ui-test-simulator",
         tabConfigurationOverride: nil
     )
+}
+
+private func jsonObject(_ text: String) throws -> [String: Any] {
+    let data = try #require(text.data(using: .utf8))
+    return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
 }
