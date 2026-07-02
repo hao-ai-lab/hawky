@@ -30,78 +30,86 @@ function defaultHawkyDir(): string {
 let HAWKY_DIR = defaultHawkyDir();
 let CONFIG_PATH = join(HAWKY_DIR, "config.json");
 
-export const DEFAULT_CONFIG: HawkyConfig = {
-  api_keys: {
-    anthropic: "",
-    brave_search: "",
-    openai: "",
-  },
-  api_base_url: "https://api.anthropic.com",
-  provider: "anthropic",
-  vertex: {
-    project_id: "",
-    region: "global",
-  },
-  openai_compatible: {
-    active_profile: "",
-    profiles: {},
-  },
-  model: "claude-opus-4-7",
-  max_tokens: 32768,
-  max_iterations: 160,
-  max_tool_result_chars: 30_000,
-  workspace_dir: join(HAWKY_DIR, "workspace"),
-  gateway_port: 4242,
-  heartbeat: {
-    enabled: true,
-    interval_minutes: 30,
-    model: "claude-sonnet-4-6",
-    keep_recent_messages: 32,
-    active_hours: {
-      start: "00:00",
-      end: "23:59",
-      timezone: "local",
+function buildDefaultConfig(configDir: string): HawkyConfig {
+  return {
+    api_keys: {
+      anthropic: "",
+      brave_search: "",
+      openai: "",
     },
-    // Memory feature (#653) now owns session→daily distillation and
-    // daily→global consolidation via single Haiku calls (session-end trigger +
-    // 6h scheduler). The heartbeat's agent-loop distillation/consolidation are
-    // disabled to avoid double-distilling sessions and racing on MEMORY.md.
-    consolidation_enabled: false,
-    consolidation_frequency_hours: 12,
-    consolidation_days: 3,
-    distillation_enabled: false,
-    distillation_frequency_hours: 6,
-    distillation_min_new_messages: 10,
-  },
-  cron: {
-    enabled: true,
-  },
-  memory_flush: {
-    enabled: true,
-    threshold_percent: 90,
-  },
-  compaction: {
-    enabled: true,
-    threshold_percent: 95,
-    blocking_percent: 98,
-    keep_recent_turns: 20,
-    max_failures: 3,
-  },
-  concurrency: {
-    main_max: 4,
-    cron_max: 4,
-    subagent_max: 8,
-  },
-  media: {
-    retention: {
-      audio_days: 7,
-      video_days: 3,
+    api_base_url: "https://api.anthropic.com",
+    provider: "anthropic",
+    vertex: {
+      project_id: "",
+      region: "global",
     },
-  },
-  experiments: {
-    agent_runtimes: false,
-  },
-};
+    openai_compatible: {
+      active_profile: "",
+      profiles: {},
+    },
+    model: "claude-opus-4-7",
+    max_tokens: 32768,
+    max_iterations: 160,
+    max_tool_result_chars: 30_000,
+    workspace_dir: join(configDir, "workspace"),
+    gateway_port: 4242,
+    heartbeat: {
+      enabled: true,
+      interval_minutes: 30,
+      model: "claude-sonnet-4-6",
+      keep_recent_messages: 32,
+      active_hours: {
+        start: "00:00",
+        end: "23:59",
+        timezone: "local",
+      },
+      // Memory feature (#653) now owns session→daily distillation and
+      // daily→global consolidation via single Haiku calls (session-end trigger +
+      // 6h scheduler). The heartbeat's agent-loop distillation/consolidation are
+      // disabled to avoid double-distilling sessions and racing on MEMORY.md.
+      consolidation_enabled: false,
+      consolidation_frequency_hours: 12,
+      consolidation_days: 3,
+      distillation_enabled: false,
+      distillation_frequency_hours: 6,
+      distillation_min_new_messages: 10,
+    },
+    cron: {
+      enabled: true,
+    },
+    memory_flush: {
+      enabled: true,
+      threshold_percent: 90,
+    },
+    compaction: {
+      enabled: true,
+      threshold_percent: 95,
+      blocking_percent: 98,
+      keep_recent_turns: 20,
+      max_failures: 3,
+    },
+    concurrency: {
+      main_max: 4,
+      cron_max: 4,
+      subagent_max: 8,
+    },
+    media: {
+      retention: {
+        audio_days: 7,
+        video_days: 3,
+      },
+    },
+    experiments: {
+      agent_runtimes: false,
+    },
+  };
+}
+
+export const DEFAULT_CONFIG: HawkyConfig = buildDefaultConfig(HAWKY_DIR);
+
+function currentDefaultConfig(): HawkyConfig {
+  return buildDefaultConfig(HAWKY_DIR);
+}
 
 // -----------------------------------------------------------------------------
 // Environment variable mapping
@@ -200,6 +208,7 @@ let cachedConfigPath: string | null = null;
 export function loadConfig(configPath?: string): HawkyConfig {
   const filePath = configPath ?? CONFIG_PATH;
   if (cachedConfig && cachedConfigPath === filePath) return cachedConfig;
+  const defaults = currentDefaultConfig();
 
   let fileConfig: Record<string, unknown> = {};
 
@@ -231,26 +240,26 @@ export function loadConfig(configPath?: string): HawkyConfig {
     "region": "global"
   },
 
-  "model": "${DEFAULT_CONFIG.model}",
-  "max_tokens": ${DEFAULT_CONFIG.max_tokens},
-  "max_iterations": ${DEFAULT_CONFIG.max_iterations},
-  "gateway_port": ${DEFAULT_CONFIG.gateway_port},
+  "model": "${defaults.model}",
+  "max_tokens": ${defaults.max_tokens},
+  "max_iterations": ${defaults.max_iterations},
+  "gateway_port": ${defaults.gateway_port},
 
   "heartbeat": {
-    "enabled": ${DEFAULT_CONFIG.heartbeat.enabled},
-    "interval_minutes": ${DEFAULT_CONFIG.heartbeat.interval_minutes},
-    "model": "${DEFAULT_CONFIG.heartbeat.model}",
-    "keep_recent_messages": ${DEFAULT_CONFIG.heartbeat.keep_recent_messages},
+    "enabled": ${defaults.heartbeat.enabled},
+    "interval_minutes": ${defaults.heartbeat.interval_minutes},
+    "model": "${defaults.heartbeat.model}",
+    "keep_recent_messages": ${defaults.heartbeat.keep_recent_messages},
     "active_hours": {
-      "start": "${DEFAULT_CONFIG.heartbeat.active_hours.start}",
-      "end": "${DEFAULT_CONFIG.heartbeat.active_hours.end}"
+      "start": "${defaults.heartbeat.active_hours.start}",
+      "end": "${defaults.heartbeat.active_hours.end}"
     },
-    "consolidation_enabled": ${DEFAULT_CONFIG.heartbeat.consolidation_enabled},
-    "consolidation_frequency_hours": ${DEFAULT_CONFIG.heartbeat.consolidation_frequency_hours},
-    "consolidation_days": ${DEFAULT_CONFIG.heartbeat.consolidation_days},
-    "distillation_enabled": ${DEFAULT_CONFIG.heartbeat.distillation_enabled},
-    "distillation_frequency_hours": ${DEFAULT_CONFIG.heartbeat.distillation_frequency_hours},
-    "distillation_min_new_messages": ${DEFAULT_CONFIG.heartbeat.distillation_min_new_messages}
+    "consolidation_enabled": ${defaults.heartbeat.consolidation_enabled},
+    "consolidation_frequency_hours": ${defaults.heartbeat.consolidation_frequency_hours},
+    "consolidation_days": ${defaults.heartbeat.consolidation_days},
+    "distillation_enabled": ${defaults.heartbeat.distillation_enabled},
+    "distillation_frequency_hours": ${defaults.heartbeat.distillation_frequency_hours},
+    "distillation_min_new_messages": ${defaults.heartbeat.distillation_min_new_messages}
   },
 
   "cron": {
@@ -263,17 +272,17 @@ export function loadConfig(configPath?: string): HawkyConfig {
   },
 
   "compaction": {
-    "enabled": ${DEFAULT_CONFIG.compaction!.enabled},
-    "threshold_percent": ${DEFAULT_CONFIG.compaction!.threshold_percent},
-    "blocking_percent": ${DEFAULT_CONFIG.compaction!.blocking_percent},
-    "keep_recent_turns": ${DEFAULT_CONFIG.compaction!.keep_recent_turns},
-    "max_failures": ${DEFAULT_CONFIG.compaction!.max_failures}
+    "enabled": ${defaults.compaction!.enabled},
+    "threshold_percent": ${defaults.compaction!.threshold_percent},
+    "blocking_percent": ${defaults.compaction!.blocking_percent},
+    "keep_recent_turns": ${defaults.compaction!.keep_recent_turns},
+    "max_failures": ${defaults.compaction!.max_failures}
   },
 
   "concurrency": {
-    "main_max": ${DEFAULT_CONFIG.concurrency!.main_max},
-    "cron_max": ${DEFAULT_CONFIG.concurrency!.cron_max},
-    "subagent_max": ${DEFAULT_CONFIG.concurrency!.subagent_max}
+    "main_max": ${defaults.concurrency!.main_max},
+    "cron_max": ${defaults.concurrency!.cron_max},
+    "subagent_max": ${defaults.concurrency!.subagent_max}
   },
 
   "experiments": {
@@ -289,7 +298,7 @@ export function loadConfig(configPath?: string): HawkyConfig {
 
   // Merge: defaults ← file
   const config = deepMerge(
-    DEFAULT_CONFIG as unknown as Record<string, unknown>,
+    defaults as unknown as Record<string, unknown>,
     fileConfig,
   ) as unknown as HawkyConfig;
 
@@ -319,7 +328,7 @@ export function resetConfig(): void {
  */
 export function getDefaultConfig(): HawkyConfig {
   return deepMerge(
-    DEFAULT_CONFIG as unknown as Record<string, unknown>,
+    currentDefaultConfig() as unknown as Record<string, unknown>,
     {},
   ) as unknown as HawkyConfig;
 }
@@ -408,7 +417,7 @@ export function updateConfig(
   // Merge: defaults ← existing file ← updates
   const merged = deepMerge(
     deepMerge(
-      DEFAULT_CONFIG as unknown as Record<string, unknown>,
+      currentDefaultConfig() as unknown as Record<string, unknown>,
       fileConfig,
     ),
     updates,

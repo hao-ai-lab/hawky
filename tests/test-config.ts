@@ -276,6 +276,17 @@ describe("HAWKY_HOME env var", () => {
     expect(getConfigPath()).toBe(join(fakeHome, "config.json"));
   });
 
+  test("loadConfig defaults workspace_dir under HAWKY_HOME", () => {
+    const fakeHome = join(tmpdir(), `hawky-home-test-${Date.now()}`);
+    process.env.HAWKY_HOME = fakeHome;
+
+    resetConfigDir();
+    const config = loadConfig();
+
+    expect(getConfigDir()).toBe(fakeHome);
+    expect(config.workspace_dir).toBe(join(fakeHome, "workspace"));
+  });
+
   test("resetConfigDir() falls back to ~/.hawky when HAWKY_HOME is unset", () => {
     delete process.env.HAWKY_HOME;
 
