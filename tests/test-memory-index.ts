@@ -14,6 +14,7 @@ import { createSchema } from "../src/memory/schema.js";
 import { chunkMarkdown, hashText } from "../src/memory/chunker.js";
 import { MemoryIndex, buildFtsQuery, bm25RankToScore, cosineSimilarity } from "../src/memory/index.js";
 import { mergeHybridResults, applyTemporalDecay, applyMMR } from "../src/memory/hybrid.js";
+import { resetConfigDir, setConfigDir } from "../src/storage/config.js";
 import type { SearchResult } from "../src/memory/types.js";
 
 // =============================================================================
@@ -45,6 +46,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetConfigDir();
   if (existsSync(tempDir)) {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -329,6 +331,22 @@ describe("MMR", () => {
 // =============================================================================
 
 describe("MemoryIndex — sync and FTS search", () => {
+  test("uses the configured Hawky root for default DB and workspace paths", () => {
+    const hawkyRoot = join(tempDir, "hawky-home");
+    const workspaceDir = join(hawkyRoot, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
+    setConfigDir(hawkyRoot);
+
+    const index = new MemoryIndex({ enableWatcher: false });
+
+    try {
+      expect(existsSync(join(hawkyRoot, "state", "memory.db"))).toBe(true);
+      expect(index["workspacePath"]).toBe(workspaceDir);
+    } finally {
+      index.close();
+    }
+  });
+
   test("indexes workspace files and searches with FTS", async () => {
     const wsDir = makeWorkspace({
       "MEMORY.md": "# Memory\n\nFavorite color: blue\nFavorite food: pizza\n",

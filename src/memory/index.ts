@@ -15,7 +15,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createSubsystemLogger } from "../logging/index.js";
-import { homedir } from "node:os";
+import { getConfigDir } from "../storage/config.js";
 import { createSchema, setMeta, getMeta } from "./schema.js";
 import { chunkMarkdown, hashText } from "./chunker.js";
 import {
@@ -44,8 +44,14 @@ import {
 // -----------------------------------------------------------------------------
 
 const log = createSubsystemLogger("memory/index");
-const DB_DIR = join(homedir(), ".hawky", "state");
-const DB_PATH = join(DB_DIR, "memory.db");
+
+function defaultDbPath(): string {
+  return join(getConfigDir(), "state", "memory.db");
+}
+
+function defaultWorkspacePath(): string {
+  return join(getConfigDir(), "workspace");
+}
 
 // -----------------------------------------------------------------------------
 // Memory Index
@@ -77,8 +83,8 @@ export class MemoryIndex {
     /** OpenAI API key from config (fallback if OPENAI_API_KEY env not set) */
     openaiApiKey?: string;
   }) {
-    const dbPath = options?.dbPath ?? DB_PATH;
-    this.workspacePath = options?.workspacePath ?? join(homedir(), ".hawky", "workspace");
+    const dbPath = options?.dbPath ?? defaultDbPath();
+    this.workspacePath = options?.workspacePath ?? defaultWorkspacePath();
     this.sessionsPath = options?.sessionsPath ?? null;
     this.sessionIndexWindowMs = (options?.sessionIndexWindowDays ?? 30) * 86_400_000;
     this.config = { ...DEFAULT_SEARCH_CONFIG, ...options?.config };
