@@ -71,6 +71,10 @@ describe("validateAnthropicKey", () => {
 // =============================================================================
 
 describe("validateBraveKey", () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
   test("rejects empty string", async () => {
     const result = await validateBraveKey("");
     expect(result.valid).toBe(false);
@@ -88,6 +92,28 @@ describe("validateBraveKey", () => {
     expect(result.valid).toBe(false);
     expect(result.error).toBeDefined();
   }, { timeout: 15_000 });
+
+  test("clears timeout when request fails before a response", async () => {
+    const realClearTimeout = globalThis.clearTimeout;
+    let clearCount = 0;
+
+    mockFetch(async () => {
+      throw new Error("network down");
+    });
+    globalThis.clearTimeout = ((timer: Parameters<typeof clearTimeout>[0]) => {
+      clearCount++;
+      return realClearTimeout(timer);
+    }) as typeof clearTimeout;
+
+    try {
+      const result = await validateBraveKey("brave-test-key");
+      expect(result.valid).toBe(false);
+      expect(result.error).toBe("network down");
+      expect(clearCount).toBe(1);
+    } finally {
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  });
 
   // E2E: requires BRAVE_API_KEY env var with a valid key
   const realBraveKey = process.env.BRAVE_API_KEY;
@@ -315,4 +341,3 @@ describe("Validator return shape", () => {
     }
   }, { timeout: 30_000 });
 });
-

@@ -88,19 +88,22 @@ export async function validateBraveKey(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS);
 
-    const url = new URL(BRAVE_API_URL);
-    url.searchParams.set("q", "test");
-    url.searchParams.set("count", "1");
+    let response: Response;
+    try {
+      const url = new URL(BRAVE_API_URL);
+      url.searchParams.set("q", "test");
+      url.searchParams.set("count", "1");
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        Accept: "application/json",
-        "X-Subscription-Token": apiKey,
-      },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
+      response = await fetch(url.toString(), {
+        headers: {
+          Accept: "application/json",
+          "X-Subscription-Token": apiKey,
+        },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (response.status === 401 || response.status === 403) {
       return { valid: false, error: "Invalid API key" };
