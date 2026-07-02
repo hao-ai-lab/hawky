@@ -42,6 +42,7 @@ import { getNodeId } from "../storage/node-id.js";
 import { getBus } from "../bus/index.js";
 import type { MediaFinalizedEvent } from "../bus/events.js";
 import { resolveMediaRoot } from "./media-root.js";
+import { MethodError } from "./methods.js";
 
 const log = createSubsystemLogger("gateway/media-writer-video");
 
@@ -247,6 +248,17 @@ async function bufferChunk(
   data: Buffer,
 ): Promise<void> {
   const buf = state.buffer;
+
+  if (seq < buf.nextExpectedSeq) {
+    throw new MethodError(
+      "INVALID_REQUEST",
+      `seq ${seq} is less than next expected seq ${buf.nextExpectedSeq}`,
+    );
+  }
+
+  if (buf.bySeq.has(seq)) {
+    throw new MethodError("INVALID_REQUEST", `seq ${seq} has already been buffered`);
+  }
 
   // Cap enforcement: drop if buffer is full and seq=0 still hasn't arrived
   if (!buf.ffmpegStarted && buf.bySeq.size >= MAX_BUFFER_CHUNKS) {
