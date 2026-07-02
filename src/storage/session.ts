@@ -10,11 +10,11 @@
 // =============================================================================
 
 import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, join, dirname } from "node:path";
 import type { ChatMessage } from "../agent/types.js";
 import type { PermissionCacheData } from "../agent/tool_executor.js";
 import { createSubsystemLogger } from "../logging/index.js";
+import { getConfigDir } from "./config.js";
 
 const log = createSubsystemLogger("session");
 
@@ -66,30 +66,35 @@ function scrubImagesForPersistence(message: ChatMessage): ChatMessage {
 
 const SESSION_VERSION = 1;
 
-// Default paths (can be overridden for testing via setSessionsDir)
-let SESSIONS_DIR = join(homedir(), ".hawky", "sessions");
-let migrated = false; // Track whether legacy migration has run
-let LAST_SESSION_FILE = join(SESSIONS_DIR, ".last-session");
+// Default path follows HAWKY_HOME/getConfigDir(); tests can still override it.
+let sessionsDirOverride: string | null = null;
+let migratedSessionsDir: string | null = null; // Track which directory has run legacy migration.
+
+function defaultSessionsDir(): string {
+  return join(getConfigDir(), "sessions");
+}
 
 /** Get the current sessions directory path. */
 export function getSessionsDir(): string {
-  return SESSIONS_DIR;
+  return sessionsDirOverride ?? defaultSessionsDir();
+}
+
+function lastSessionFile(): string {
+  return join(getSessionsDir(), ".last-session");
 }
 
 /** Override the sessions directory (for testing). */
 export function setSessionsDir(dir: string): string {
-  const prev = SESSIONS_DIR;
-  SESSIONS_DIR = dir;
-  LAST_SESSION_FILE = join(dir, ".last-session");
-  migrated = false; // Reset migration flag for new directory
+  const prev = getSessionsDir();
+  sessionsDirOverride = dir;
+  migratedSessionsDir = null;
   return prev;
 }
 
 /** Reset to default sessions directory. */
 export function resetSessionsDir(): void {
-  SESSIONS_DIR = join(homedir(), ".hawky", "sessions");
-  LAST_SESSION_FILE = join(SESSIONS_DIR, ".last-session");
-  migrated = false;
+  sessionsDirOverride = null;
+  migratedSessionsDir = null;
 }
 
 // -----------------------------------------------------------------------------
@@ -168,8 +173,9 @@ export function generateSessionId(): string {
 // -----------------------------------------------------------------------------
 
 function ensureSessionsDir(): void {
-  if (!existsSync(SESSIONS_DIR)) {
-    mkdirSync(SESSIONS_DIR, { recursive: true });
+  const sessionsDir = getSessionsDir();
+  if (!existsSync(sessionsDir)) {
+    mkdirSync(sessionsDir, { recursive: true });
   }
 }
 
@@ -198,7 +204,7 @@ function sessionPathInDir(sessionsDir: string, sessionId: string): string {
 function sessionPath(sessionId: string): string {
   // Ensure legacy files are migrated before any path resolution
   migrateOldSessions();
-  return sessionPathInDir(SESSIONS_DIR, sessionId);
+  return sessionPathInDir(getSessionsDir(), sessionId);
 }
 
 // -----------------------------------------------------------------------------
@@ -538,13 +544,14 @@ export function repairOrphanedToolUses(
 // -----------------------------------------------------------------------------
 
 function migrateOldSessions(): void {
-  if (migrated) return;
-  migrated = true;
+  const sessionsDir = getSessionsDir();
+  if (migratedSessionsDir === sessionsDir) return;
+  migratedSessionsDir = sessionsDir;
 
-  if (!existsSync(SESSIONS_DIR)) return;
+  if (!existsSync(sessionsDir)) return;
   let count = 0;
 
-  for (const file of readdirSync(SESSIONS_DIR)) {
+  for (const file of readdirSync(sessionsDir)) {
     if (!file.startsWith("gw-") || !file.endsWith(".jsonl")) continue;
 
     // Parse: gw-web-general.jsonl → web/general.jsonl
@@ -554,18 +561,18 @@ function migrateOldSessions(): void {
 
     const prefix = stem.slice(0, firstDash);
     const rest = stem.slice(firstDash + 1);
-    const newDir = join(SESSIONS_DIR, prefix);
+    const newDir = join(sessionsDir, prefix);
     const newPath = join(newDir, `${rest}.jsonl`);
 
     if (existsSync(newPath)) {
       // Target already exists — rename old file to .bak (don't delete, may have unique messages)
-      try { renameSync(join(SESSIONS_DIR, file), join(SESSIONS_DIR, `${file}.bak`)); count++; } catch {}
+      try { renameSync(join(sessionsDir, file), join(sessionsDir, `${file}.bak`)); count++; } catch {}
       continue;
     }
 
     try {
       mkdirSync(newDir, { recursive: true });
-      renameSync(join(SESSIONS_DIR, file), newPath);
+      renameSync(join(sessionsDir, file), newPath);
       count++;
     } catch {
       // Skip files we can't move (permissions, etc.)
@@ -597,20 +604,21 @@ function findJsonlFiles(dir: string): Array<{ filePath: string; lastModified: nu
 }
 
 export function listSessions(limit = 20, opts?: { includeArchived?: boolean }): SessionInfo[] {
-  if (!existsSync(SESSIONS_DIR)) return [];
+  const sessionsDir = getSessionsDir();
+  if (!existsSync(sessionsDir)) return [];
 
   // Migrate legacy flat files on first scan
   migrateOldSessions();
 
   const meta = loadSessionMeta();
 
-  const files = findJsonlFiles(SESSIONS_DIR)
+  const files = findJsonlFiles(sessionsDir)
     .sort((a, b) => b.lastModified - a.lastModified);
 
   const results: SessionInfo[] = [];
   for (const { filePath, lastModified } of files) {
     // Derive session ID from path relative to sessions dir (authoritative)
-    const relPath = filePath.slice(SESSIONS_DIR.length + 1); // e.g., "web/general.jsonl"
+    const relPath = filePath.slice(sessionsDir.length + 1); // e.g., "web/general.jsonl"
     const id = relPath.endsWith(".jsonl") ? relPath.slice(0, -6) : relPath;
     let createdAt = "";
     let messageCount = 0;
@@ -690,14 +698,15 @@ export function sessionKeyToId(sessionKey: string): string {
 export function writeLastSession(sessionId: string): void {
   ensureSessionsDir();
   assertSafeSessionId(sessionId);
-  writeFileSync(LAST_SESSION_FILE, sessionId, "utf-8");
+  writeFileSync(lastSessionFile(), sessionId, "utf-8");
 }
 
 /** Read the last-used session ID. Returns null if not found. */
 export function readLastSession(): string | null {
   try {
-    if (!existsSync(LAST_SESSION_FILE)) return null;
-    const id = readFileSync(LAST_SESSION_FILE, "utf-8").trim();
+    const marker = lastSessionFile();
+    if (!existsSync(marker)) return null;
+    const id = readFileSync(marker, "utf-8").trim();
     if (!id) return null;
     // Verify the session file actually exists
     if (!existsSync(sessionPath(id))) return null;
@@ -746,7 +755,7 @@ export interface SessionMetaEntry {
 export type SessionMetaStore = Record<string, SessionMetaEntry>;
 
 function metaPath(): string {
-  return join(SESSIONS_DIR, "meta.json");
+  return join(getSessionsDir(), "meta.json");
 }
 
 /** Load session metadata from meta.json. Returns empty store if missing/corrupt. */
@@ -879,8 +888,9 @@ export function renameSessionStorage(oldKey: string, newKey: string): void {
 
   const oldId = sessionKeyToId(oldKey);
   const newId = sessionKeyToId(newKey);
-  const oldPath = sessionPathInDir(SESSIONS_DIR, oldId);
-  const newPath = sessionPathInDir(SESSIONS_DIR, newId);
+  const sessionsDir = getSessionsDir();
+  const oldPath = sessionPathInDir(sessionsDir, oldId);
+  const newPath = sessionPathInDir(sessionsDir, newId);
 
   if (!existsSync(oldPath)) {
     throw new Error(`session file not found: ${oldPath}`);
@@ -915,9 +925,10 @@ export function renameSessionStorage(oldKey: string, newKey: string): void {
     // its own try so a broken marker does not roll back an otherwise
     // successful rename — the app tolerates a stale marker on startup.
     try {
-      if (existsSync(LAST_SESSION_FILE)) {
-        const current = readFileSync(LAST_SESSION_FILE, "utf-8").trim();
-        if (current === oldId) writeFileSync(LAST_SESSION_FILE, newId, "utf-8");
+      const marker = lastSessionFile();
+      if (existsSync(marker)) {
+        const current = readFileSync(marker, "utf-8").trim();
+        if (current === oldId) writeFileSync(marker, newId, "utf-8");
       }
     } catch {
       // Marker update is best-effort.

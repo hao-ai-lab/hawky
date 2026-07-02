@@ -1,18 +1,24 @@
 // =============================================================================
 // Persistent Input History
 //
-// Stores user input messages to ~/.hawky/history.jsonl so arrow-up
+// Stores user input messages to <hawky config dir>/history.jsonl so arrow-up
 // recalls messages across sessions. JSONL format, one entry per line.
 // Async append (fire-and-forget on submit), sync load on startup.
 // =============================================================================
 
 import { readFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getConfigDir } from "./config.js";
 
-const HISTORY_DIR = join(homedir(), ".hawky");
-const HISTORY_FILE = join(HISTORY_DIR, "history.jsonl");
 const MAX_HISTORY_ENTRIES = 500;
+
+function historyDir(): string {
+  return getConfigDir();
+}
+
+function historyFile(): string {
+  return join(historyDir(), "history.jsonl");
+}
 
 export interface HistoryEntry {
   text: string;
@@ -27,8 +33,9 @@ export interface HistoryEntry {
  */
 export function loadHistorySync(): HistoryEntry[] {
   try {
-    if (!existsSync(HISTORY_FILE)) return [];
-    const content = readFileSync(HISTORY_FILE, "utf-8");
+    const file = historyFile();
+    if (!existsSync(file)) return [];
+    const content = readFileSync(file, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
 
     const entries: HistoryEntry[] = [];
@@ -59,13 +66,13 @@ export function loadHistorySync(): HistoryEntry[] {
  */
 export function appendHistoryEntry(text: string, sessionKey?: string): void {
   try {
-    mkdirSync(HISTORY_DIR, { recursive: true });
+    mkdirSync(historyDir(), { recursive: true });
     const entry: HistoryEntry = {
       text,
       timestamp: Date.now(),
       session: sessionKey,
     };
-    appendFileSync(HISTORY_FILE, JSON.stringify(entry) + "\n", { mode: 0o600 });
+    appendFileSync(historyFile(), JSON.stringify(entry) + "\n", { mode: 0o600 });
   } catch {
     // Silently fail — history is nice-to-have, not critical
   }

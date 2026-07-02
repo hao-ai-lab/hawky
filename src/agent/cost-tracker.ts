@@ -10,8 +10,8 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { TokenUsage } from "./types.js";
+import { getConfigDir } from "../storage/config.js";
 
 // -----------------------------------------------------------------------------
 // Model pricing (per million tokens, USD)
@@ -170,7 +170,7 @@ export class CostTracker {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(usageDir?: string, options?: { periodicFlushMs?: number }) {
-    this.usageDir = usageDir ?? join(homedir(), ".hawky", "usage");
+    this.usageDir = usageDir ?? join(getConfigDir(), "usage");
     if (!existsSync(this.usageDir)) {
       mkdirSync(this.usageDir, { recursive: true });
     }

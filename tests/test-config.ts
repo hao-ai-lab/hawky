@@ -17,6 +17,8 @@ import {
   setConfigDir,
   resetConfigDir,
 } from "../src/storage/config.js";
+import { getSessionsDir, resetSessionsDir } from "../src/storage/session.js";
+import { CostTracker } from "../src/agent/cost-tracker.js";
 import { printGatewayBanner } from "../src/gateway/startup-banner.js";
 import type { HawkyConfig } from "../src/agent/types.js";
 
@@ -285,6 +287,28 @@ describe("HAWKY_HOME env var", () => {
 
     expect(getConfigDir()).toBe(fakeHome);
     expect(config.workspace_dir).toBe(join(fakeHome, "workspace"));
+  });
+
+  test("state defaults follow HAWKY_HOME", () => {
+    const fakeHome = join(tmpdir(), `hawky-home-state-test-${Date.now()}`);
+    process.env.HAWKY_HOME = fakeHome;
+
+    try {
+      resetConfigDir();
+      resetSessionsDir();
+
+      expect(getSessionsDir()).toBe(join(fakeHome, "sessions"));
+
+      const tracker = new CostTracker(undefined, { periodicFlushMs: 0 });
+      tracker.addUsage("claude-sonnet-4-6", { input_tokens: 10, output_tokens: 5 });
+      tracker.persistDaily();
+      tracker.dispose();
+
+      expect(existsSync(join(fakeHome, "usage"))).toBe(true);
+    } finally {
+      resetSessionsDir();
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 
   test("resetConfigDir() falls back to ~/.hawky when HAWKY_HOME is unset", () => {

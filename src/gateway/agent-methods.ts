@@ -22,7 +22,6 @@ import { MethodError } from "./methods.js";
 import { resolveWsPermission, getPendingPermissionForSession } from "./ws-permission.js";
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { resolveAskUser, getPendingAskUserForSession } from "../tools/ask_user.js";
 import type { PermissionDecision } from "../agent/tool_executor.js";
 import type { HawkyConfig } from "../agent/types.js";
@@ -48,7 +47,7 @@ import {
 } from "../agent/compaction.js";
 import type { PushService, PushSubscriptionJSON } from "./push.js";
 import { WorkspaceManager, WORKSPACE_FILES } from "../storage/workspace.js";
-import { updateSessionMeta, loadSessionMeta, persistLastTurnUsage, sessionKeyToId } from "../storage/session.js";
+import { updateSessionMeta, loadSessionMeta, persistLastTurnUsage, sessionKeyToId, getSessionsDir } from "../storage/session.js";
 import { loadConfig } from "../storage/config.js";
 import { peekTaskStore } from "../tools/task_global.js";
 import type { CronStore } from "./cron-store.js";
@@ -1808,7 +1807,7 @@ export function registerAgentMethods(
 
     // Check on disk by deterministic file path (folder-based)
     const sessionId = sessionKey.replace(":", "/").replace(/[^a-zA-Z0-9_/.-]/g, "-");
-    const sessionsDir = join(homedir(), ".hawky", "sessions");
+    const sessionsDir = getSessionsDir();
     const filePath = join(sessionsDir, `${sessionId}.jsonl`);
     return { exists: existsSync(filePath), sessionKey };
   });

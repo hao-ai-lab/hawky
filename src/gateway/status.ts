@@ -8,7 +8,6 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { GatewayServer } from "./server.js";
 import type { HeartbeatService } from "./heartbeat.js";
 import type { CronService } from "./cron.js";
@@ -16,6 +15,7 @@ import type { AgentSessionManager } from "./agent-sessions.js";
 import type { NodeRegistry } from "./node-registry.js";
 import { getCostTracker, type DailyUsage } from "../agent/cost-tracker.js";
 import { getRecentErrors, type ErrorEntry } from "../logging/error-buffer.js";
+import { getConfigDir } from "../storage/config.js";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -197,12 +197,12 @@ export interface UsageHistoryResponse {
   };
 }
 
-/** Load usage history for a given range. Reads from ~/.hawky/usage/*.json. */
+/** Load usage history for a given range. Reads from <hawky config dir>/usage/*.json. */
 export function loadUsageHistory(
   range: "7d" | "30d" | "all",
   usageDir?: string,
 ): UsageHistoryResponse {
-  const dir = usageDir ?? join(homedir(), ".hawky", "usage");
+  const dir = usageDir ?? join(getConfigDir(), "usage");
   if (!existsSync(dir)) {
     return emptyHistory(range);
   }
