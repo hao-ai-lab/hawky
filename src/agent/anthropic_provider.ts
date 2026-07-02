@@ -23,7 +23,6 @@ import type {
   LLMStreamRequest,
   LLMStreamEvent,
   LLMCountTokensRequest,
-  LLMErrorCode,
 } from "./provider.js";
 import { LLMError } from "./provider.js";
 import { createSubsystemLogger } from "../logging/index.js";
