@@ -145,7 +145,7 @@ describe("memory.append tool", () => {
     expect(JSON.parse(lines[2]).text).toBe("three");
   });
 
-  test("ts_iso override is respected", async () => {
+  test("ts_iso override is respected and selects the matching daily file", async () => {
     const pinned = "2026-04-01T12:34:56.000Z";
     await executeMemoryAppend(
       { category: "daily-log", text: "backdated", ts_iso: pinned },
@@ -156,9 +156,27 @@ describe("memory.append tool", () => {
       workspaceDir,
       "memory",
       "daily-log",
-      `${todayIso()}.jsonl`,
+      "2026-04-01.jsonl",
     );
     const line = readFileSync(file, "utf-8").split("\n").filter(Boolean)[0];
     expect(JSON.parse(line).ts_iso).toBe(pinned);
+  });
+
+  test("invalid ts_iso falls back to a parseable current timestamp and today's file", async () => {
+    await executeMemoryAppend(
+      { category: "daily-log", text: "bad timestamp", ts_iso: "not-a-date" },
+      makeCtx(),
+    );
+
+    const file = join(
+      workspaceDir,
+      "memory",
+      "daily-log",
+      `${todayIso()}.jsonl`,
+    );
+    const line = readFileSync(file, "utf-8").split("\n").filter(Boolean)[0];
+    const entry = JSON.parse(line);
+    expect(entry.ts_iso).not.toBe("not-a-date");
+    expect(Number.isFinite(new Date(entry.ts_iso).getTime())).toBe(true);
   });
 });

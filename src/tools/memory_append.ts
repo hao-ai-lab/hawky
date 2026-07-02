@@ -40,13 +40,24 @@ interface MemoryAppendInput {
 
 const CATEGORY_RE = /^[a-zA-Z0-9_\-]+$/;
 
-function todayIso(): string {
+function localDateIso(date: Date): string {
   // Local-date YYYY-MM-DD — matches the daily-log convention in context.ts.
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+function resolveEntryTimestamp(tsIso: unknown): { tsIso: string; fileDate: string } {
+  const candidate = typeof tsIso === "string" ? tsIso.trim() : "";
+  const date = candidate ? new Date(candidate) : new Date();
+
+  if (Number.isFinite(date.getTime())) {
+    return { tsIso: candidate || date.toISOString(), fileDate: localDateIso(date) };
+  }
+
+  const now = new Date();
+  return { tsIso: now.toISOString(), fileDate: localDateIso(now) };
 }
 
 export async function executeMemoryAppend(
@@ -55,10 +66,7 @@ export async function executeMemoryAppend(
 ): Promise<ToolResult> {
   const category = typeof input.category === "string" ? input.category.trim() : "";
   const text = typeof input.text === "string" ? input.text : "";
-  const tsIso =
-    typeof input.ts_iso === "string" && input.ts_iso.trim()
-      ? input.ts_iso.trim()
-      : new Date().toISOString();
+  const { tsIso, fileDate } = resolveEntryTimestamp(input.ts_iso);
 
   if (!category) {
     return { type: "error", content: "Missing required parameter: category" };
@@ -79,7 +87,7 @@ export async function executeMemoryAppend(
     const ws = new WorkspaceManager();
     const memRoot = ws.getMemoryDir();
     const categoryDir = join(memRoot, category);
-    const fname = `${todayIso()}.jsonl`;
+    const fname = `${fileDate}.jsonl`;
     const filePath = join(categoryDir, fname);
 
     if (!existsSync(dirname(filePath))) {
