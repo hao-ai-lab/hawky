@@ -14,6 +14,10 @@ import WidgetKit
 /// Stream with: log stream --predicate 'subsystem == "live.hawky" && category == "AmbientWhere"'
 private let ambientWhereLog = Logger(subsystem: "live.hawky", category: "AmbientWhere")
 
+enum SafetyCheckCopy {
+    static let enabledMessage = "Safety Check on — watching for hazards."
+}
+
 /// Why a Live session can't be started right now. Surfaced to the UI so a tap
 /// on the (no-longer-disabled) start button can explain the blocker instead of
 /// silently doing nothing. Reading it is non-destructive — it never touches
@@ -785,9 +789,7 @@ final class LiveSessionStore {
         // do NOT call setVisualQuietMode(true) here — that forced manual response.create
         // and added a 6-8s round-trip per reply.
         await provider.setHardQuiet(true)
-        // Build stamp so we can confirm from the log which binary is actually running
-        // (stale-binary confusion has cost several test cycles).
-        appendSystemMessage("Safety Check on — watching for hazards. [build: safety-v18]", eventType: "safety.on")
+        appendSystemMessage(SafetyCheckCopy.enabledMessage, eventType: "safety.on")
     }
 
     private func teardownSafety() {
