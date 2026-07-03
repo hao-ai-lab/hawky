@@ -1,3 +1,644 @@
+# Technical Debt Remediation Plan
+
+Date: 2026-07-03.
+
+## Context
+
+This plan is distilled from `docs/strategy-2026-07.md`, a whole-repo audit produced
+by a 30-agent workflow (seven subsystem auditors reading the code, four market
+researchers, four adversarial critics, then a verification pass that fact-checked
+every high/critical claim back against the source — 12 confirmed, 2 refuted or
+downgraded). What follows is only the engineering half of that audit: sections §8
+(technical debt) and §9 (the rewrite candidates). Distribution, release, licensing,
+and marketing items are deliberately excluded — this is a builder's backlog.
+
+The audit's one-line verdict frames everything below: **hawky is an excellent agent
+runtime wearing an ambient-agent costume; the core (agent loop, safe-bash parser,
+hybrid memory retrieval, test discipline) is staff-level, but the shell and the
+seams have fallen behind it.** Concretely, the debt clusters into three shapes:
+
+1. **God modules fighting themselves.** Three files have grown past the point where
+   they can be unit-tested — `tool_executor.ts` (1,467 lines), web `session-store.ts`
+   (2,793 lines), and iOS `LiveSessionStore.swift` (4,905 lines / 251 methods). Each
+   is now a single point of failure that every new feature is poured into.
+2. **Abstractions that lie.** `McpServerManager` advertises reconnect-on-crash and
+   health monitoring in its header comment while implementing neither;
+   `ReconnectingTransport.swift` only ever retries the *initial* connection; the
+   ambient delivery layer wraps three layers of abstraction around a single boolean
+   that is dead in every production path.
+3. **Inverted risk.** The latent-intention engine mints intentions with an LLM but
+   destroys them with a stop-word-grade regex (`the` / `for` / `got` all count as
+   topics), so a real user need can be suppressed forever.
+
+The good news the audit is equally emphatic about: of the ~17 weaknesses it found,
+13 are pure execution measured in days-to-weeks. There is no unfixable disease here,
+only an unscheduled queue. This document is that queue, ordered.
+
+Task IDs (`#N`) map to the live task tracker for this effort. Every claim carries a
+`file:line` citation; the full evidence chain lives in `docs/strategy-2026-07.md`.
+
+## P0 — Actively causing wrong behavior
+
+These are not latent risks; they are shipping bugs or data-loss paths today. They
+are also mostly independent of one another and day-sized, so they can be parallelized
+and should be cleared before anything larger starts.
+
+### #9 — Fix the dead file watchers
+
+**Problem.** chokidar v5 removed glob support, but `skills/watcher.ts:61,65` and
+`memory/index.ts:762` still pass it literal glob strings (e.g. a path containing `*`)
+that now match nothing. The watcher registers, reports success, and then never fires.
+
+**Blast radius.** Skills hot-reload is silently dead — editing a skill on disk has no
+effect until a full restart — and edits to root `.md` files never trigger a memory
+reindex, so the memory index quietly goes stale against the files it claims to mirror.
+Both failures are invisible: nothing logs, nothing errors.
+
+**Why it regressed unnoticed.** There is zero test coverage over the *real* watcher;
+the existing tests exercise the reindex function directly and never assert that a
+filesystem change actually drives it.
+
+**Fix.**
+1. Watch the containing directory (non-glob) and apply a filename filter in the event
+   handler, replacing every glob pattern handed to chokidar.
+2. Audit for any other glob-to-chokidar call sites.
+3. Add an integration test that writes a real file and asserts the watcher fires and
+   the index/skill set updates.
+
+**Effort:** ~2–3 days. **Dependencies:** none.
+
+### #10 — Fix the `HAWKY_HOME` split-brain
+
+**Problem.** Seven modules hard-code `~/.hawky` (`session.ts:70`, `workspace.ts:26`,
+`skills/loader.ts:35`, `input-history.ts:13`, and three more) instead of deriving from
+the single configured root. Commit `dc5c222` fixed roughly half of them and is not on
+HEAD.
+
+**Blast radius.** When `HAWKY_HOME` (or the config root) is overridden — tests, CI,
+multi-instance setups, or a user relocating state — some subsystems read/write the
+override while others read/write `~/.hawky`. State lands in two homes: sessions in one,
+skills or input-history in another, with no error to signal the divergence.
+
+**Fix.**
+1. Route every path through one `configRoot()`/`hawkyHome()` helper.
+2. Replace all seven hard-coded literals; land the unshipped half of `dc5c222` in the
+   same pass.
+3. Add a test that sets an override and asserts no module touches `~/.hawky`.
+
+**Effort:** ~2 days. **Dependencies:** none (self-contained, but touches many files —
+do it early to avoid conflicts with later work).
+
+### #11 — Fix the setTimeout overflow and the regex satisfaction sweep
+
+Two independent reminder-engine bugs bundled because they share the `when`/latent path.
+
+**Problem A — timer overflow.** `when-cron.ts:40-49` passes a delay larger than the
+32-bit `setTimeout` ceiling (~24.8 days), which wraps to a tiny/negative value, so any
+reminder scheduled more than ~24.8 days out fires *immediately* instead of on time.
+
+**Problem B — irreversible false deletion.** `latent-service.ts:286-315` decides an
+intention is "satisfied" using a stop-word-grade regex in which tokens like `the`,
+`for`, and `got` count as topic matches. A genuine, still-pending reminder can be
+matched and permanently deleted — there is no backup and no undo.
+
+**Fix.**
+1. Chunk long timers: cap each `setTimeout` at a safe interval and re-arm until the
+   real due time (or move to the scheduling library adopted in #30).
+2. Fold satisfaction detection into the per-tick LLM call that already runs, and demote
+   the regex to a cheap candidate pre-filter — or delete it. Never let the regex be the
+   sole authority for deletion.
+3. Add tests for a >25-day reminder and for a satisfaction check that must *not* delete
+   a live intention.
+
+**Effort:** days (A) to ~1 week (B). **Dependencies:** related to #30.
+
+### #12 — Fix `MemoryIndex.sync()`
+
+**Problem.** `index.ts:146-181` awaits a network embedding call *inside* an open SQLite
+write transaction, with no mutex guarding concurrent syncs.
+
+**Blast radius.** Under the gateway's four-way concurrency, overlapping syncs contend
+on the write transaction while one is blocked on the network; the transaction stalls
+and the memory layer silently degrades to its grep fallback — retrieval quality drops
+with no visible error.
+
+**Fix.**
+1. Compute all embeddings *before* opening the transaction; keep the transaction purely
+   local and short.
+2. Serialize `sync()` behind a mutex/queue so concurrent callers coalesce rather than
+   collide.
+3. Add a concurrency test that fires overlapping syncs and asserts no transaction stall
+   and no grep fallback.
+
+**Effort:** ~2–4 days. **Dependencies:** none; touches the same subsystem as #25.
+
+### #13 — Fix the global `process.env` leak in skill env injection
+
+**Problem.** `skills/env.ts:50-93` mutates the shared global `process.env` to inject a
+skill's environment before running it.
+
+**Blast radius.** Two skills running concurrently see each other's injected variables —
+including secrets/API keys — and a skill that sets a variable can leave it set for
+unrelated later code. This is a real secret-crossing bug, not a style issue.
+
+**Fix.**
+1. Build a per-run env object and pass it as the `env` option to `Bun.spawn`; never
+   mutate the global.
+2. Audit for any other global-env mutation on the skill path.
+3. Add a test that runs two skills concurrently and asserts neither sees the other's
+   variables.
+
+**Effort:** ~1–2 days. **Dependencies:** none.
+
+### #14 — Stop the destructive `MEMORY.md` consolidation
+
+**Problem.** Every six hours the global consolidation truncates `MEMORY.md` to 16k,
+feeds it to a 2048-token Haiku rewrite, and overwrites the file unconditionally with no
+backup (`distill.ts:252,288,302`). Separately, daily distillation summarizes the
+*start* of a long session rather than the end, so the most recent — usually most
+relevant — context is the part that gets dropped.
+
+**Blast radius.** User memory is silently and irreversibly lossy: facts past the 16k cut
+or dropped by the small rewrite model are gone with no recovery path. For a product
+whose differentiator is persistent memory, this is a credibility-critical data-loss bug.
+
+**Fix.**
+1. Never overwrite unconditionally: write a timestamped backup before each
+   consolidation and keep a bounded history.
+2. Change the rewrite from replace to merge/append, with an explicit fact-retention
+   check that fails closed (keep the old file if retention can't be verified).
+3. Fix daily distillation to summarize the tail of the session.
+4. Add a test asserting that a fact present before consolidation survives it.
+
+**Effort:** ~1–2 weeks. **Dependencies:** none.
+
+## Security & trust debt (pre-launch)
+
+Real code fixes on the trust boundary — the parts a security-minded reader (and, for
+an always-listening agent, that reader will show up on day one) audits first. None of
+these is a broad architectural rewrite; they are targeted, and they are the difference
+between a credible launch and a bad first headline.
+
+### #5 — Constrain headless permissions
+
+**Problem.** Headless lanes (cron, heartbeat, sub-agents) auto-approve `write_file` /
+`edit_file` to arbitrary paths when no interactive resolver is present
+(`tool_executor.ts:1337-1363`): the safe-allowlist check failing only sets
+`needsPermission`, which then falls through to the auto-approve path.
+
+**Accuracy note (from the verification pass).** The original critique framed this as
+"the autonomous path only has a 17-regex denylist" and rated it critical; verification
+downgraded that. In reality bash and curl already sit behind a fail-closed *allowlist*,
+with a dangerous-floor override that beats even explicit user allow-rules, config-deny
+precedence, and headless denial of `ask` rules — so constructs like `find -delete` and
+`xargs rm` are *not* auto-approved, and curl is restricted to GET / no-upload /
+Slack-read endpoints. What remains genuinely wrong is narrower but real: arbitrary-path
+file writes/edits on a lane that runs unattended, all day.
+
+**Fix.**
+1. Give headless the same fail-closed allowlist discipline as interactive mode for
+   `write_file`/`edit_file` — no silent fall-through to auto-approve.
+2. Add per-lane capability grants: a heartbeat can only write inside `workspace_dir`;
+   broader scopes require explicit configuration.
+3. The clean long-term home for this is the #34 policy-pipeline rewrite — this task is
+   the tactical stopgap that ships first.
+
+**Effort:** ~1–2 weeks. **Dependencies:** superseded (not blocked) by #34.
+
+### #6 — Remove the global ATS opt-out and the plaintext API key on iOS
+
+**Problem.** The shipped iOS app disables App Transport Security globally
+(`project.yml:70`, `NSAllowsArbitraryLoads`), and a demo store persists an API key in
+plaintext `UserDefaults`.
+
+**Blast radius.** The global ATS opt-out weakens transport security app-wide (not just
+for the local-network case it was presumably meant for) and is a flag App Review
+scrutinizes; the plaintext key is readable by anything with file access to the app
+container and is exactly what a first-day code audit greps for. Both are also
+reputational: they read as carelessness on a product asking users to trust it with
+audio and video.
+
+**Fix.**
+1. Replace the global opt-out with `NSAllowsLocalNetworking` (or a scoped exception
+   domain) covering only the actual gateway/local-network need.
+2. Move the API key to Keychain, or remove the demo store from the release target
+   entirely (see #28, which evicts the demo/lab stores).
+
+**Effort:** ~2–3 days. **Dependencies:** overlaps #28.
+
+### #7 — Make face recognition opt-in and stop auto-enrolling strangers
+
+**Problem.** Cocktail-party recognition auto-enrolls non-consented bystanders as
+"Unknown" (`CocktailPartyRecognizer.swift:210-220`), and the deepface sidecar grows a
+person's embedding on a *read* path whenever it confirms a match
+(`app.py:287-294`, capped at 12 entries). So merely being near the device builds a
+biometric record of you.
+
+**Accuracy note.** This is *face* recognition, not voiceprint — the repo contains no
+voiceprint code, so the voiceprint-specific legal theories don't apply. The consent gap
+itself is fully real: it lands squarely in BIPA face-geometry theory and GDPR Art. 9
+special-category data, across the ~23 US states with biometric statutes.
+
+**Blast radius.** This is the single highest legal-risk item in the whole audit, and it
+directly undercuts the "privacy is our moat" positioning: the product currently does the
+exact thing that positioning promises it won't.
+
+**Fix (stopgap now; full consent engine is a separate later effort).**
+1. Default face recognition OFF.
+2. Remove the Unknown auto-enroll path entirely; unknown faces are anonymized, never
+   stored as biometric records.
+3. Make `/identify` read-only — move embedding growth out of the read/confirm path to
+   an explicit, consented enrollment action.
+4. Add a per-person delete path (today only a whole-DB `/clear` exists).
+
+**Effort:** stopgap ~days; full consent engine ~weeks–months (tracked separately).
+**Dependencies:** precursor to the Phase-1 consent engine in `strategy-2026-07.md`.
+
+## P1 — Duplication paying a daily multiplication tax
+
+Not broken today, but every fix has to be made three or four times, and drift has
+already shipped bugs. These are the highest-leverage cleanups: two of them (#15, #16)
+also unblock the big rewrites (#27, #31).
+
+### #15 — Extract one shared stream-event state machine
+
+**Problem.** The stream-event state machine exists in three cross-client copies (TUI
+hook, web `session-store`, iOS `ChatEvent.swift`) plus three more inside web itself
+(active / background / parseHistory).
+
+**Blast radius.** Every fix has to be applied four times; drift between the copies has
+already shipped bugs. This is the textbook "multiplication tax" — the cost of every
+change is multiplied by the number of copies.
+
+**Fix.**
+1. Define one framework-agnostic shared reducer/state slice as the single source of
+   truth.
+2. Bind each client to it and delete the duplicate implementations.
+3. Add tests covering the state transitions in the shared machine.
+
+**Effort:** ~1–2 weeks. **Dependencies:** none; prerequisite for #27.
+
+### #16 — Collapse the four byte-identical lib files and fix the socket-store drift
+
+**Problem.** `ws-client`, `byok`, `client-id`, and `media` are byte-for-byte identical
+between `web` and `web-ios`, and the socket-store has already drifted (inconsistent
+token clearing).
+
+**Blast radius.** Every lib fix must be copied to both trees, and the two copies are
+already diverging — one such divergence shipped a bug.
+
+**Fix.**
+1. Move the four files into a single shared package (Bun workspace).
+2. Fix the socket-store token-clearing inconsistency and unify the behavior.
+3. Add tests that lock down the shared behavior.
+
+**Effort:** ~1–2 weeks. **Dependencies:** none; prerequisite for #31.
+
+### #17 — Fix the lossy MCP tool-bridge schema conversion
+
+**Problem.** `tool-bridge.ts:53-64` rebuilds tool schemas and, in doing so, drops
+`items`, nested objects, and `anyOf`.
+
+**Blast radius.** Any MCP tool with array/nested/union types is corrupted and may
+behave wrongly or fail to be called correctly, limiting how much of the MCP ecosystem
+is actually usable through hawky.
+
+**Fix.**
+1. Pass the original JSON Schema through untouched instead of reconstructing it.
+2. Add a test asserting a schema with `items`/nested/`anyOf` survives the bridge intact.
+
+**Effort:** ~2–3 days. **Dependencies:** none.
+
+### #18 — Rewrite `McpServerManager`
+
+**Problem.** Its header comment promises reconnect-on-crash and health monitoring;
+neither exists. When a stdio server dies, every bridged tool fails until the gateway
+restarts, while `getAllStates()` still reports `connected`. It also supports only the
+deprecated SSE transport, with no streamable-HTTP. This is an abstraction that lies.
+
+**Blast radius.** MCP servers silently stop working after a crash, with a misreported
+state that makes it hard to diagnose; and servers that only offer streamable-HTTP
+can't be connected at all.
+
+**Fix.**
+1. Implement real reconnect (crash detection + backoff).
+2. Implement real health monitoring so `getAllStates()` reflects reality.
+3. Add a streamable-HTTP transport.
+4. Add crash/reconnect integration tests.
+
+**Effort:** ~1–2 weeks. **Dependencies:** none.
+
+### #19 — Consolidate the scattered duplicate helpers
+
+**Problem.** `classifyError` (~70 lines duplicated across the Anthropic and OpenAI
+providers), session-key conversion (×3), `formatDate` (×2), tool-preview formatting
+(×4), and the slash-command system (×2).
+
+**Blast radius.** Each has to be kept in sync by hand and tends to diverge into
+inconsistent behavior. Low-risk, high-clarity — the ideal batch for new contributors.
+
+**Fix.**
+1. Extract each into a single shared implementation and replace all call sites.
+2. Add tests covering the merged behavior.
+3. Split into several small independent PRs to parallelize / hand to outside
+   contributors.
+
+**Effort:** ~1 week (splits into several 0.5–1 day items). **Dependencies:** none.
+
+## P2 / P3 — Dead code and quality infrastructure
+
+Lower urgency, but this is where the project's long-term health and contributor
+experience live — no linter, flaky tests hidden behind retries, and dead code that
+misleads every reader.
+
+### #20 — Collapse provider quirks into a `ProviderCapabilities` descriptor
+
+**Problem.** The OpenAI provider sends `max_tokens` where newer models require
+`max_completion_tokens`, has no reasoning support, and counts tokens as `chars/4`; a
+document block makes any PDF-bearing session fail permanently after a provider switch.
+
+**Blast radius.** New OpenAI models get the wrong parameter, reasoning is unavailable,
+token accounting is inaccurate, and switching providers breaks any PDF-bearing session.
+
+**Fix.**
+1. Define a `ProviderCapabilities` descriptor (max-tokens field name, reasoning
+   support, token-counting strategy, document-block support, …).
+2. Have each provider declare its capabilities; call sites branch on the descriptor
+   instead of inline patches.
+3. Add tests for provider switching and PDF-bearing sessions.
+
+**Effort:** ~1 week. **Dependencies:** related to #21.
+
+### #21 — Establish one source of truth for the model registry
+
+**Problem.** Three registries (`context-window`, `openai-models`, `cost-tracker`) are
+maintained separately and drift.
+
+**Blast radius.** Context window, available-model list, and cost data can contradict
+each other, causing pricing / truncation / model-selection errors.
+
+**Fix.**
+1. Design one registry (context window, cost, provider, capability flags).
+2. Point all three consumers at it.
+3. Add a test ensuring a new model only needs to be added in one place.
+
+**Effort:** ~3–5 days. **Dependencies:** related to #20.
+
+### #22 — Delete dead code and empty stubs
+
+**Problem.** The iOS `OpenAIRealtimeLiveSessionProvider` (~830 lines) plus its dead
+hook wiring, and four empty stubs (`prepaint.ts`, `staticBaseline`, `decideDelivery`,
+`transcript-relay.ts`, `src/services/`).
+
+**Blast radius.** Dead providers and empty stubs mislead readers into thinking
+functionality exists, add search noise, and carry maintenance weight.
+
+**Fix.**
+1. Confirm no live references, then delete the dead provider and its wiring.
+2. Delete or explicitly mark the four empty stubs.
+3. Run the full test suite and a build to confirm no dangling references. (The
+   ~5,000-line iOS demo/lab stores are handled separately under #28.)
+
+**Effort:** ~2–4 days. **Dependencies:** overlaps #28 and #29 (`decideDelivery` belongs
+to the delivery layer).
+
+### #23 — Add lint/format and a real CI matrix
+
+**Problem.** 64k LOC of TypeScript, 41.5k of Swift, and the Python sidecar have no
+linter or formatter at all. CI also does not actually run the iOS, web-ios, or pytest
+suites — they gate nothing today.
+
+**Blast radius.** Style and low-level errors are never caught automatically, and
+iOS/web-ios/python regressions can merge without CI stopping them.
+
+**Fix.**
+1. Introduce biome (TS) + ruff (Python) + SwiftLint, report-only first, then blocking.
+2. Add a CI job matrix: core / web / web-ios / python sidecar / iOS (macOS runner
+   running `xcodegen && xcodebuild test`).
+3. Pin the bun version and use `--frozen-lockfile`.
+
+**Effort:** ~3–5 days. **Dependencies:** pair with #24 so the new CI jobs aren't
+permanently red.
+
+### #24 — Kill the flaky tests and the `--retry` mask
+
+**Problem.** ~20 `Bun.sleep(10)` race tests and `Math.random()` port selection are
+currently hidden behind `--retry=2`. Meta-tests use string-grep
+(`test-release-packaging.ts`) rather than real behavior.
+
+**Blast radius.** `--retry` lets real races pass intermittently and masks bugs;
+string-grep meta-tests give false confidence.
+
+**Fix.**
+1. Replace `Bun.sleep` with deterministic waits (event / polled condition).
+2. Reserve or dynamically acquire ports to avoid collisions.
+3. Remove `--retry=2`.
+4. Replace `test-release-packaging` string-grep with a real `npm pack --dry-run`.
+
+**Effort:** ~3–5 days. **Dependencies:** best done with #23 so the new CI is stable.
+
+### #25 — Pay down the retrieval/memory performance debt
+
+**Problem.** Embeddings stored as JSON text force an O(corpus) parse; FTS uses strict
+AND with no stemming and is broken for CJK; `listSessions` is O(all bytes); the
+deepface sidecar rewrites its entire JSON store and scans O(N×M).
+
+**Blast radius.** As the corpus / sessions / face DB grow, latency rises linearly or
+worse; CJK users get poor retrieval quality.
+
+**Fix.**
+1. Store embeddings in a binary/columnar form to avoid full parses (sqlite-vec is
+   blocked by `bun:sqlite`, so gate that behind the Bun-isolation work).
+2. Add stemming to FTS, fix CJK tokenization, relax the strict AND.
+3. Make `listSessions` index/paginate instead of reading all bytes.
+4. Change the deepface sidecar to incremental writes + indexed lookup. Splits into
+   several independent sub-items.
+
+**Effort:** ~2 weeks+ (staged). **Dependencies:** sqlite-vec portion depends on Bun API
+isolation; same subsystem as #12.
+
+## 🔨 Major overhauls (rewrite candidates, high effort)
+
+Section §9 of the audit argues these are past the point of patching. Kept as
+separate, explicitly high-effort items (weeks-to-a-month each) so they don't masquerade
+as quick fixes. Sequence them after the P0/P1 work — several are unblocked by the P1
+extractions above.
+
+### #34 — Rewrite `tool_executor.ts` into an ordered policy pipeline
+
+**Problem.** 1,467 lines holding the permission cache, pattern rules, static allowlist,
+curl/find analyzers, path containment, mode logic, and a three-stage executor — with
+the final approval decision emerging from five entangled booleans and two near-identical
+headless floors. The file is thick with `Codex round 2/7/8/9/12 P1/P2` comments: it
+wasn't designed, it was beaten into shape by twelve rounds of adversarial review.
+
+**Blast radius.** Every change to permission behavior is high-risk, effectively only
+e2e-testable, and prone to regression; the headless trust-boundary problem (#5) lives
+here.
+
+**Fix.**
+1. One ordered policy pipeline — deny > ask > explicit-allow > safe-static > prompt —
+   returning a single typed decision.
+2. Split the command policy (bash/curl/find analyzers) into its own module.
+3. Run headless through the same pipeline plus per-lane grants (this is the root fix
+   that #5 stopgaps).
+4. Unit-test each policy branch, removing the reliance on e2e.
+
+**Effort:** ~weeks to a month. **Dependencies:** absorbs #5 (sequential, not blocking).
+§9 overhaul.
+
+### #27 — Rewrite web `session-store.ts` into a per-session reducer
+
+**Problem.** 2,793 lines in which module-level mutable globals (labeled "Legacy
+aliases") coexist with a per-session Map, and `switchSession` copies data between them
+by hand — miss one copy and you get cross-session stream contamination. Two ~350-line
+active/background state machines have already drifted and shipped a bug; the tool-status
+reclassifier is on its third generation of rules, each broken in its own way. The file
+is fighting itself.
+
+**Blast radius.** The session-switch data contamination is a hard-to-reproduce,
+high-severity bug class; every change has to reckon with both the globals and the
+per-session state.
+
+**Fix.**
+1. Move to a per-session state slice behind a single reducer; `active` is just a
+   pointer; delete the module-level globals.
+2. Move parsing/formatting out of the store.
+3. Collapse the three generations of tool-status rules into one.
+4. Add a test proving session switching does not contaminate.
+
+**Effort:** ~weeks. **Dependencies:** blocked by #15 (extract the shared stream-event
+machine first). §9 overhaul.
+
+### #28 — Break up iOS `LiveSessionStore.swift` and evict the demo/lab stores
+
+**Problem.** A 4,905-line, 251-method god object owning fifteen unrelated concerns
+(phase machine, transcript, Live Activity, widget, CoreLocation, cocktail party,
+recording, interruption recovery, persistence) — the core state machine is effectively
+only e2e-testable, and every new feature is poured in here. Separately, ~5,000 lines of
+demo/lab stores (duplicated mic-pump logic, plaintext keys, `asyncAfter` timing hacks)
+appear in the production app's Settings/tabs.
+
+**Blast radius.** The single point of failure for the iOS app: high change risk, hard
+to test; and experimental code (including plaintext keys) ships to users.
+
+**Fix.**
+1. Split into session-lifecycle, transcript store, diagnostics, an ambient/region
+   coordinator, and an activity coordinator.
+2. In the same pass, evict the demo/lab stores from the production target (dev-only
+   target or deleted).
+3. Add unit tests for each extracted concern.
+
+**Effort:** ~weeks to a month. **Dependencies:** relates to #6 (plaintext key) and #33
+(transport). §9 overhaul.
+
+### #29 — Implement or delete the ambient delivery layer
+
+**Problem.** In `delivery.ts` / `delivery-gate.ts` / `modes.ts`: `decideDelivery` is
+dead code, `scoreDelivery` is a constant stub, the only meaningful branch (directive) is
+unreachable in every production path (`intention-service.ts:194` passes
+`scoreCtx: undefined`), and three modes collapse to one boolean. Three layers of
+abstraction around a boolean are worse than the boolean — this is architecture theater.
+
+**Blast radius.** The delivery-mode differentiation (proactive delivery strategy) is
+currently fake; maintainers are misled into thinking a capability layer exists. It
+directly bears on the product differentiator (latent-engine maturity).
+
+**Fix (pick one — no middle state allowed).**
+- (A) Wire `ScoreContext` through `IntentionService`/`LatentService` so mode/context
+  genuinely affect delivery; or
+- (B) Delete the `delivery-gate`/`modes` layers and keep one honest boolean.
+- Decide first whether ambient v2 needs mode semantics.
+
+**Effort:** ~1–2 weeks (the delete path is shorter). **Dependencies:** related to #30
+and the ambient-v2 plan in `strategy-2026-07.md`. §9 overhaul.
+
+### #30 — Replace the latent-recognizer regex and the hand-rolled time parser
+
+**Problem A.** The latent recognizer mints intentions with an LLM but destroys them
+with a stop-word-grade regex (the satisfaction sweep) — risk inverted, with the fragile
+side holding the irreversible delete power (see #11).
+
+**Problem B.** `when-resolver.ts` is 308 lines of hand-rolled bilingual time regex with
+a known DST day-roll bug, no support for noon/tonight/in-2-days, feeding a scheduler
+that overflows (#11), and no recurrence. The realtime model can already emit ISO — there
+is no payoff to hand-rolling this.
+
+**Blast radius.** Genuine needs get falsely deleted; natural-language time parsing is
+unreliable and there is no recurring-reminder support.
+
+**Fix.**
+1. Fold satisfaction into the per-tick model call that already runs; demote the regex to
+   a candidate filter or delete it.
+2. Tighten the tool contract to ISO-or-clarify, or adopt a recurrence library (which
+   also resolves #11's overflow and missing recurrence).
+3. Add tests for time parsing and for satisfaction.
+
+**Effort:** ~1–2 weeks. **Dependencies:** related to #11 and #29. §9 overhaul.
+
+### #31 — Fold web-ios into web/ behind a platform flag
+
+**Problem.** Four byte-identical lib files, 90% dependency overlap, two `bun.lock`s, two
+`node_modules` — it is a responsive style variant, not a separate product.
+
+**Blast radius.** Every web change has to be made twice and the dependency trees drift
+independently — one of the largest sources of the multiplication tax.
+
+**Fix.**
+1. Fold web-ios into web/ behind a platform flag (or build target / CSS variant) for the
+   iOS flavor.
+2. Remove the duplicate lockfile and `node_modules`.
+3. Verify the critical paths (realtime, chat) work in both flavors.
+
+**Effort:** ~1–2 weeks. **Dependencies:** blocked by #16 (collapse the four shared libs
+first). §9 overhaul.
+
+### #32 — Replace the hand-rolled `frontmatter.ts` YAML parser
+
+**Problem.** It forces a "JSON-string-in-YAML metadata" convention only its own parser
+understands, breaks on CRLF, and forecloses compatibility with the standard Agent-Skills
+`SKILL.md` format — self-defeating when the skills ecosystem is the growth engine.
+
+**Blast radius.** Outside authors can't write skills with standard tooling/format; CRLF
+files corrupt; ecosystem growth is throttled.
+
+**Fix.**
+1. Parse frontmatter with a standard YAML library.
+2. Support the standard `SKILL.md` format (drop the JSON-in-YAML convention; provide a
+   migration).
+3. Fix CRLF handling.
+4. Add regression tests over existing skills plus a standard-`SKILL.md` example.
+
+**Effort:** ~1 week. **Dependencies:** none; prerequisite for the skills-ecosystem plan
+in `strategy-2026-07.md`. §9 overhaul.
+
+### #33 — Fix `ReconnectingTransport.swift` so it actually reconnects
+
+**Problem.** Despite the name it only retries the initial connection; when the socket
+dies mid-stream the pump exits silently and reconnection is pushed onto every caller
+(NodeRunner even reimplements its own backoff). This guards the app's most important
+link.
+
+**Blast radius.** Mid-stream disconnects fail silently, recovery behavior is scattered
+and inconsistent — hard-to-debug realtime dropouts.
+
+**Fix.**
+1. Make the transport actually reconnect on mid-stream disconnect (detect pump exit +
+   backoff), or
+2. Rename it honestly and unify reconnection into a single backoff implementation,
+   removing NodeRunner's duplicate.
+3. Add a mid-stream-disconnect → auto-recovery test.
+
+**Effort:** ~1 week. **Dependencies:** relates to #28 (iOS breakup). §9 overhaul.
+
+## Suggested order
+
+Clear #9–#14 first (P0, day-sized, mutually independent, and actively buggy), then
+#5/#6/#7 (security/trust), then #15/#16 (P1, which also unblock the #27/#31
+rewrites). Save the major overhauls for last.
+
+---
+
 # hawky Ambient Agent Development Plans
 
 Status review: 2026-07-02. This file stacks three living plans, newest first:
