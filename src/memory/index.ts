@@ -13,7 +13,7 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, statSync, mkdirSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { createSubsystemLogger } from "../logging/index.js";
 import { getConfigDir } from "../storage/config.js";
 import { createSchema, setMeta, getMeta } from "./schema.js";
@@ -792,22 +792,38 @@ export class MemoryIndex {
 
   private startWatcher(): void {
     const wsPath = this.workspacePath;
-    const watchPaths: string[] = [];
+    const sessionsPath = this.sessionsPath;
 
+    // chokidar v4+ dropped glob support, so `wsPath/*.md` no longer matches
+    // anything. Watch the containing directories and filter changed paths down
+    // to the files listWorkspaceFiles() would actually index.
+    const watchDirs: string[] = [];
     if (existsSync(wsPath)) {
-      watchPaths.push(join(wsPath, "*.md"), join(wsPath, "memory"));
+      watchDirs.push(wsPath); // covers root *.md and the memory/ subtree
+    }
+    if (sessionsPath && existsSync(sessionsPath)) {
+      watchDirs.push(sessionsPath);
     }
 
-    // Watch sessions directory for changes (even if workspace is absent)
-    if (this.sessionsPath && existsSync(this.sessionsPath)) {
-      watchPaths.push(this.sessionsPath);
-    }
+    if (watchDirs.length === 0) return;
 
-    if (watchPaths.length === 0) return;
+    const memDir = join(wsPath, "memory");
+    const isInside = (dir: string, p: string): boolean =>
+      p === dir || p.startsWith(dir.endsWith(sep) ? dir : dir + sep);
 
-    this.watcher = createMemoryWatcher(watchPaths, () => {
+    const shouldReindex = (p: string): boolean => {
+      // Session JSONL files (recursive)
+      if (sessionsPath && isInside(sessionsPath, p)) return p.endsWith(".jsonl");
+      // memory/ subtree: indexed .md and .jsonl (recursive)
+      if (isInside(memDir, p)) return p.endsWith(".md") || p.endsWith(".jsonl");
+      // Workspace root: top-level .md files only (not nested)
+      if (dirname(p) === wsPath) return p.endsWith(".md");
+      return false;
+    };
+
+    this.watcher = createMemoryWatcher(watchDirs, () => {
       this.dirty = true;
-    });
+    }, shouldReindex);
   }
 }
 
