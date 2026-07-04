@@ -16,7 +16,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { getConfigDir } from "../storage/config.js";
 
 import type { AgentSessionManager, AgentSession } from "./agent-sessions.js";
 import type { GatewayServer } from "./server.js";
@@ -57,11 +57,12 @@ const log = createSubsystemLogger("gateway/heartbeat");
 // Constants
 // -----------------------------------------------------------------------------
 
-const HEARTBEAT_FILE = join(homedir(), ".hawky", "workspace", "HEARTBEAT.md");
+// Defaults derive from the configured Hawky root (honors HAWKY_HOME).
+const defaultHeartbeatFile = (): string => join(getConfigDir(), "workspace", "HEARTBEAT.md");
+const defaultHeartbeatStateFile = (): string => join(getConfigDir(), "heartbeat-state.json");
 const HEARTBEAT_SESSION_KEY = "heartbeat:main";
 const CONSOLIDATION_SESSION_KEY = "heartbeat:consolidation";
 const DISTILLATION_SESSION_KEY = "heartbeat:distillation";
-const HEARTBEAT_STATE_FILE = join(homedir(), ".hawky", "heartbeat-state.json");
 const DISTILLATION_TEXT_CAP = 50_000; // Max chars of session text in distillation prompt
 
 // Patterns that indicate the heartbeat found nothing actionable
@@ -182,8 +183,8 @@ export class HeartbeatService {
     this.sessions = opts.sessions;
     this.server = opts.server;
     this.fullConfig = opts.config;
-    this.heartbeatFilePath = opts.heartbeatFilePath ?? HEARTBEAT_FILE;
-    this.stateFilePath = opts.stateFilePath ?? HEARTBEAT_STATE_FILE;
+    this.heartbeatFilePath = opts.heartbeatFilePath ?? defaultHeartbeatFile();
+    this.stateFilePath = opts.stateFilePath ?? defaultHeartbeatStateFile();
     this.memorySchedulerOwnsMemory = opts.memorySchedulerOwnsMemory ?? false;
 
     // Derive heartbeat-specific config from full config
@@ -1163,4 +1164,4 @@ export class HeartbeatService {
 // Exports
 // -----------------------------------------------------------------------------
 
-export { HEARTBEAT_FILE, HEARTBEAT_SESSION_KEY, CONSOLIDATION_SESSION_KEY, HEARTBEAT_STATE_FILE };
+export { HEARTBEAT_SESSION_KEY, CONSOLIDATION_SESSION_KEY };

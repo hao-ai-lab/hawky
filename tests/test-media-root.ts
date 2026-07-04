@@ -50,7 +50,9 @@ describe("resolveMediaRoot", () => {
     expect(resolveMediaRoot()).toBe("/tmp/hawky-media-config");
   });
 
-  test("falls back to default media root when config has no root", () => {
-    expect(resolveMediaRoot()).toEndWith(join(".hawky", "workspace", "media"));
+  test("falls back to default media root (under the configured root) when config has no root", () => {
+    // The default now derives from the Hawky config root, so overriding the
+    // root via setConfigDir() relocates the media root too (no ~/.hawky leak).
+    expect(resolveMediaRoot()).toBe(join(configDir, "workspace", "media"));
   });
 });

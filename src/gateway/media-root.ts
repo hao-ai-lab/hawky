@@ -1,8 +1,5 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../storage/config.js";
-
-const DEFAULT_MEDIA_ROOT = join(homedir(), ".hawky", "workspace", "media");
+import { loadConfig, getConfigDir } from "../storage/config.js";
 
 export function resolveMediaRoot(): string {
   if (process.env.HAWKY_MEDIA_ROOT) return process.env.HAWKY_MEDIA_ROOT;
@@ -13,5 +10,5 @@ export function resolveMediaRoot(): string {
   } catch {
     // Fall through to the default path when config is unavailable.
   }
-  return DEFAULT_MEDIA_ROOT;
+  return join(getConfigDir(), "workspace", "media");
 }
