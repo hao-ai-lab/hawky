@@ -8,6 +8,7 @@
 import { test, describe, expect } from "bun:test";
 import { getGatewayStatus, setGatewayStartTime, loadUsageHistory } from "../src/gateway/status.js";
 import { CostTracker, setCostTracker } from "../src/agent/cost-tracker.js";
+import { resetConfigDir, setConfigDir } from "../src/storage/config.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -233,6 +234,32 @@ describe("loadUsageHistory", () => {
     expect(result.summary.byModel["claude-sonnet-4-6"]).toBeDefined();
 
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("default usage directory follows HAWKY_HOME config root", () => {
+    setCostTracker(null as any);
+    const dir = join(tmpdir(), `usage-hawky-home-${Date.now()}`);
+    const usageDir = join(dir, "usage");
+    mkdirSync(usageDir, { recursive: true });
+    const date = new Date().toISOString().slice(0, 10);
+    writeFileSync(join(usageDir, `${date}.json`), JSON.stringify({
+      date,
+      tokens: { input: 1000, output: 500, cacheRead: 0, cacheCreation: 0 },
+      costUSD: 0.01,
+      apiCalls: 1,
+      byModel: {},
+    }));
+
+    try {
+      setConfigDir(dir);
+
+      const result = loadUsageHistory("7d");
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].date).toBe(date);
+    } finally {
+      resetConfigDir();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("totalTokens summary includes cacheRead + cacheCreation, not just input + output", () => {

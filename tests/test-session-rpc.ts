@@ -430,6 +430,20 @@ describe("session.resolve runtimeKind", () => {
 });
 
 // =============================================================================
+// session.exists
+// =============================================================================
+
+describe("session.exists", () => {
+  test("checks the configured sessions directory", () => {
+    createTestSession("web:configured", 1);
+
+    const result = server.call("session.exists", mockConn, { sessionKey: "web:configured" });
+
+    expect(result).toEqual({ exists: true, sessionKey: "web:configured" });
+  });
+});
+
+// =============================================================================
 // session.list with meta fields
 // =============================================================================
 

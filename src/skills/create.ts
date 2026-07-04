@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getConfigDir } from "../storage/config.js";
 
 /**
  * Create a new custom skill with a skeleton SKILL.md.
@@ -31,9 +31,9 @@ export function createSkill(
     return { ok: false, error: "Skill name can only contain letters, numbers, dots, hyphens, and underscores" };
   }
 
-  const defaultWorkspace = join(homedir(), ".hawky", "workspace");
+  const defaultWorkspace = join(getConfigDir(), "workspace");
   const baseDir = target === "user"
-    ? join(homedir(), ".hawky", "skills")
+    ? join(getConfigDir(), "skills")
     : join(workspacePath ?? defaultWorkspace, "skills");
 
   const skillDir = join(baseDir, name);

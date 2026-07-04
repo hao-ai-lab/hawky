@@ -1,7 +1,7 @@
 // =============================================================================
 // Persistent Input History Tests
 //
-// Tests for ~/.hawky/history.jsonl persistence layer.
+// Tests for persistent input history under the hawky config directory.
 // =============================================================================
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -14,6 +14,7 @@ import {
   historyTexts,
   type HistoryEntry,
 } from "../src/storage/input-history.js";
+import { resetConfigDir, setConfigDir } from "../src/storage/config.js";
 
 // =============================================================================
 // Direct storage tests (bypass module-level constants by testing functions)
@@ -26,23 +27,27 @@ describe("input-history storage", () => {
   beforeEach(() => {
     mkdirSync(testDir, { recursive: true });
     if (existsSync(testFile)) rmSync(testFile);
+    setConfigDir(testDir);
   });
 
   afterEach(() => {
+    resetConfigDir();
     rmSync(testDir, { recursive: true, force: true });
   });
 
   test("loadHistorySync returns empty for missing file", () => {
     const entries = loadHistorySync();
-    // This reads from ~/.hawky/history.jsonl — may or may not exist
-    // Just verify it returns an array
-    expect(Array.isArray(entries)).toBe(true);
+    expect(entries).toEqual([]);
   });
 
   test("appendHistoryEntry creates file and appends", () => {
-    // This writes to the real ~/.hawky/history.jsonl
-    // Just verify it doesn't throw
-    appendHistoryEntry("test-persistent-history-entry");
+    appendHistoryEntry("test-persistent-history-entry", "tui:test");
+
+    expect(existsSync(testFile)).toBe(true);
+    const [line] = readFileSync(testFile, "utf-8").trim().split("\n");
+    const entry = JSON.parse(line);
+    expect(entry.text).toBe("test-persistent-history-entry");
+    expect(entry.session).toBe("tui:test");
   });
 
   test("historyTexts extracts text from entries", () => {
@@ -84,20 +89,7 @@ describe("input-history storage", () => {
     ].join("\n") + "\n";
     writeFileSync(testFile, content);
 
-    // loadHistorySync reads from the real file, not our test file.
-    // Instead, test the parsing logic directly.
-    const lines = content.trim().split("\n").filter(Boolean);
-    const entries: HistoryEntry[] = [];
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        if (entry && typeof entry.text === "string" && entry.text.trim()) {
-          entries.push(entry);
-        }
-      } catch {
-        // Skip
-      }
-    }
+    const entries = loadHistorySync();
     expect(entries.length).toBe(2);
     expect(entries[0].text).toBe("good");
     expect(entries[1].text).toBe("also good");

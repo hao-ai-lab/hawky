@@ -11,9 +11,9 @@
 // =============================================================================
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getConfigDir } from "./config.js";
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -22,8 +22,13 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-/** Default workspace path. Can be overridden for testing. */
-let WORKSPACE_DIR = join(homedir(), ".hawky", "workspace");
+// Default follows HAWKY_HOME/getConfigDir(); tests can still override it.
+let workspaceDirOverride: string | null = null;
+
+/** Default workspace path, derived from the configured Hawky root. */
+function defaultWorkspaceDir(): string {
+  return join(getConfigDir(), "workspace");
+}
 
 /** All workspace template files (order matters for bootstrap injection). */
 export const WORKSPACE_FILES = [
@@ -51,12 +56,17 @@ export type WorkspaceFileName = (typeof WORKSPACE_FILES)[number];
 
 /** Override the workspace directory (for testing). */
 export function setWorkspaceDir(dir: string): void {
-  WORKSPACE_DIR = dir;
+  workspaceDirOverride = dir;
+}
+
+/** Reset the workspace directory to the configured default (for testing). */
+export function resetWorkspaceDir(): void {
+  workspaceDirOverride = null;
 }
 
 /** Get the current workspace directory. */
 export function getWorkspaceDir(): string {
-  return WORKSPACE_DIR;
+  return workspaceDirOverride ?? defaultWorkspaceDir();
 }
 
 // -----------------------------------------------------------------------------
@@ -84,7 +94,7 @@ export class WorkspaceManager {
   private readonly dir: string;
 
   constructor(workspaceDir?: string) {
-    this.dir = workspaceDir ?? WORKSPACE_DIR;
+    this.dir = workspaceDir ?? getWorkspaceDir();
   }
 
   /** Get the workspace directory path. */

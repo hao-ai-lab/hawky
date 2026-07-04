@@ -21,6 +21,7 @@ import {
   resetSessionsDir,
   repairOrphanedToolUses,
 } from "../src/storage/session.js";
+import { resetConfigDir, setConfigDir } from "../src/storage/config.js";
 import { PermissionCache } from "../src/agent/tool_executor.js";
 import type { ChatMessage } from "../src/agent/types.js";
 import type { PermissionCacheData } from "../src/agent/tool_executor.js";
@@ -402,6 +403,47 @@ describe("listSessions", () => {
 
     const sessions = listSessions(3);
     expect(sessions).toHaveLength(3);
+  });
+
+  test("legacy migration runs after the default sessions directory changes", () => {
+    resetSessionsDir();
+    const rootA = join(testDir, "root-a");
+    const rootB = join(testDir, "root-b");
+
+    try {
+      setConfigDir(rootA);
+      const sessionsA = join(rootA, "sessions");
+      mkdirSync(sessionsA, { recursive: true });
+      writeFileSync(
+        join(sessionsA, "gw-web-alpha.jsonl"),
+        JSON.stringify({
+          type: "session",
+          id: "web/alpha",
+          model: "test",
+          working_directory: "/tmp",
+          created_at: "2026-01-01T00:00:00.000Z",
+        }) + "\n",
+      );
+      expect(listSessions(10).map((s) => s.id)).toContain("web/alpha");
+
+      setConfigDir(rootB);
+      const sessionsB = join(rootB, "sessions");
+      mkdirSync(sessionsB, { recursive: true });
+      writeFileSync(
+        join(sessionsB, "gw-web-beta.jsonl"),
+        JSON.stringify({
+          type: "session",
+          id: "web/beta",
+          model: "test",
+          working_directory: "/tmp",
+          created_at: "2026-01-01T00:00:00.000Z",
+        }) + "\n",
+      );
+      expect(listSessions(10).map((s) => s.id)).toContain("web/beta");
+    } finally {
+      resetConfigDir();
+      setSessionsDir(testDir);
+    }
   });
 });
 

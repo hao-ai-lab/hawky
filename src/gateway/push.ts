@@ -13,8 +13,8 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { createSubsystemLogger } from "../logging/index.js";
+import { getConfigDir } from "../storage/config.js";
 
 const log = createSubsystemLogger("gateway/push");
 
@@ -62,22 +62,25 @@ export interface PushNotificationPayload {
 // File paths
 // -----------------------------------------------------------------------------
 
-const HAWKY_DIR = join(homedir(), ".hawky");
-const VAPID_KEYS_PATH = join(HAWKY_DIR, "vapid-keys.json");
-const SUBSCRIPTIONS_PATH = join(HAWKY_DIR, "push-subscriptions.json");
+// Defaults derive from the configured Hawky root (honors HAWKY_HOME).
+const defaultVapidKeysPath = (): string => join(getConfigDir(), "vapid-keys.json");
+const defaultSubscriptionsPath = (): string => join(getConfigDir(), "push-subscriptions.json");
 
-/** Override paths for testing */
-let vapidKeysPath = VAPID_KEYS_PATH;
-let subscriptionsPath = SUBSCRIPTIONS_PATH;
+/** Override paths for testing (null = use the configured default). */
+let vapidKeysOverride: string | null = null;
+let subscriptionsOverride: string | null = null;
+
+const vapidKeysPath = (): string => vapidKeysOverride ?? defaultVapidKeysPath();
+const subscriptionsPath = (): string => subscriptionsOverride ?? defaultSubscriptionsPath();
 
 export function setPushPaths(opts: { vapidKeysPath?: string; subscriptionsPath?: string }): void {
-  if (opts.vapidKeysPath) vapidKeysPath = opts.vapidKeysPath;
-  if (opts.subscriptionsPath) subscriptionsPath = opts.subscriptionsPath;
+  if (opts.vapidKeysPath) vapidKeysOverride = opts.vapidKeysPath;
+  if (opts.subscriptionsPath) subscriptionsOverride = opts.subscriptionsPath;
 }
 
 export function resetPushPaths(): void {
-  vapidKeysPath = VAPID_KEYS_PATH;
-  subscriptionsPath = SUBSCRIPTIONS_PATH;
+  vapidKeysOverride = null;
+  subscriptionsOverride = null;
 }
 
 // -----------------------------------------------------------------------------
@@ -89,9 +92,10 @@ export function resetPushPaths(): void {
  * gateway restarts (subscriptions are bound to the key pair).
  */
 export function loadOrGenerateVapidKeys(): VapidKeys {
-  if (existsSync(vapidKeysPath)) {
+  const path = vapidKeysPath();
+  if (existsSync(path)) {
     try {
-      const raw = readFileSync(vapidKeysPath, "utf-8");
+      const raw = readFileSync(path, "utf-8");
       const keys = JSON.parse(raw) as VapidKeys;
       if (keys.publicKey && keys.privateKey) {
         log.debug("loaded VAPID keys from disk");
@@ -103,18 +107,19 @@ export function loadOrGenerateVapidKeys(): VapidKeys {
   }
 
   const keys = webpush.generateVAPIDKeys();
-  const dir = dirname(vapidKeysPath);
+  const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(vapidKeysPath, JSON.stringify(keys, null, 2), { encoding: "utf-8", mode: 0o600 });
-  log.info("generated new VAPID keys", { path: vapidKeysPath });
+  writeFileSync(path, JSON.stringify(keys, null, 2), { encoding: "utf-8", mode: 0o600 });
+  log.info("generated new VAPID keys", { path });
   return keys;
 }
 
 /** Read VAPID keys from disk without generating. Returns null if not found. */
 export function readVapidKeys(): VapidKeys | null {
-  if (!existsSync(vapidKeysPath)) return null;
+  const path = vapidKeysPath();
+  if (!existsSync(path)) return null;
   try {
-    const raw = readFileSync(vapidKeysPath, "utf-8");
+    const raw = readFileSync(path, "utf-8");
     const keys = JSON.parse(raw) as VapidKeys;
     return keys.publicKey && keys.privateKey ? keys : null;
   } catch {
@@ -132,9 +137,10 @@ export function readVapidKeys(): VapidKeys | null {
 
 /** Load all push subscriptions from disk. */
 export function loadSubscriptions(): PushSubscriptionJSON[] {
-  if (!existsSync(subscriptionsPath)) return [];
+  const path = subscriptionsPath();
+  if (!existsSync(path)) return [];
   try {
-    const raw = readFileSync(subscriptionsPath, "utf-8");
+    const raw = readFileSync(path, "utf-8");
     const subs = JSON.parse(raw);
     return Array.isArray(subs) ? subs : [];
   } catch {
@@ -144,9 +150,10 @@ export function loadSubscriptions(): PushSubscriptionJSON[] {
 
 /** Save subscriptions to disk. */
 export function saveSubscriptions(subs: PushSubscriptionJSON[]): void {
-  const dir = dirname(subscriptionsPath);
+  const path = subscriptionsPath();
+  const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(subscriptionsPath, JSON.stringify(subs, null, 2), "utf-8");
+  writeFileSync(path, JSON.stringify(subs, null, 2), "utf-8");
 }
 
 /** Standalone add (used in tests). For production, use PushService methods. */

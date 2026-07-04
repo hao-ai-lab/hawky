@@ -15,8 +15,8 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { createSubsystemLogger } from "../../logging/index.js";
+import { getConfigDir } from "../../storage/config.js";
 import { rankRecipients, type SlackRecipient, type SlackDirectoryEntry } from "./slack-resolve.js";
 
 const log = createSubsystemLogger("gateway/slack-directory");
@@ -42,12 +42,15 @@ export interface SlackDirectoryMember {
   handle?: string;
 }
 
-const DEFAULT_DB_PATH = join(homedir(), ".hawky", "state", "slack-directory.db");
+/** Default DB path, derived from the configured Hawky root (lazy). */
+function defaultDbPath(): string {
+  return join(getConfigDir(), "state", "slack-directory.db");
+}
 
 export class SlackDirectory {
   private db: Database;
 
-  constructor(dbPath: string = DEFAULT_DB_PATH) {
+  constructor(dbPath: string = defaultDbPath()) {
     if (dbPath !== ":memory:") {
       mkdirSync(join(dbPath, ".."), { recursive: true });
     }

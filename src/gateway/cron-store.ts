@@ -18,9 +18,9 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { createSubsystemLogger } from "../logging/index.js";
+import { getConfigDir } from "../storage/config.js";
 import type { CronSchedule } from "./cron-schedule.js";
 
 const log = createSubsystemLogger("gateway/cron-store");
@@ -374,5 +374,5 @@ function generateJobId(): string {
 
 /** Default store path */
 export function defaultCronStorePath(): string {
-  return join(homedir(), ".hawky", "cron", "jobs.json");
+  return join(getConfigDir(), "cron", "jobs.json");
 }

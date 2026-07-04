@@ -7,7 +7,7 @@
 
 import { watch } from "chokidar";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getConfigDir } from "../storage/config.js";
 
 // -----------------------------------------------------------------------------
 // State
@@ -57,7 +57,7 @@ export function startSkillsWatcher(workspacePath?: string): void {
   const watchPaths: string[] = [];
 
   // User skills
-  const userSkillsDir = join(homedir(), ".hawky", "skills");
+  const userSkillsDir = join(getConfigDir(), "skills");
   watchPaths.push(join(userSkillsDir, "*/SKILL.md"));
 
   // Workspace skills

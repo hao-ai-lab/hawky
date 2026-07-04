@@ -12,9 +12,9 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { getConfigDir, getConfigPath } from "../storage/config.js";
 import { parseFrontmatter, parseSkillConfig } from "./frontmatter.js";
 import type { SkillEntry, SkillConfig, SkillUserConfig } from "./types.js";
 import { SKILL_LIMITS } from "./types.js";
@@ -32,7 +32,10 @@ function getBundledSkillsDir(): string {
   return join(__dirname, "..", "skill-templates");
 }
 
-const USER_SKILLS_DIR = join(homedir(), ".hawky", "skills");
+/** User skills directory, derived from the configured Hawky root. */
+function userSkillsDir(): string {
+  return join(getConfigDir(), "skills");
+}
 
 // Cache binary existence checks (expensive: spawns `which`)
 const binCache = new Map<string, boolean>();
@@ -154,9 +157,9 @@ function checkEligibility(config: SkillConfig): { eligible: boolean; missing: st
   }
 
   // Config path checks (e.g., requires.config: ["channels.slack.user_token"])
-  // Walks the dot-separated path in ~/.hawky/config.json
+  // Walks the dot-separated path in the Hawky config.json
   if (config.requires?.config) {
-    const configFilePath = join(homedir(), ".hawky", "config.json");
+    const configFilePath = getConfigPath();
     let configData: Record<string, unknown> = {};
     try {
       configData = JSON.parse(readFileSync(configFilePath, "utf-8"));
@@ -207,7 +210,7 @@ export function loadAllSkills(
   }
 
   // Priority 2: user-installed
-  for (const entry of discoverFromDir(USER_SKILLS_DIR, "user")) {
+  for (const entry of discoverFromDir(userSkillsDir(), "user")) {
     byName.set(entry.name, entry); // Overrides bundled
   }
 

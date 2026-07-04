@@ -7,9 +7,9 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createSubsystemLogger } from "../../logging/index.js";
+import { getConfigDir } from "../../storage/config.js";
 
 const log = createSubsystemLogger("asr/deadletter");
 
@@ -25,7 +25,7 @@ export interface DeadLetterEntry {
 
 function resolveDir(): string {
   if (process.env.HAWKY_ASR_DEADLETTER_DIR) return process.env.HAWKY_ASR_DEADLETTER_DIR;
-  return join(homedir(), ".hawky", "workspace", "asr-deadletter");
+  return join(getConfigDir(), "workspace", "asr-deadletter");
 }
 
 function pathFor(media_id: string): string {

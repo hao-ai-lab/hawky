@@ -8,10 +8,11 @@
 // =============================================================================
 
 import { createSubsystemLogger } from "../logging/index.js";
-import { tmpdir, hostname, platform, arch, cpus, totalmem, freemem, homedir } from "node:os";
+import { tmpdir, hostname, platform, arch, cpus, totalmem, freemem } from "node:os";
 import { join } from "node:path";
 import { readFileSync, readdirSync, mkdirSync, existsSync, copyFileSync, statSync, unlinkSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { getConfigDir } from "../storage/config.js";
 
 const log = createSubsystemLogger("node/commands");
 
@@ -323,7 +324,7 @@ async function systemWhich(params: SystemWhichParams): Promise<SystemWhichResult
 
 /** Get the persistent screenshots root directory. */
 function getScreenshotsRoot(): string {
-  const dir = join(homedir(), ".hawky", "state", "screenshots");
+  const dir = join(getConfigDir(), "state", "screenshots");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return dir;
 }
