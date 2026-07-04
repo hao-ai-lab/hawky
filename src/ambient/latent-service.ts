@@ -15,6 +15,7 @@ import { dedupAndSupersede } from "./dedup.js";
 import { armIntention } from "./arming.js";
 import { projectMode, type Mode } from "./modes.js";
 import type { IntentionStore } from "./intention-store.js";
+import { findTopicTerm } from "./intention.js";
 import { DeterministicRelevanceGate, type RelevanceGate } from "./relevance-gate.js";
 import { surfaceLatent } from "./fire.js";
 import { makeSessionInvoker, INTENTION_SURFACE_EVENT } from "./session-delivery.js";
@@ -296,7 +297,12 @@ export class LatentService {
         // "we bought coffee" must not retire a later "we're out of coffee".
         // (Same-ts turns are kept: they're same-batch and ordering is undefined.)
         if (turn.ts < intent.evidence.ts) continue;
-        const kind = classifySatisfaction(intent.content, turn.text);
+        // Match on the intention's normalized TOPIC (falls back to content) so a
+        // coarser topic like "coffee" still resolves on "bought coffee", while a
+        // different item sharing only a head noun ("almond milk" vs "oat milk")
+        // does not falsely retire this reminder.
+        const itemPhrase = findTopicTerm(intent.trigger)?.topic ?? intent.content;
+        const kind = classifySatisfaction(itemPhrase, turn.text);
         if (kind === "cancelled") {
           this.suppress(intent.content);
           try { await this.store.transition(intent.id, "suppressed"); } catch { /* already moved */ }

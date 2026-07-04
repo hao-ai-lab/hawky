@@ -37,6 +37,36 @@ describe("classifySatisfaction (topic-scoped)", () => {
   test("plain need → null", () => {
     expect(classifySatisfaction("buy coffee", "we still need coffee")).toBeNull();
   });
+
+  // Regression: every latent's content is `buy <item>`, so before the stop-word
+  // filter the shared token "buy" (plus "got") made ordinary shopping talk about
+  // a DIFFERENT item spuriously "satisfy" an unrelated reminder.
+  test("satisfy verb + different item does NOT match (shared 'buy'/'got' tokens)", () => {
+    // Both later turns contain "buy" (the token every latent shares) plus a
+    // satisfy verb — the exact shape that falsely matched before the fix.
+    expect(classifySatisfaction("buy coffee", "I still need to buy milk, already got the eggs")).toBeNull();
+    expect(classifySatisfaction("buy coffee", "just bought milk and still have to buy bread")).toBeNull();
+  });
+
+  test("true positive still classifies (real item overlap survives the filter)", () => {
+    expect(classifySatisfaction("buy coffee", "we finally bought the coffee")).toBe("satisfied");
+    expect(classifySatisfaction("buy batteries", "picked up the batteries")).toBe("satisfied");
+  });
+
+  // Regression: two different multi-word items sharing only a HEAD NOUN must not
+  // match — requires EVERY item token present, not just one shared word.
+  test("different item sharing a head noun does NOT match", () => {
+    expect(classifySatisfaction("almond milk", "we bought the oat milk")).toBeNull();
+    expect(classifySatisfaction("orange juice", "already got the apple juice")).toBeNull();
+    expect(classifySatisfaction("black beans", "picked up the green beans")).toBeNull();
+    // The exact same multi-word item still resolves.
+    expect(classifySatisfaction("almond milk", "we bought the almond milk")).toBe("satisfied");
+  });
+
+  // A coarser topic still generalizes: "coffee" resolves on "bought coffee".
+  test("a coarser topic still matches a generalization", () => {
+    expect(classifySatisfaction("coffee", "ok we bought the coffee")).toBe("satisfied");
+  });
 });
 
 describe("satisfaction sweep over armed latents", () => {
@@ -76,6 +106,38 @@ describe("satisfaction sweep over armed latents", () => {
     svc.onTranscript("s3", turn("we bought a new lamp"), "ambient");
     await svc.tick();
     expect((await store.get(coffee.id))!.state).toBe("armed"); // untouched
+  });
+
+  // Regression: a live reminder must survive ordinary shopping chatter about a
+  // different item that happens to contain a satisfy verb ("bought"/"got").
+  test("a live reminder survives 'bought/got' talk about a different item", async () => {
+    const store = new InMemoryIntentionStore();
+    const svc = new LatentService({ store });
+    const coffee = await armedLatentFor(svc, store, "s4", "we're out of coffee");
+    expect(coffee.state).toBe("armed");
+
+    // Contains "buy" (the shared token) + a satisfy verb about a different item.
+    svc.onTranscript("s4", turn("I need to buy milk and I already got the eggs"), "ambient");
+    await svc.tick();
+    expect((await store.get(coffee.id))!.state).toBe("armed"); // NOT falsely deleted
+  });
+
+  // Regression (head-noun collision, end-to-end): a multi-word reminder must
+  // survive a satisfy turn about a DIFFERENT item that shares only its head noun.
+  test("a multi-word reminder survives a same-head-noun different item", async () => {
+    const store = new InMemoryIntentionStore();
+    const svc = new LatentService({ store });
+    const almond = await armedLatentFor(svc, store, "s6", "we're out of almond milk");
+    expect(almond.state).toBe("armed");
+
+    svc.onTranscript("s6", turn("we bought the oat milk"), "ambient");
+    await svc.tick();
+    expect((await store.get(almond.id))!.state).toBe("armed"); // NOT retired by "oat milk"
+
+    // The exact item still resolves it.
+    svc.onTranscript("s6", turn("ok we finally bought the almond milk"), "ambient");
+    await svc.tick();
+    expect((await store.get(almond.id))!.state).toBe("resolved");
   });
 });
 

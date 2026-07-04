@@ -29,6 +29,11 @@ export function findWhereTerm(trigger: TriggerPredicate): TriggerWhere | undefin
   return trigger.all?.find((t): t is TriggerWhere => t.kind === "where" && !!t.place);
 }
 
+/** First `topic` term carrying a non-empty topic, or undefined. */
+export function findTopicTerm(trigger: TriggerPredicate): TriggerTopic | undefined {
+  return trigger.all?.find((t): t is TriggerTopic => t.kind === "topic" && !!t.topic?.trim());
+}
+
 export interface IntentionEvidence {
   sessionKey?: string;
   spanRef?: string;

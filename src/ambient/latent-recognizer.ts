@@ -118,14 +118,47 @@ const GENERIC_CANCEL_PATTERNS = [
   /\b(?:never\s+mind|forget\s+it|cancel\s+that|ignore\s+that|disregard\s+that)\b/i,
 ];
 
-/** Return a rough normalized "topic phrase" from a turn's text for overlap check. */
-function extractTopics(text: string): string[] {
-  const words = text
+// Words that must never count as a "topic". Function words plus the
+// content-template and satisfaction verbs — every latent's content is
+// `buy <item>`, so without this the shared token "buy" (and stop-words like
+// "the"/"for"/"got") produced spurious topic overlaps, letting ordinary
+// shopping talk ("buy milk, already got the eggs") retire an unrelated
+// "buy coffee" reminder. Overlap must be on a real item noun.
+const TOPIC_STOPWORDS = new Set([
+  // articles / conjunctions / prepositions / pronouns / determiners / aux
+  "the", "and", "for", "but", "not", "you", "your", "our", "their", "its",
+  "this", "that", "these", "those", "was", "were", "are", "been", "have",
+  "has", "had", "did", "does", "with", "from", "into", "onto", "out", "off",
+  "them", "they", "she", "his", "her", "him", "who", "what", "when", "where",
+  "why", "how", "about", "really", "there", "here",
+  // filler / temporal / quantity
+  "get", "got", "getting", "need", "needs", "needed", "want", "wants",
+  "wanted", "still", "already", "just", "now", "then", "some", "more", "any",
+  "all", "one", "two", "yeah", "okay", "yes",
+  // content-template + satisfaction verbs (never an item topic). NB: satisfy
+  // detection runs as regex over raw text (SATISFY_PATTERNS), independent of
+  // this set, so omitting a word here only affects topic overlap — e.g. we do
+  // NOT list "stock", which is a legitimate item (broth), so "buy stock" can
+  // still auto-retire on a real "bought the stock" turn.
+  "buy", "buys", "buying", "bought", "purchase", "purchased", "order",
+  "ordered", "pick", "picked", "grab", "grabbed", "enough",
+]);
+
+/** Content/topic words: lowercased, punctuation-stripped, minus stop-words. */
+function contentWords(text: string): string[] {
+  return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, "")
     .split(/\s+/)
-    .filter((w) => w.length > 2);
-  // Return all 1–3-word subsequences as potential topic tokens.
+    .filter((w) => w.length > 2 && !TOPIC_STOPWORDS.has(w));
+}
+
+/**
+ * Loose 1–3-word topic tokens, used ONLY to locate the source/assertion turn of
+ * a candidate (not for deletion). Deletion uses sameItem(), which is stricter.
+ */
+function extractTopics(text: string): string[] {
+  const words = contentWords(text);
   const topics: string[] = [];
   for (let i = 0; i < words.length; i++) {
     topics.push(words[i]);
@@ -135,34 +168,50 @@ function extractTopics(text: string): string[] {
   return topics;
 }
 
+/**
+ * True if `laterText` names the SAME item as `itemPhrase`. Requires *every*
+ * item token to appear in laterText, not just any shared token — otherwise two
+ * different multi-word items that share only a head noun would falsely match
+ * ("almond milk" retired by "oat milk", "orange juice" by "apple juice"). An
+ * empty item set (all stop-words) never matches.
+ *
+ * NOTE: callers pass the intention's normalized TOPIC (not its raw content), so
+ * a coarser topic like "coffee" still matches a "bought coffee" turn even when
+ * the content was "buy coffee beans" — generalization resolves, different
+ * qualifiers do not.
+ */
+function sameItem(itemPhrase: string, laterText: string): boolean {
+  const items = contentWords(itemPhrase);
+  if (items.length === 0) return false;
+  const later = new Set(contentWords(laterText));
+  return items.every((w) => later.has(w));
+}
+
 /** True if `laterText` appears to satisfy or cancel the item described by `candidateContent`. */
 function isSatisfiedBy(candidateContent: string, laterText: string): boolean {
   // MED-5: generic cancel drops the candidate regardless of topic overlap.
   if (GENERIC_CANCEL_PATTERNS.some((p) => p.test(laterText))) return true;
   if (!SATISFY_PATTERNS.some((p) => p.test(laterText))) return false;
-  // For topic-specific satisfaction patterns, require content-overlap.
-  const candidateTopics = extractTopics(candidateContent);
-  const laterTopics = new Set(extractTopics(laterText));
-  return candidateTopics.some((t) => laterTopics.has(t));
+  // For topic-specific satisfaction patterns, require the SAME item.
+  return sameItem(candidateContent, laterText);
 }
 
 /**
- * Topic-SCOPED satisfaction/cancel classifier for the M9 cross-tick sweep over
- * already-armed latents. Unlike isSatisfiedBy (which lets a generic "never mind"
- * drop the most-recent in-window candidate), this REQUIRES topic overlap for
- * both cancel and satisfy, so a bare cancel never nukes unrelated armed latents.
- * Returns "satisfied" (→ resolve), "cancelled" (→ suppress), or null (no-op).
+ * Satisfaction/cancel classifier for the M9 cross-tick sweep over already-armed
+ * latents. `itemPhrase` should be the intention's normalized TOPIC (fall back to
+ * its content). REQUIRES a same-item match for both cancel and satisfy, so a
+ * bare cancel never nukes unrelated armed latents and a different item sharing a
+ * head noun cannot retire this one. Returns "satisfied" (→ resolve),
+ * "cancelled" (→ suppress), or null (no-op).
  */
 export function classifySatisfaction(
-  content: string,
+  itemPhrase: string,
   laterText: string,
 ): "satisfied" | "cancelled" | null {
   const cancel = GENERIC_CANCEL_PATTERNS.some((p) => p.test(laterText));
   const satisfy = SATISFY_PATTERNS.some((p) => p.test(laterText));
   if (!cancel && !satisfy) return null;
-  const candidateTopics = extractTopics(content);
-  const laterTopics = new Set(extractTopics(laterText));
-  if (!candidateTopics.some((t) => laterTopics.has(t))) return null; // require topic overlap
+  if (!sameItem(itemPhrase, laterText)) return null; // require the SAME item, not a shared head noun
   return cancel ? "cancelled" : "satisfied";
 }
 
