@@ -4,7 +4,7 @@
 // =============================================================================
 
 import { describe, test, expect } from "bun:test";
-import { TimerWhenCronService } from "../src/ambient/when-cron.js";
+import { TimerWhenCronService, MAX_TIMER_DELAY_MS } from "../src/ambient/when-cron.js";
 import type { TimerFactory, ClearFn, TimerHandle } from "../src/ambient/when-cron.js";
 
 // ---------------------------------------------------------------------------
@@ -147,6 +147,80 @@ describe("TimerWhenCronService — cancelAll", () => {
 
     expect(firedA).toBe(false);
     expect(firedB).toBe(false);
+  });
+});
+
+describe("TimerWhenCronService — long-horizon chunking (>32-bit setTimeout ceiling)", () => {
+  const DAY = 86_400_000;
+
+  test("a reminder >24.8 days out caps the first timer instead of overflowing", () => {
+    const fake = makeFakeTimers();
+    let now = 0;
+    const svc = new TimerWhenCronService(fake.factory, fake.clearFn, () => now);
+
+    let fired = false;
+    // 60 days out — with the old code this delay (~5.18e9 ms) is coerced to 1ms
+    // by setTimeout and would fire almost immediately.
+    svc.scheduleAt("far", new Date(now + 60 * DAY).toISOString(), () => { fired = true; });
+
+    const delays = fake.pendingDelays();
+    expect(delays).toHaveLength(1);
+    expect(delays[0]).toBe(MAX_TIMER_DELAY_MS); // capped, not ~5.18e9 and not 1
+
+    // Firing the first chunk must NOT invoke the callback — it re-arms.
+    fake.fireAll();
+    expect(fired).toBe(false);
+    expect(fake.pendingCount()).toBe(1);
+    expect(fake.pendingDelays()[0]).toBe(MAX_TIMER_DELAY_MS);
+  });
+
+  test("re-arms across chunks and fires exactly once at the true due time", () => {
+    const fake = makeFakeTimers();
+    let now = 0;
+    const svc = new TimerWhenCronService(fake.factory, fake.clearFn, () => now);
+    const target = 60 * DAY; // 5_184_000_000 ms ≈ 2.4 chunks
+
+    let fireCount = 0;
+    svc.scheduleAt("far", new Date(target).toISOString(), () => { fireCount++; });
+
+    // Chunk 1: full cap, not final.
+    expect(fake.pendingDelays()[0]).toBe(MAX_TIMER_DELAY_MS);
+    now += MAX_TIMER_DELAY_MS;
+    fake.fireAll();
+    expect(fireCount).toBe(0);
+
+    // Chunk 2: still > cap remaining, another full cap.
+    expect(fake.pendingDelays()[0]).toBe(MAX_TIMER_DELAY_MS);
+    now += MAX_TIMER_DELAY_MS;
+    fake.fireAll();
+    expect(fireCount).toBe(0);
+
+    // Chunk 3: remainder fits — final chunk, delay ≤ cap.
+    const finalDelay = fake.pendingDelays()[0];
+    expect(finalDelay).toBe(target - 2 * MAX_TIMER_DELAY_MS);
+    expect(finalDelay).toBeLessThanOrEqual(MAX_TIMER_DELAY_MS);
+    now = target;
+    fake.fireAll();
+    expect(fireCount).toBe(1);
+  });
+
+  test("cancel during an intermediate chunk stops the re-arm chain", () => {
+    const fake = makeFakeTimers();
+    let now = 0;
+    const svc = new TimerWhenCronService(fake.factory, fake.clearFn, () => now);
+
+    let fired = false;
+    svc.scheduleAt("far", new Date(now + 60 * DAY).toISOString(), () => { fired = true; });
+
+    // Advance + fire the first chunk so it re-arms, then cancel mid-chain.
+    now += MAX_TIMER_DELAY_MS;
+    fake.fireAll();
+    svc.cancel("far");
+
+    now += 60 * DAY;
+    fake.fireAll();
+    expect(fired).toBe(false);
+    expect(fake.pendingCount()).toBe(0);
   });
 });
 
