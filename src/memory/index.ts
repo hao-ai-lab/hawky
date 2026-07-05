@@ -53,6 +53,25 @@ function defaultWorkspacePath(): string {
   return join(getConfigDir(), "workspace");
 }
 
+/** Result of a sync pass. */
+interface SyncStats {
+  indexed: number;
+  skipped: number;
+  removed: number;
+}
+
+/**
+ * A changed file, read + chunked + embedded in the async prepare phase, ready
+ * to be written synchronously in the flush transaction. `chunks: []` marks an
+ * empty/tracked-only file (refresh the files row, write no chunks).
+ */
+interface FilePlan {
+  file: WorkspaceFile;
+  chunks: MemoryChunk[];
+  embeddings: number[][] | null;
+  model: string;
+}
+
 // -----------------------------------------------------------------------------
 // Memory Index
 // -----------------------------------------------------------------------------
@@ -69,6 +88,10 @@ export class MemoryIndex {
   private watcher: MemoryWatcher | null = null;
   private config: SearchConfig;
   private chunkConfig: typeof DEFAULT_CHUNK_CONFIG;
+  /** In-flight sync, so concurrent callers coalesce instead of colliding. */
+  private syncInFlight: Promise<SyncStats> | null = null;
+  /** True when an explicit embeddingProvider was injected (skip env re-detect). */
+  private providerOverride = false;
 
   constructor(options?: {
     dbPath?: string;
@@ -82,6 +105,12 @@ export class MemoryIndex {
     enableWatcher?: boolean;
     /** OpenAI API key from config (fallback if OPENAI_API_KEY env not set) */
     openaiApiKey?: string;
+    /**
+     * Inject an embedding provider directly (for tests). When set (including
+     * `null` to force FTS-only), the env/config re-detection is skipped so the
+     * injected provider is authoritative.
+     */
+    embeddingProvider?: EmbeddingProvider | null;
   }) {
     const dbPath = options?.dbPath ?? defaultDbPath();
     this.workspacePath = options?.workspacePath ?? defaultWorkspacePath();
@@ -99,9 +128,15 @@ export class MemoryIndex {
     this.db.run("PRAGMA journal_mode = WAL");
     createSchema(this.db);
 
-    // Detect embedding provider (env var → config key → FTS-only)
+    // Detect embedding provider (env var → config key → FTS-only), unless one
+    // was injected explicitly (tests).
     this.openaiApiKey = options?.openaiApiKey;
-    this.provider = detectEmbeddingProvider(this.openaiApiKey);
+    if (options?.embeddingProvider !== undefined) {
+      this.provider = options.embeddingProvider;
+      this.providerOverride = true;
+    } else {
+      this.provider = detectEmbeddingProvider(this.openaiApiKey);
+    }
 
     // Check if full reindex needed (model/config changed)
     this.checkReindexNeeded();
@@ -135,31 +170,51 @@ export class MemoryIndex {
   // Sync
   // ---------------------------------------------------------------------------
 
-  /** Sync workspace files to the index. Only re-indexes changed files. */
-  async sync(): Promise<{ indexed: number; skipped: number; removed: number }> {
+  /**
+   * Sync workspace files to the index. Only re-indexes changed files.
+   *
+   * Concurrent callers coalesce onto a single in-flight sync. Previously two
+   * overlapping syncs (e.g. from the gateway's concurrent searches) each ran
+   * `BEGIN`, and the second threw "cannot start a transaction within a
+   * transaction" — which rolled back the first and dropped memory search to its
+   * grep fallback. Coalescing also avoids paying the embedding API twice.
+   */
+  async sync(): Promise<SyncStats> {
+    if (this.syncInFlight) return this.syncInFlight;
+    this.syncInFlight = this._doSync().finally(() => {
+      this.syncInFlight = null;
+    });
+    return this.syncInFlight;
+  }
+
+  private async _doSync(): Promise<SyncStats> {
     const files = this.listWorkspaceFiles();
     const activePaths = new Set(files.map((f) => f.relPath));
-    let indexed = 0;
     let skipped = 0;
 
-    // Wrap in transaction for crash safety — partial state is avoided
-    this.db.run("BEGIN");
-    try {
-      for (const file of files) {
-        const existing = this.db.query("SELECT hash FROM files WHERE path = ?").get(file.relPath) as
-          | { hash: string }
-          | null;
-
-        if (existing?.hash === file.hash) {
-          skipped++;
-          continue;
-        }
-
-        await this.indexFile(file);
-        indexed++;
+    // Phase 1 — prepare (async: read files + embed over the network). NO write
+    // transaction is open here, so the SQLite write lock is never held across
+    // network I/O and concurrent DB access can't collide with an open BEGIN.
+    const plans: FilePlan[] = [];
+    for (const file of files) {
+      const existing = this.db.query("SELECT hash FROM files WHERE path = ?").get(file.relPath) as
+        | { hash: string }
+        | null;
+      if (existing?.hash === file.hash) {
+        skipped++;
+        continue;
       }
+      plans.push(await this.prepareFile(file));
+    }
 
-      // Remove stale entries
+    // Phase 2 — flush (synchronous, atomic). No `await` inside, so the event
+    // loop cannot switch mid-transaction. `db.transaction()` handles
+    // BEGIN/COMMIT/ROLLBACK (matches src/gateway/adapters/slack-directory.ts).
+    const model = this.provider?.model ?? "fts-only";
+    const flush = this.db.transaction((): number => {
+      for (const plan of plans) this.flushFile(plan);
+
+      // Remove stale entries (files that no longer exist on disk).
       const allPaths = (
         this.db.query("SELECT path FROM files").all() as Array<{ path: string }>
       ).map((r) => r.path);
@@ -171,21 +226,17 @@ export class MemoryIndex {
         }
       }
 
-      // Update meta
-      const model = this.provider?.model ?? "fts-only";
       setMeta(this.db, "model", model);
       setMeta(this.db, "provider", this.provider?.id ?? "none");
       setMeta(this.db, "chunkTokens", String(this.chunkConfig.tokens));
       setMeta(this.db, "chunkOverlap", String(this.chunkConfig.overlap));
+      return removed;
+    });
+    const removed = flush();
 
-      this.db.run("COMMIT");
-      this.dirty = false;
-      this.lastSyncAt = Date.now();
-      return { indexed, skipped, removed };
-    } catch (err) {
-      this.db.run("ROLLBACK");
-      throw err;
-    }
+    this.dirty = false;
+    this.lastSyncAt = Date.now();
+    return { indexed: plans.length, skipped, removed };
   }
 
   // ---------------------------------------------------------------------------
@@ -202,12 +253,15 @@ export class MemoryIndex {
   ): Promise<SearchResult[]> {
     // Re-check embedding provider on every search (cheap — just reads env/config).
     // If user added OPENAI_API_KEY mid-session, we pick it up and trigger reindex.
-    const newProvider = detectEmbeddingProvider(this.openaiApiKey);
-    const currentModel = newProvider?.model ?? "fts-only";
-    const previousModel = this.provider?.model ?? "fts-only";
-    if (currentModel !== previousModel) {
-      this.provider = newProvider;
-      this.checkReindexNeeded(); // Clears DB + sets dirty if model changed
+    // Skipped when a provider was injected explicitly (tests).
+    if (!this.providerOverride) {
+      const newProvider = detectEmbeddingProvider(this.openaiApiKey);
+      const currentModel = newProvider?.model ?? "fts-only";
+      const previousModel = this.provider?.model ?? "fts-only";
+      if (currentModel !== previousModel) {
+        this.provider = newProvider;
+        this.checkReindexNeeded(); // Clears DB + sets dirty if model changed
+      }
     }
 
     const meta: SearchMeta = {
@@ -431,62 +485,44 @@ export class MemoryIndex {
   // Indexing
   // ---------------------------------------------------------------------------
 
-  private async indexFile(file: WorkspaceFile): Promise<void> {
-    if (file.source === "sessions") {
-      return this.indexSessionFile(file);
-    }
-    if (file.relPath.startsWith("memory/") && file.relPath.endsWith(".jsonl")) {
-      return this.indexMemoryAppendJsonlFile(file);
-    }
-
-    const content = readFileSync(file.absPath, "utf-8");
-    const chunks = chunkMarkdown(content, this.chunkConfig);
-    await this.indexChunksForFile(file, chunks);
-  }
-
-  /** Index memory.append JSONL files by extracting searchable text entries. */
-  private async indexMemoryAppendJsonlFile(file: WorkspaceFile): Promise<void> {
-    const result = extractMemoryAppendJsonlText(file.absPath);
-
-    // Track the file even if empty/malformed so unchanged files are skipped.
-    if (result.entryCount === 0) {
-      this.removeFile(file.relPath);
-      this.db.run(
-        "INSERT OR REPLACE INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
-        [file.relPath, "memory", file.hash, file.mtime, file.size],
-      );
-      return;
-    }
-
-    const chunks = chunkMarkdown(result.text, this.chunkConfig);
-    await this.indexChunksForFile(file, chunks);
-  }
-
-  /** Index a session JSONL file by extracting user+assistant text and chunking it. */
-  private async indexSessionFile(file: WorkspaceFile): Promise<void> {
-    const result = await extractSessionText(file.absPath);
-
-    // Track the file even if empty (prevents re-indexing on every sync)
-    if (result.messageCount === 0) {
-      this.removeFile(file.relPath);
-      this.db.run(
-        "INSERT OR REPLACE INTO files (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
-        [file.relPath, "sessions", file.hash, file.mtime, file.size],
-      );
-      return;
-    }
-
-    const chunks = chunkMarkdown(result.text, this.chunkConfig);
-    await this.indexChunksForFile(file, chunks);
-  }
-
-  private async indexChunksForFile(file: WorkspaceFile, chunks: MemoryChunk[]): Promise<void> {
+  /**
+   * Phase 1: read + chunk + embed a changed file, WITHOUT touching the write
+   * transaction. All network/file I/O (extractSessionText, provider.embed via
+   * embedChunks) happens here; the returned plan is flushed synchronously later.
+   */
+  private async prepareFile(file: WorkspaceFile): Promise<FilePlan> {
     const model = this.provider?.model ?? "fts-only";
+
+    let text: string;
+    if (file.source === "sessions") {
+      const result = await extractSessionText(file.absPath);
+      // Track the file even if empty (prevents re-indexing on every sync).
+      if (result.messageCount === 0) return { file, chunks: [], embeddings: null, model };
+      text = result.text;
+    } else if (file.relPath.startsWith("memory/") && file.relPath.endsWith(".jsonl")) {
+      const result = extractMemoryAppendJsonlText(file.absPath);
+      // Track the file even if empty/malformed so unchanged files are skipped.
+      if (result.entryCount === 0) return { file, chunks: [], embeddings: null, model };
+      text = result.text;
+    } else {
+      text = readFileSync(file.absPath, "utf-8");
+    }
+
+    const chunks = chunkMarkdown(text, this.chunkConfig);
+    const embeddings = await this.embedChunks(file, chunks, model);
+    return { file, chunks, embeddings, model };
+  }
+
+  /**
+   * Phase 2: write a prepared file to the DB. SYNCHRONOUS — no `await` — so it
+   * is safe to run inside `db.transaction()`. Empty plans (chunks: []) still
+   * refresh the files-table row so an unchanged file is skipped next sync.
+   */
+  private flushFile(plan: FilePlan): void {
+    const { file, chunks, embeddings, model } = plan;
     const now = Date.now();
 
     this.removeFile(file.relPath);
-
-    const embeddings = await this.embedChunks(file, chunks, model);
 
     const insertChunk = this.db.query(
       "INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
