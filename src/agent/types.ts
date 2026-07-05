@@ -253,6 +253,12 @@ export interface ToolContext {
   emit: (event: StreamEvent) => void;
   /** True when running in headless mode (heartbeat/cron) */
   headless?: boolean;
+  /**
+   * Per-run skill env vars, merged over process.env for subprocesses that need
+   * them (the bash tool). Kept per-run (not written to the global process.env)
+   * so concurrent sessions can't leak each other's skill secrets.
+   */
+  skillEnv?: Record<string, string>;
 }
 
 /**

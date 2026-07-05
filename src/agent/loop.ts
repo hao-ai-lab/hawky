@@ -40,7 +40,7 @@ import { sanitizeHistoryDocuments } from "./document-sanitize.js";
 import { sanitizeCombinedAttachmentBudget } from "./combined-attachment-budget.js";
 import { peekTaskStore } from "../tools/task_global.js";
 import { loadAllSkills } from "../skills/loader.js";
-import { applySkillEnvOverrides } from "../skills/env.js";
+import { buildSkillEnv } from "../skills/env.js";
 import { truncateToolResult } from "./normalize.js";
 import { LoopGuard } from "./loop_guard.js";
 import { getCostTracker, calculateCost } from "./cost-tracker.js";
@@ -111,6 +111,8 @@ export class AgentLoop {
   private permissionCache = new PermissionCache();
   private abortController: AbortController | null = null;
   private running = false;
+  /** Per-run skill env vars for this session's subprocesses (never global). */
+  private skillEnv: Record<string, string> = {};
   private totalUsage: TokenUsage = { input_tokens: 0, output_tokens: 0 };
   /**
    * Gate counters for the per-turn <system-reminder> block. The reminder
@@ -261,12 +263,16 @@ export class AgentLoop {
     this.running = true;
     this.abortController = new AbortController();
 
-    // Inject per-skill env vars (reverted in finally block)
-    let revertEnv: (() => void) | null = null;
+    // Build this session's per-run skill env vars. Kept on the instance (which
+    // is per-session) and passed to subprocesses via ToolContext — never written
+    // to the shared global process.env, so concurrent sessions can't leak
+    // each other's skill secrets.
     try {
       const skills = loadAllSkills(this.config.workspace_dir);
-      revertEnv = applySkillEnvOverrides(skills, this.config.skills?.entries);
-    } catch { /* skill env injection is best-effort */ }
+      this.skillEnv = buildSkillEnv(skills, this.config.skills?.entries);
+    } catch {
+      this.skillEnv = {}; // skill env injection is best-effort
+    }
 
     try {
       // Build per-turn reminders (task status, date) — but only when both
@@ -375,7 +381,6 @@ export class AgentLoop {
     } finally {
       this.running = false;
       this.abortController = null;
-      revertEnv?.(); // Revert skill env vars
     }
   }
 
@@ -646,6 +651,7 @@ export class AgentLoop {
         abort_signal: signal,
         emit: (event: StreamEvent) => this.emitter.emit(event),
         headless,
+        skillEnv: this.skillEnv,
         _agentLoop: this,
         _provider: this.provider,
         _registry: this.registry,
