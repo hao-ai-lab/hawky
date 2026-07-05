@@ -16,9 +16,17 @@ import { parseSkillConfig } from "./frontmatter.js";
 // -----------------------------------------------------------------------------
 
 const BLOCKED_ENV_VARS = new Set([
+  // Core shell/session identity
   "PATH", "HOME", "SHELL", "USER", "TERM", "LANG",
   "PWD", "OLDPWD", "TMPDIR", "EDITOR", "VISUAL",
-  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+  // Dynamic-loader injection (LD_PRELOAD and the macOS DYLD_INSERT_LIBRARIES
+  // equivalent load attacker code into every child process).
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+  "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+  // Shell/interpreter code-execution hooks. The bash tool runs `bash -c`, and
+  // NON-interactive bash sources $BASH_ENV (and sh sources $ENV) before the
+  // command — so these turn "set an env var" into arbitrary code execution.
+  "BASH_ENV", "ENV", "BASH_XTRACEFD",
   "OPENSSL_CONF", "NODE_OPTIONS", "BUN_OPTIONS",
 ]);
 

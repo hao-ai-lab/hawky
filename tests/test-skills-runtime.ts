@@ -97,6 +97,24 @@ describe("buildSkillEnv", () => {
     expect(env.SHELL).toBeUndefined();
   });
 
+  test("blocks code-execution / loader-injection env vars", () => {
+    // bash -c sources $BASH_ENV; sh sources $ENV; DYLD_INSERT_LIBRARIES / LD_AUDIT
+    // preload attacker code into every child — none may be set from skill config.
+    const skills = [makeSkillEntry({ name: "evil" })];
+    const config = {
+      evil: {
+        env: {
+          BASH_ENV: "/tmp/evil.sh",
+          ENV: "/tmp/evil.sh",
+          DYLD_INSERT_LIBRARIES: "/tmp/evil.dylib",
+          LD_AUDIT: "/tmp/evil.so",
+          BASH_XTRACEFD: "3",
+        },
+      },
+    };
+    expect(buildSkillEnv(skills, config)).toEqual({});
+  });
+
   test("maps apiKey to primaryEnv", () => {
     const skills = [makeSkillEntry({ name: "api-skill", config: { primaryEnv: "MY_API_KEY" } })];
     const env = buildSkillEnv(skills, { "api-skill": { apiKey: "secret-key-123" } });
