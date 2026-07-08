@@ -9,7 +9,7 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applySkillEnvOverrides } from "../src/skills/env.js";
+import { buildSkillEnv } from "../src/skills/env.js";
 import { buildSkillCommands, sanitizeCommandName, formatSkillInvocation } from "../src/skills/commands.js";
 import { isSkillsDirty, markSkillsDirty, clearSkillsDirty } from "../src/skills/watcher.js";
 import { createSkill } from "../src/skills/create.js";
@@ -52,102 +52,109 @@ afterEach(() => {
 // Env Var Injection
 // =============================================================================
 
-describe("applySkillEnvOverrides", () => {
-  test("injects env vars from config", () => {
+describe("buildSkillEnv", () => {
+  test("returns env vars from config WITHOUT mutating process.env", () => {
     const skills = [makeSkillEntry({ name: "my-skill" })];
     const config = { "my-skill": { env: { MY_TEST_VAR: "hello" } } };
 
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.MY_TEST_VAR).toBe("hello");
-
-    revert();
+    const env = buildSkillEnv(skills, config);
+    expect(env.MY_TEST_VAR).toBe("hello");
+    // The global is never touched — this is the whole point of the fix.
     expect(process.env.MY_TEST_VAR).toBeUndefined();
   });
 
-  test("reverts env vars after revert() called", () => {
+  test("collects multiple vars", () => {
     const skills = [makeSkillEntry({ name: "s1" })];
-    const config = { s1: { env: { REVERT_TEST_A: "a", REVERT_TEST_B: "b" } } };
+    const config = { s1: { env: { A: "a", B: "b" } } };
 
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.REVERT_TEST_A).toBe("a");
-    expect(process.env.REVERT_TEST_B).toBe("b");
-
-    revert();
-    expect(process.env.REVERT_TEST_A).toBeUndefined();
-    expect(process.env.REVERT_TEST_B).toBeUndefined();
+    const env = buildSkillEnv(skills, config);
+    expect(env).toEqual({ A: "a", B: "b" });
+    expect(process.env.A).toBeUndefined();
+    expect(process.env.B).toBeUndefined();
   });
 
-  test("does not overwrite existing env vars", () => {
+  test("does not shadow existing real env vars (real env wins)", () => {
     process.env.EXISTING_VAR_TEST = "original";
-    const skills = [makeSkillEntry({ name: "s1" })];
-    const config = { s1: { env: { EXISTING_VAR_TEST: "overwritten" } } };
+    try {
+      const skills = [makeSkillEntry({ name: "s1" })];
+      const config = { s1: { env: { EXISTING_VAR_TEST: "overwritten" } } };
 
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.EXISTING_VAR_TEST).toBe("original"); // NOT overwritten
-
-    revert();
-    expect(process.env.EXISTING_VAR_TEST).toBe("original"); // Still original
-    delete process.env.EXISTING_VAR_TEST;
+      const env = buildSkillEnv(skills, config);
+      expect(env.EXISTING_VAR_TEST).toBeUndefined(); // real env wins → not claimed
+      expect(process.env.EXISTING_VAR_TEST).toBe("original");
+    } finally {
+      delete process.env.EXISTING_VAR_TEST;
+    }
   });
 
   test("blocks dangerous env vars (PATH, HOME, SHELL)", () => {
-    const originalPath = process.env.PATH;
     const skills = [makeSkillEntry({ name: "evil" })];
     const config = { evil: { env: { PATH: "/tmp/evil", HOME: "/tmp", SHELL: "/bin/evil" } } };
 
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.PATH).toBe(originalPath); // NOT changed
+    const env = buildSkillEnv(skills, config);
+    expect(env.PATH).toBeUndefined();
+    expect(env.HOME).toBeUndefined();
+    expect(env.SHELL).toBeUndefined();
+  });
 
-    revert();
+  test("blocks code-execution / loader-injection env vars", () => {
+    // bash -c sources $BASH_ENV; sh sources $ENV; DYLD_INSERT_LIBRARIES / LD_AUDIT
+    // preload attacker code into every child — none may be set from skill config.
+    const skills = [makeSkillEntry({ name: "evil" })];
+    const config = {
+      evil: {
+        env: {
+          BASH_ENV: "/tmp/evil.sh",
+          ENV: "/tmp/evil.sh",
+          DYLD_INSERT_LIBRARIES: "/tmp/evil.dylib",
+          LD_AUDIT: "/tmp/evil.so",
+          BASH_XTRACEFD: "3",
+        },
+      },
+    };
+    expect(buildSkillEnv(skills, config)).toEqual({});
   });
 
   test("maps apiKey to primaryEnv", () => {
-    const skills = [makeSkillEntry({
-      name: "api-skill",
-      config: { primaryEnv: "MY_API_KEY" },
-    })];
-    const config = { "api-skill": { apiKey: "secret-key-123" } };
-
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.MY_API_KEY).toBe("secret-key-123");
-
-    revert();
+    const skills = [makeSkillEntry({ name: "api-skill", config: { primaryEnv: "MY_API_KEY" } })];
+    const env = buildSkillEnv(skills, { "api-skill": { apiKey: "secret-key-123" } });
+    expect(env.MY_API_KEY).toBe("secret-key-123");
     expect(process.env.MY_API_KEY).toBeUndefined();
   });
 
   test("maps apiKey to first requires.env if no primaryEnv", () => {
-    const skills = [makeSkillEntry({
-      name: "env-skill",
-      config: { requires: { env: ["SLACK_BOT_TOKEN"] } },
-    })];
-    const config = { "env-skill": { apiKey: "xoxb-test-token" } };
-
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.SLACK_BOT_TOKEN).toBe("xoxb-test-token");
-
-    revert();
-    expect(process.env.SLACK_BOT_TOKEN).toBeUndefined();
+    const skills = [makeSkillEntry({ name: "env-skill", config: { requires: { env: ["SLACK_BOT_TOKEN"] } } })];
+    const env = buildSkillEnv(skills, { "env-skill": { apiKey: "xoxb-test-token" } });
+    expect(env.SLACK_BOT_TOKEN).toBe("xoxb-test-token");
   });
 
   test("skips ineligible skills", () => {
     const skills = [makeSkillEntry({ name: "disabled", eligible: false })];
-    const config = { disabled: { env: { SHOULD_NOT_SET: "bad" } } };
-
-    const revert = applySkillEnvOverrides(skills, config);
-    expect(process.env.SHOULD_NOT_SET).toBeUndefined();
-
-    revert();
+    const env = buildSkillEnv(skills, { disabled: { env: { SHOULD_NOT_SET: "bad" } } });
+    expect(env.SHOULD_NOT_SET).toBeUndefined();
   });
 
-  test("handles missing config gracefully", () => {
-    const skills = [makeSkillEntry({ name: "no-config" })];
-    const revert = applySkillEnvOverrides(skills, undefined);
-    revert(); // Should not throw
+  test("handles missing config / empty skills gracefully", () => {
+    expect(buildSkillEnv([makeSkillEntry({ name: "no-config" })], undefined)).toEqual({});
+    expect(buildSkillEnv([], {})).toEqual({});
   });
 
-  test("handles empty skills array", () => {
-    const revert = applySkillEnvOverrides([], {});
-    revert(); // Should not throw
+  // Regression for #13: two skills configured in two different sessions must NOT
+  // see each other's secrets. buildSkillEnv is pure (no global), so each
+  // session's map is independent and the global is never touched.
+  test("two sessions' env maps are isolated and the global is untouched", () => {
+    const sessionA = buildSkillEnv(
+      [makeSkillEntry({ name: "slack", config: { primaryEnv: "SLACK_TOKEN" } })],
+      { slack: { apiKey: "tokenA" } },
+    );
+    const sessionB = buildSkillEnv(
+      [makeSkillEntry({ name: "slack", config: { primaryEnv: "SLACK_TOKEN" } })],
+      { slack: { apiKey: "tokenB" } },
+    );
+
+    expect(sessionA.SLACK_TOKEN).toBe("tokenA");
+    expect(sessionB.SLACK_TOKEN).toBe("tokenB"); // NOT "tokenA" — no cross-leak
+    expect(process.env.SLACK_TOKEN).toBeUndefined(); // never leaked to the global
   });
 });
 

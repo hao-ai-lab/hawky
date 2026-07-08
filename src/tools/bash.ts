@@ -52,6 +52,8 @@ export interface BashExecOptions {
   timeout_ms?: number;
   working_directory: string;
   abort_signal: AbortSignal;
+  /** Per-run skill env vars merged over process.env for this subprocess. */
+  env?: Record<string, string>;
   /** Called for each line of stdout/stderr */
   on_output?: (line: string, stream_type: "stdout" | "stderr") => void;
 }
@@ -86,7 +88,8 @@ export async function executeBash(opts: BashExecOptions): Promise<BashExecResult
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    env: process.env,
+    // Merge per-run skill env over the base env. Never mutate process.env.
+    env: opts.env ? { ...process.env, ...opts.env } : process.env,
   });
 
   let timedOut = false;
@@ -321,6 +324,7 @@ async function execute(input: BashToolInput, context: ToolContext): Promise<Tool
     timeout_ms,
     working_directory: context.working_directory,
     abort_signal: context.abort_signal,
+    env: context.skillEnv,
     on_output: (line, stream_type) => {
       context.emit({
         type: "tool_streaming",

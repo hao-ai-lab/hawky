@@ -1,9 +1,11 @@
 // =============================================================================
 // Skill Environment Variable Injection
 //
-// Injects per-skill env vars before an agent run and reverts after.
-// Handles apiKey → primaryEnv mapping.
-// Blocks obvious dangerous vars (PATH, HOME, SHELL, etc.).
+// Builds a per-run env map of a run's skill env vars. The map is passed to the
+// subprocesses that consume it (the bash tool) via ToolContext — it is NEVER
+// written to the shared global process.env, which would leak one session's
+// secrets into a concurrently-running session on the multi-session gateway.
+// Handles apiKey → primaryEnv mapping. Blocks dangerous vars (PATH, HOME, ...).
 // =============================================================================
 
 import type { SkillEntry, SkillUserConfig, SkillConfig } from "./types.js";
@@ -14,9 +16,17 @@ import { parseSkillConfig } from "./frontmatter.js";
 // -----------------------------------------------------------------------------
 
 const BLOCKED_ENV_VARS = new Set([
+  // Core shell/session identity
   "PATH", "HOME", "SHELL", "USER", "TERM", "LANG",
   "PWD", "OLDPWD", "TMPDIR", "EDITOR", "VISUAL",
-  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+  // Dynamic-loader injection (LD_PRELOAD and the macOS DYLD_INSERT_LIBRARIES
+  // equivalent load attacker code into every child process).
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+  "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+  // Shell/interpreter code-execution hooks. The bash tool runs `bash -c`, and
+  // NON-interactive bash sources $BASH_ENV (and sh sources $ENV) before the
+  // command — so these turn "set an env var" into arbitrary code execution.
+  "BASH_ENV", "ENV", "BASH_XTRACEFD",
   "OPENSSL_CONF", "NODE_OPTIONS", "BUN_OPTIONS",
 ]);
 
@@ -25,33 +35,33 @@ function isDangerous(key: string): boolean {
 }
 
 // -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
-
-interface EnvUpdate {
-  key: string;
-  prev: string | undefined; // Original value (undefined = didn't exist)
-}
-
-// -----------------------------------------------------------------------------
 // Injection
 // -----------------------------------------------------------------------------
 
 /**
- * Apply per-skill env vars from config. Returns a reverter function.
+ * Build the per-run env overrides for a set of skills — WITHOUT touching the
+ * global process.env. The returned map is merged over process.env only for the
+ * subprocesses that need it (the bash tool), so two sessions running turns
+ * concurrently on the shared gateway never see each other's skill secrets.
  *
  * Flow:
- * 1. For each skill, read skills.entries.<name> from config
- * 2. Inject .env vars (only if not already in process.env)
+ * 1. For each eligible skill, read skills.entries.<name> from config
+ * 2. Collect .env vars (skip if already in the real process.env — real env wins)
  * 3. Map .apiKey to the skill's primaryEnv var
- * 4. Block dangerous vars
- * 5. Return reverter that restores all changed vars
+ * 4. Block dangerous vars; first skill wins on collisions
  */
-export function applySkillEnvOverrides(
+export function buildSkillEnv(
   skills: SkillEntry[],
   userConfig?: Record<string, SkillUserConfig>,
-): () => void {
-  const updates: EnvUpdate[] = [];
+): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  const claim = (key: string, value: string): void => {
+    if (isDangerous(key)) return;
+    if (process.env[key] !== undefined) return; // real env wins
+    if (env[key] !== undefined) return; // first skill wins
+    env[key] = value;
+  };
 
   for (const skill of skills) {
     if (!skill.eligible) continue;
@@ -59,37 +69,18 @@ export function applySkillEnvOverrides(
     const cfg = userConfig?.[skill.name];
     if (!cfg) continue;
 
-    // Inject .env vars
     if (cfg.env) {
-      for (const [key, value] of Object.entries(cfg.env)) {
-        if (isDangerous(key)) continue;
-        if (process.env[key] !== undefined) continue; // Don't overwrite existing
-
-        updates.push({ key, prev: process.env[key] });
-        process.env[key] = value;
-      }
+      for (const [key, value] of Object.entries(cfg.env)) claim(key, value);
     }
 
     // Map apiKey → primaryEnv
     if (cfg.apiKey && skill.config) {
       const primaryEnv = extractPrimaryEnv(skill.config);
-      if (primaryEnv && !isDangerous(primaryEnv) && process.env[primaryEnv] === undefined) {
-        updates.push({ key: primaryEnv, prev: process.env[primaryEnv] });
-        process.env[primaryEnv] = cfg.apiKey;
-      }
+      if (primaryEnv) claim(primaryEnv, cfg.apiKey);
     }
   }
 
-  // Return reverter
-  return () => {
-    for (const update of updates) {
-      if (update.prev === undefined) {
-        delete process.env[update.key];
-      } else {
-        process.env[update.key] = update.prev;
-      }
-    }
-  };
+  return env;
 }
 
 /**
