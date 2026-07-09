@@ -288,10 +288,8 @@ final class LiveSessionStore {
     private let realtimeFrameFeeder = RealtimeFrameFeeder()
     private let liveTimeline = LiveTimelineStore()
     private var latestTimelineVisualFrame: (refID: String, frame: LiveJPEGFrame, capturedAtNs: UInt64)?
-    private var toolCameraFrames = LiveToolCameraFrameCache()
     private static let turnVisualFreshnessNs: UInt64 = 1_000_000_000
     private static let turnVisualMaxAgeNs: UInt64 = 2_000_000_000
-    private static let liveToolCameraFrameMaxAgeNs: UInt64 = 30_000_000_000
     private static let turnVisualInjectionBudgetNs: UInt64 = 120_000_000
     /// Parallel mic capture used ONLY for recording when the provider owns the
     /// realtime mic (WebRTC) and therefore never tees PCM to `recordingSink`.
