@@ -12,7 +12,7 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createMemoryWatcher, type MemoryWatcher } from "../src/memory/watcher.js";
+import { createMemoryWatcher, makeIgnored, type MemoryWatcher } from "../src/memory/watcher.js";
 import { MemoryIndex } from "../src/memory/index.js";
 
 let tempDir: string;
@@ -140,5 +140,25 @@ describe("MemoryIndex reindexes a live-edited root .md", () => {
     } finally {
       idx.close();
     }
+  });
+});
+
+// chokidar hands the `ignored` predicate a forward-slash-normalized path on
+// every platform, while the watch roots use the native separator. makeIgnored
+// must compare both as POSIX paths so vendored-dir pruning still works on
+// Windows (where roots contain `\`). These assertions cover the `\` shape.
+describe("makeIgnored is separator-agnostic (Windows paths)", () => {
+  test("ignores vendored segments and preserves roots for both / and \\ inputs", () => {
+    const posix = makeIgnored(["/ws/memory"]);
+    expect(posix("/ws/memory/2026-07-09.md")).toBe(false); // real memory file
+    expect(posix("/ws/memory/node_modules/dep.md")).toBe(true); // vendored
+    expect(posix("/ws/memory")).toBe(false); // the root itself
+    expect(posix("/ws/memory/node_modules-notes.md")).toBe(false); // substring, not a segment
+
+    // Windows-style root + the forward-slash path chokidar would pass.
+    const win = makeIgnored(["C:\\ws\\memory"]);
+    expect(win("C:/ws/memory/2026-07-09.md")).toBe(false);
+    expect(win("C:/ws/memory/node_modules/dep.md")).toBe(true);
+    expect(win("C:/ws/memory")).toBe(false);
   });
 });

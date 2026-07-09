@@ -7,7 +7,12 @@
 // =============================================================================
 
 import { watch } from "chokidar";
-import { sep } from "node:path";
+
+// chokidar normalizes the path it passes to an `ignored` *function* predicate
+// to forward slashes on every platform, while the watch roots are built with
+// the native separator. Compare both sides as POSIX-style paths so the segment
+// match works on Windows too (on macOS/Linux this is a no-op).
+const toPosix = (p: string): string => p.replace(/\\/g, "/");
 
 export interface MemoryWatcher {
   close(): void;
@@ -24,14 +29,18 @@ const IGNORED_DIRS = new Set([".git", "node_modules"]);
  * segment, only for segments below one of the watch roots — never the roots or
  * their ancestors (a root may live under e.g. a `node_modules/` directory).
  */
-function makeIgnored(roots: string[]): (path: string) => boolean {
-  const normRoots = roots.map((r) => (r.endsWith(sep) ? r.slice(0, -1) : r));
-  return (path: string): boolean => {
-    const root = normRoots.find((r) => path === r || path.startsWith(r + sep));
+export function makeIgnored(roots: string[]): (path: string) => boolean {
+  const normRoots = roots.map((r) => {
+    const p = toPosix(r);
+    return p.endsWith("/") ? p.slice(0, -1) : p;
+  });
+  return (rawPath: string): boolean => {
+    const path = toPosix(rawPath);
+    const root = normRoots.find((r) => path === r || path.startsWith(r + "/"));
     if (!root) return false;
     const rel = path.slice(root.length + 1);
     if (!rel) return false; // the root itself
-    return rel.split(sep).some((segment) => IGNORED_DIRS.has(segment));
+    return rel.split("/").some((segment) => IGNORED_DIRS.has(segment));
   };
 }
 

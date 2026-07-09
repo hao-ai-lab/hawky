@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applySkillEnvOverrides } from "../src/skills/env.js";
 import { buildSkillCommands, sanitizeCommandName, formatSkillInvocation } from "../src/skills/commands.js";
-import { isSkillsDirty, markSkillsDirty, clearSkillsDirty, startSkillsWatcher, stopSkillsWatcher } from "../src/skills/watcher.js";
+import { isSkillsDirty, markSkillsDirty, clearSkillsDirty, startSkillsWatcher, stopSkillsWatcher, makeIgnored } from "../src/skills/watcher.js";
 import { createSkill } from "../src/skills/create.js";
 import { loadAllSkills, resetBinCache } from "../src/skills/loader.js";
 import type { SkillEntry } from "../src/skills/types.js";
@@ -433,5 +433,24 @@ describe("createSkill", () => {
     const wsDir = join(tempDir, "workspace");
     const result = createSkill("valid-skill.v2", "ok", "workspace", wsDir);
     expect(result.ok).toBe(true);
+  });
+});
+
+// chokidar hands the `ignored` predicate a forward-slash path on every platform
+// while the watch roots use the native separator. makeIgnored must compare both
+// as POSIX so vendored-dir pruning works on Windows too. The skill folder name
+// itself (rel[0]) is never junk — only segments nested inside it.
+describe("skills makeIgnored is separator-agnostic (Windows paths)", () => {
+  test("prunes vendored dirs inside a skill, never the root or the skill folder name", () => {
+    const ig = makeIgnored(["/cfg/skills"]);
+    expect(ig("/cfg/skills/my-skill/SKILL.md")).toBe(false);       // real skill file
+    expect(ig("/cfg/skills/my-skill/node_modules/x.md")).toBe(true); // vendored inside skill
+    expect(ig("/cfg/skills/build/SKILL.md")).toBe(false);          // skill folder named "build" is fine
+    expect(ig("/cfg/skills")).toBe(false);                          // the root itself
+
+    const win = makeIgnored(["C:\\cfg\\skills"]);
+    expect(win("C:/cfg/skills/my-skill/SKILL.md")).toBe(false);
+    expect(win("C:/cfg/skills/my-skill/node_modules/x.md")).toBe(true);
+    expect(win("C:/cfg/skills/build/SKILL.md")).toBe(false);
   });
 });
