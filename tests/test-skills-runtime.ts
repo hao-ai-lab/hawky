@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildSkillEnv } from "../src/skills/env.js";
 import { buildSkillCommands, sanitizeCommandName, formatSkillInvocation } from "../src/skills/commands.js";
-import { isSkillsDirty, markSkillsDirty, clearSkillsDirty } from "../src/skills/watcher.js";
+import { isSkillsDirty, markSkillsDirty, clearSkillsDirty, startSkillsWatcher, stopSkillsWatcher, makeIgnored } from "../src/skills/watcher.js";
 import { createSkill } from "../src/skills/create.js";
 import { loadAllSkills, resetBinCache } from "../src/skills/loader.js";
 import type { SkillEntry } from "../src/skills/types.js";
@@ -289,6 +289,88 @@ describe("Skills dirty flag", () => {
 });
 
 // =============================================================================
+// Integration: Real Skill Watcher (chokidar over the filesystem)
+//
+// Regression guard for #9 — the watcher previously passed glob strings to
+// chokidar v5 (globs unsupported since v4), so it registered but never fired.
+// =============================================================================
+
+async function waitFor(cond: () => boolean, timeoutMs = 5000, stepMs = 50): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return cond();
+}
+
+describe("Skill watcher fires on real file changes", () => {
+  afterEach(() => {
+    stopSkillsWatcher();
+    clearSkillsDirty();
+  });
+
+  test("editing a workspace SKILL.md marks skills dirty", async () => {
+    const skillDir = join(tempDir, "skills", "demo");
+    mkdirSync(skillDir, { recursive: true });
+
+    clearSkillsDirty();
+    startSkillsWatcher(tempDir);
+
+    // Let chokidar finish its initial scan before writing (ignoreInitial: true).
+    await new Promise((r) => setTimeout(r, 400));
+    writeFileSync(join(skillDir, "SKILL.md"), "# demo skill\n");
+
+    expect(await waitFor(() => isSkillsDirty())).toBe(true);
+  });
+
+  test("editing a non-SKILL.md file does not mark dirty", async () => {
+    const skillDir = join(tempDir, "skills", "demo");
+    mkdirSync(skillDir, { recursive: true });
+
+    clearSkillsDirty();
+    startSkillsWatcher(tempDir);
+
+    await new Promise((r) => setTimeout(r, 400));
+    writeFileSync(join(skillDir, "notes.md"), "not a skill\n");
+
+    // Give the watcher + 250ms debounce time to (not) fire.
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(isSkillsDirty()).toBe(false);
+  });
+
+  // Regression for the over-broad ignore: "prompt-builder" contains the
+  // substring "build", which the old unanchored /build/ regex pruned.
+  test("skill dir whose name contains an ignored word (prompt-builder) still fires", async () => {
+    const skillDir = join(tempDir, "skills", "prompt-builder");
+    mkdirSync(skillDir, { recursive: true });
+
+    clearSkillsDirty();
+    startSkillsWatcher(tempDir);
+
+    await new Promise((r) => setTimeout(r, 400));
+    writeFileSync(join(skillDir, "SKILL.md"), "# prompt-builder\n");
+
+    expect(await waitFor(() => isSkillsDirty())).toBe(true);
+  });
+
+  // A skill named exactly like a reserved dir must still work: the ignore is
+  // scoped to segments *below* the watch root, not the skill folder itself.
+  test("skill named exactly 'build' still fires", async () => {
+    const skillDir = join(tempDir, "skills", "build");
+    mkdirSync(skillDir, { recursive: true });
+
+    clearSkillsDirty();
+    startSkillsWatcher(tempDir);
+
+    await new Promise((r) => setTimeout(r, 400));
+    writeFileSync(join(skillDir, "SKILL.md"), "# build\n");
+
+    expect(await waitFor(() => isSkillsDirty())).toBe(true);
+  });
+});
+
+// =============================================================================
 // Integration: Skill Commands from Real Skills
 // =============================================================================
 
@@ -358,5 +440,24 @@ describe("createSkill", () => {
     const wsDir = join(tempDir, "workspace");
     const result = createSkill("valid-skill.v2", "ok", "workspace", wsDir);
     expect(result.ok).toBe(true);
+  });
+});
+
+// chokidar hands the `ignored` predicate a forward-slash path on every platform
+// while the watch roots use the native separator. makeIgnored must compare both
+// as POSIX so vendored-dir pruning works on Windows too. The skill folder name
+// itself (rel[0]) is never junk — only segments nested inside it.
+describe("skills makeIgnored is separator-agnostic (Windows paths)", () => {
+  test("prunes vendored dirs inside a skill, never the root or the skill folder name", () => {
+    const ig = makeIgnored(["/cfg/skills"]);
+    expect(ig("/cfg/skills/my-skill/SKILL.md")).toBe(false);       // real skill file
+    expect(ig("/cfg/skills/my-skill/node_modules/x.md")).toBe(true); // vendored inside skill
+    expect(ig("/cfg/skills/build/SKILL.md")).toBe(false);          // skill folder named "build" is fine
+    expect(ig("/cfg/skills")).toBe(false);                          // the root itself
+
+    const win = makeIgnored(["C:\\cfg\\skills"]);
+    expect(win("C:/cfg/skills/my-skill/SKILL.md")).toBe(false);
+    expect(win("C:/cfg/skills/my-skill/node_modules/x.md")).toBe(true);
+    expect(win("C:/cfg/skills/build/SKILL.md")).toBe(false);
   });
 });
