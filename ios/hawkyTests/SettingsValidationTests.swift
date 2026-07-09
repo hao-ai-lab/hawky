@@ -386,6 +386,7 @@ import Foundation
         let bridgeBackedToolNames = [
             "session_get_info",
             "session_send_message",
+            "send_photo",
             "memory_search",
             "memory_append",
             "create_intention",

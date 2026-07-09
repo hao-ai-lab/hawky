@@ -18,6 +18,31 @@ enum SafetyCheckCopy {
     static let enabledMessage = "Safety Check on — watching for hazards."
 }
 
+/// Keeps the freshest captured camera frame for explicit media tools. This is
+/// intentionally separate from the realtime visual send path because static
+/// scene dedupe may suppress frames that "send a photo" still needs.
+struct LiveToolCameraFrameCache {
+    private var latest: (frame: LiveJPEGFrame, capturedAtNs: UInt64)?
+
+    mutating func record(_ frame: LiveJPEGFrame, capturedAtNs: UInt64) {
+        latest = (frame, capturedAtNs)
+    }
+
+    mutating func clear() {
+        latest = nil
+    }
+
+    func freshFrame(isStreamingVisual: Bool, nowNs: UInt64, maxAgeNs: UInt64) -> LiveJPEGFrame? {
+        guard isStreamingVisual,
+              let latest,
+              nowNs >= latest.capturedAtNs,
+              nowNs - latest.capturedAtNs <= maxAgeNs else {
+            return nil
+        }
+        return latest.frame
+    }
+}
+
 /// Why a Live session can't be started right now. Surfaced to the UI so a tap
 /// on the (no-longer-disabled) start button can explain the blocker instead of
 /// silently doing nothing. Reading it is non-destructive — it never touches
@@ -257,6 +282,8 @@ final class LiveSessionStore {
     /// Records the active Live session's streams to disk + upload. It never taps
     /// audio itself; Live tees already-captured mic/camera frames into it.
     private let recordingSink = LiveRecordingSink()
+    private var toolCameraFrames = LiveToolCameraFrameCache()
+    private static let liveToolCameraFrameMaxAgeNs: UInt64 = 30_000_000_000
     /// Parallel mic capture used ONLY for recording when the provider owns the
     /// realtime mic (WebRTC) and therefore never tees PCM to `recordingSink`.
     /// nil for providers whose mic chunks already flow through `ingestAudio`.
@@ -481,7 +508,8 @@ final class LiveSessionStore {
         let context = LiveToolContext(
             config: config,
             gatewayBridge: gatewayBridge,
-            awaitPendingTranscriptAppend: nil
+            awaitPendingTranscriptAppend: nil,
+            latestCameraFrame: latestCameraFrameForTool
         )
         return await LiveToolRegistry.default.execute(name: name, argumentsJSON: argumentsJSON, context: context)
     }
@@ -849,6 +877,14 @@ final class LiveSessionStore {
             return person
         }
         return nil
+    }
+
+    private func latestCameraFrameForTool() async -> LiveJPEGFrame? {
+        toolCameraFrames.freshFrame(
+            isStreamingVisual: isStreamingVisual,
+            nowNs: Self.currentUptimeNanoseconds(),
+            maxAgeNs: Self.liveToolCameraFrameMaxAgeNs
+        )
     }
 
     /// A bridge for People-DB ops that works in ANY session state. The face DB is
@@ -1526,6 +1562,7 @@ final class LiveSessionStore {
         effectiveConfig.bridgeAvailability = effectiveConfig.gatewayBridgeEnabled ? .available : .disabled
         phase = .connecting
         bridgeStatus = .idle
+        toolCameraFrames.clear()
         // A start is now underway — clear any stale "can't start" alert so it
         // can't linger over a connecting/connected session.
         pendingUserAlert = nil
@@ -1653,6 +1690,9 @@ final class LiveSessionStore {
             rtProvider.resolveCameraPersonHook = { [weak self] name in
                 await self?.resolveCameraPersonResult(name: name) ?? .noMatch
             }
+            rtProvider.latestCameraFrameHook = { [weak self] in
+                await self?.latestCameraFrameForTool()
+            }
         }
         // Same hooks for the WebRTC (Pipecat) provider — the active realtime path.
         if let rtcProvider = nextProvider as? PipecatOpenAIRealtimeLiveSessionProvider {
@@ -1674,6 +1714,9 @@ final class LiveSessionStore {
             }
             rtcProvider.resolveCameraPersonHook = { [weak self] name in
                 await self?.resolveCameraPersonResult(name: name) ?? .noMatch
+            }
+            rtcProvider.latestCameraFrameHook = { [weak self] in
+                await self?.latestCameraFrameForTool()
             }
         }
         provider = nextProvider
@@ -2774,9 +2817,15 @@ final class LiveSessionStore {
 
     private func sendVisualFrame(_ data: Data, provider: LiveSessionProvider) async {
         guard isStreamingVisual else { return }
+        let capturedAt = Date()
+        let capturedAtNs = Self.currentUptimeNanoseconds()
+        let frame = LiveJPEGFrame(data: data, capturedAt: capturedAt)
+        // Keep the freshest captured frame available for explicit photo-sharing
+        // tools even when realtime visual dedupe suppresses static scenes.
+        toolCameraFrames.record(frame, capturedAtNs: capturedAtNs)
         diagnostics.visualFramesCaptured += 1
         diagnostics.visualBytesCaptured += data.count
-        diagnostics.lastVisualCaptureAt = Date()
+        diagnostics.lastVisualCaptureAt = capturedAt
         // Visual change gate: skip frames that are near-identical to the last one
         // we sent. A static scene otherwise floods the realtime conversation with
         // hundreds of redundant input_image items, which makes the model fixate
@@ -2794,7 +2843,6 @@ final class LiveSessionStore {
         if liveConfig.showVisualFramesInTranscript {
             appendVisualFrame(data)
         }
-        let frame = LiveJPEGFrame(data: data, capturedAt: Date())
         // Tee the same visual frame to the recorder sink when recording is on.
         recordingSink.ingestFrame(frame)
         do {
@@ -2830,6 +2878,7 @@ final class LiveSessionStore {
 
     private func stopVisualStream() async {
         isStreamingVisual = false
+        toolCameraFrames.clear()
         visualDeduplicator.reset()
         visualFramesSkipped = 0
 
@@ -4785,6 +4834,10 @@ final class LiveSessionStore {
     private func shortID(_ id: String) -> String {
         if id.count <= 8 { return id }
         return String(id.prefix(8))
+    }
+
+    nonisolated private static func currentUptimeNanoseconds() -> UInt64 {
+        UInt64(DispatchTime.now().uptimeNanoseconds)
     }
 
 }

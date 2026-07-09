@@ -162,6 +162,9 @@ struct LiveToolContext {
     /// identify them, enroll the current frame (with the given name) if new, or
     /// preserve a suppressed candidate so stale ids cannot be used for writes.
     var resolveCameraPerson: ((_ name: String?) async -> FaceIdentifyResult)?
+    /// Latest live camera frame for tools that need to ship what the user is
+    /// looking at through the gateway, without asking the model to invent bytes.
+    var latestCameraFrame: (@MainActor () async -> LiveJPEGFrame?)?
 }
 
 struct LiveToolRegistry {
@@ -192,6 +195,7 @@ struct LiveToolRegistry {
         ),
         SessionGetInfoTool(),
         SessionSendMessageTool(),
+        SendPhotoTool(),
         SummarizeSessionTool(),
         SummarizeSilenceTool(),
         IdentifyPersonTool(),
@@ -1192,6 +1196,142 @@ private struct SessionSendMessageTool: LiveTool {
             "system_messages": response.systemMessages,
             "tool_events": response.toolEvents,
         ]
+    }
+}
+
+/// Send the current camera frame through the backend `send_photo` tool. The
+/// model chooses destination/caption only; iOS attaches the latest JPEG frame.
+private struct SendPhotoTool: LiveTool {
+    let name = "send_photo"
+
+    var definition: [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": "Send a photo of what the camera currently sees to Slack. Call this when the user asks to share, send, or post a picture of what's in front of them. The current camera frame is captured and uploaded automatically — do NOT provide the image. Optionally set `to` (a #channel, person, or user id) and a `comment`; with no `to` it goes to the user's own Slack DM.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "to": [
+                        "type": "string",
+                        "description": "Optional destination: \"#channel\", a channel/user id, or a person's name. Omit for the user's own Slack DM.",
+                    ],
+                    "comment": [
+                        "type": "string",
+                        "description": "Optional caption to post with the photo.",
+                    ],
+                    "platform": [
+                        "type": "string",
+                        "enum": ["slack"],
+                        "description": "Messaging platform. Currently only slack is supported.",
+                    ],
+                ],
+                "required": [],
+                "additionalProperties": false,
+            ],
+        ]
+    }
+
+    var metadata: LiveToolMetadata {
+        LiveToolMetadata(
+            category: .media,
+            latency: .fast,
+            durability: .durable,
+            risk: .medium,
+            visibility: .model,
+            whenToUse: ["send the current camera view", "share a photo to Slack", "post what I am looking at"],
+            whenNotToUse: ["when the user only asks to send text", "when the camera is off"]
+        )
+    }
+
+    var executor: LiveToolExecutor {
+        LiveToolExecutor(runtime: .gatewayBackend, binding: "tool.invoke:send_photo", hotLoadable: true)
+    }
+
+    func isAvailable(config: LiveSessionConfig) -> Bool {
+        config.bridgeToolsAvailable
+    }
+
+    func execute(arguments: [String: Any], context: LiveToolContext) async throws -> [String: Any] {
+        guard let bridge = context.gatewayBridge else {
+            throw LiveGatewayBridgeError.notConfigured
+        }
+        let requestedPlatform = Self.trimmed(arguments["platform"]) ?? "slack"
+        guard requestedPlatform.lowercased() == "slack" else {
+            return ["ok": false, "error": "send_photo currently supports Slack only."]
+        }
+        let platform = "slack"
+        guard let frame = await context.latestCameraFrame?() else {
+            return ["ok": false, "error": "No camera frame available. Turn the camera on and try again."]
+        }
+
+        let result = await bridge.sendPhoto(
+            imageBase64: frame.data.base64EncodedString(),
+            to: Self.trimmed(arguments["to"]),
+            comment: Self.trimmed(arguments["comment"]),
+            platform: platform,
+            sessionKey: context.config.gatewayBridgeSessionKey
+        )
+        guard let result else {
+            return ["ok": false, "error": "send_photo gateway call failed. Check the gateway connection and Slack configuration."]
+        }
+        guard result.ok else {
+            return ["ok": false, "error": result.error ?? result.content ?? "send_photo failed."]
+        }
+        if Self.boolValue(result.metadata["ambiguous"]) {
+            var output: [String: Any] = [
+                "ok": false,
+                "error": result.content ?? "send_photo needs a more specific Slack recipient.",
+                "ambiguous": true,
+            ]
+            if let candidates = result.metadata["candidates"] {
+                output["candidates"] = Self.anyValue(from: candidates)
+            }
+            return output
+        }
+
+        var output: [String: Any] = [
+            "ok": true,
+            "platform": platform,
+            "bytes": frame.data.count,
+        ]
+        if let content = result.content, !content.isEmpty {
+            output["message"] = content
+        }
+        for (key, value) in result.metadata {
+            if output[key] == nil {
+                output[key] = Self.anyValue(from: value)
+            }
+        }
+        return output
+    }
+
+    private static func trimmed(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func boolValue(_ value: JSONValue?) -> Bool {
+        guard case let .bool(bool)? = value else { return false }
+        return bool
+    }
+
+    private static func anyValue(from value: JSONValue) -> Any {
+        switch value {
+        case .object(let object):
+            return object.mapValues(anyValue)
+        case .array(let array):
+            return array.map(anyValue)
+        case .string(let string):
+            return string
+        case .number(let number):
+            return number
+        case .bool(let bool):
+            return bool
+        case .null:
+            return NSNull()
+        }
     }
 }
 

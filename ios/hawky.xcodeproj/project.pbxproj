@@ -145,6 +145,7 @@
 		C11A2665DE0B47ABFD5C5D19 /* TestView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BF58E5AFCB6BCBF9B80A93 /* TestView.swift */; };
 		C184BF36777B8737049A430B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08627C84ABE5BAD5B89DAED7 /* KeychainStore.swift */; };
 		C1CB40C7B4D5C4EB938AE09C /* SessionActionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9FB96C375D7F5F74A7E7D05 /* SessionActionsTests.swift */; };
+		C1DD0371D25630D02F68AC56 /* LiveSendPhotoToolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F45B37589489D1758582D850 /* LiveSendPhotoToolTests.swift */; };
 		C51CD820EA9DA431257AECC2 /* LiveToolRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 656264D0B53B04B5DD01D13B /* LiveToolRegistry.swift */; };
 		C709F2D6B343DDFDAAAA9E88 /* RecordingsHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4091679FADA3ECFACACFA076 /* RecordingsHistoryView.swift */; };
 		C71001ECA05A8C549BE1BB33 /* NodeCapabilitiesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19F8BFE0FF53EE6632C76212 /* NodeCapabilitiesTests.swift */; };
@@ -406,6 +407,7 @@
 		EB42BFAC8A740C2F7412E0BF /* AudioError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioError.swift; sourceTree = "<group>"; };
 		EB4F96B2C419FD6A02947DAB /* pipecat-client-ios-openai-realtime-webrtc */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "pipecat-client-ios-openai-realtime-webrtc"; path = "ThirdParty/pipecat-client-ios-openai-realtime-webrtc"; sourceTree = SOURCE_ROOT; };
 		F0AD9A7EB13005D2E5C1D426 /* ReconnectingTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconnectingTransport.swift; sourceTree = "<group>"; };
+		F45B37589489D1758582D850 /* LiveSendPhotoToolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSendPhotoToolTests.swift; sourceTree = "<group>"; };
 		F59747EDB0EF6B339718C8B9 /* testEmptyState.1.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = testEmptyState.1.png; sourceTree = "<group>"; };
 		F5FD960FE07B4ABD49093D01 /* MetaWearablesRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetaWearablesRuntime.swift; sourceTree = "<group>"; };
 		F702D9CF8880F4DE9800DAF4 /* LiveSessionSummarizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSessionSummarizer.swift; sourceTree = "<group>"; };
@@ -694,6 +696,7 @@
 				2FA373294A0BDA10EE4824DE /* LiveConversationRowTests.swift */,
 				34C1875438D4FCA21C3AA993 /* LiveRealtimeResponseFloorTests.swift */,
 				6EF232360A1D3152B4166965 /* LiveRealtimeSessionConfigStatusTests.swift */,
+				F45B37589489D1758582D850 /* LiveSendPhotoToolTests.swift */,
 				84E38F3E3024E68B6F9F8254 /* LiveStartFailureClassificationTests.swift */,
 				19F8BFE0FF53EE6632C76212 /* NodeCapabilitiesTests.swift */,
 				B7B76FB840014EAE9BE45069 /* NodeRunnerTests.swift */,
@@ -1016,6 +1019,7 @@
 				1B9CE1B459F31D592941A12B /* LiveConversationRowTests.swift in Sources */,
 				53416665EC2E22831F0C76A3 /* LiveRealtimeResponseFloorTests.swift in Sources */,
 				43BE5AF5729247F82534EE96 /* LiveRealtimeSessionConfigStatusTests.swift in Sources */,
+				C1DD0371D25630D02F68AC56 /* LiveSendPhotoToolTests.swift in Sources */,
 				7B6B063F39AF2BB540F79CFF /* LiveStartFailureClassificationTests.swift in Sources */,
 				C71001ECA05A8C549BE1BB33 /* NodeCapabilitiesTests.swift in Sources */,
 				C0B942CD09B0AA6521DFB17B /* NodeRunnerTests.swift in Sources */,

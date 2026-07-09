@@ -105,7 +105,7 @@ final class RealtimeSurfaceExportTests: XCTestCase {
     func testFullSurfaceIncludesGatedTools() throws {
         let names = Set(LiveToolRegistry.default.definitions(config: fullSurfaceConfig())
             .compactMap { $0["name"] as? String })
-        for tool in ["session_send_message", "memory_search", "create_intention"] {
+        for tool in ["session_send_message", "send_photo", "memory_search", "create_intention"] {
             XCTAssertTrue(names.contains(tool), "full surface should include bridge tool \(tool)")
         }
         for tool in [
