@@ -18,6 +18,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HawkyConfig } from "../agent/types.js";
+import type { LLMProvider } from "../agent/provider.js";
 import { WorkspaceManager } from "../storage/workspace.js";
 import { distillMemory, latestDailyMtimeMs } from "./distill.js";
 import { createSubsystemLogger } from "../logging/index.js";
@@ -43,6 +44,8 @@ export interface MemorySchedulerOptions {
   workspace?: WorkspaceManager;
   /** Clock override (tests). */
   now?: () => number;
+  /** Provider override (tests) — injected into distillMemory to avoid a network call. */
+  provider?: LLMProvider;
 }
 
 export class MemoryScheduler {
@@ -50,6 +53,7 @@ export class MemoryScheduler {
   private readonly intervalMs: number;
   private readonly workspace: WorkspaceManager;
   private readonly now: () => number;
+  private readonly provider?: LLMProvider;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
 
@@ -58,6 +62,7 @@ export class MemoryScheduler {
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.workspace = opts.workspace ?? new WorkspaceManager();
     this.now = opts.now ?? (() => Date.now());
+    this.provider = opts.provider;
   }
 
   /** Start the periodic timer. First tick fires after one full interval. */
@@ -119,7 +124,7 @@ export class MemoryScheduler {
         result = await distillMemory(
           this.getConfig(),
           { scope: "global" },
-          { workspace: this.workspace },
+          { workspace: this.workspace, provider: this.provider },
         );
       } catch (err) {
         // e.g. provider/auth misconfig — don't advance the watermark, retry next tick.
@@ -127,6 +132,22 @@ export class MemoryScheduler {
       }
 
       if (!result.ok) {
+        if (result.proposedRejection) {
+          // The LLM ran and consumed the current daily logs, but the anti-lossy
+          // gate rejected the output (stashed as MEMORY.md.proposed). Re-running
+          // against the SAME inputs would just reproduce the same rejection, so
+          // advance the watermark to avoid re-invoking the LLM every tick. We
+          // retry only once daily logs actually change.
+          this.writeState({
+            lastConsolidatedMtimeMs: latest,
+            lastConsolidatedAt: new Date(this.now()).toISOString(),
+          });
+          log.info("consolidation rejected as lossy; watermark advanced to avoid re-running until inputs change", {
+            latest,
+            note: result.note,
+          });
+          return { ran: false, reason: result.note ?? "consolidation rejected as lossy (proposed)" };
+        }
         // e.g. no daily logs / empty model output — don't advance the watermark
         // so we retry next tick once something changes.
         return { ran: false, reason: result.note ?? "consolidation returned not-ok" };

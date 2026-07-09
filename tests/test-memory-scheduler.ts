@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { WorkspaceManager } from "../src/storage/workspace.js";
@@ -111,6 +111,60 @@ describe("MemoryScheduler.tick — change guard", () => {
     expect(r.reason).not.toMatch(/no change/i);
     expect(r.reason).not.toMatch(/no daily logs/i);
   });
+
+  test("a not-ok consolidation does NOT advance the watermark, so the next good tick still runs", async () => {
+    // Substantial existing MEMORY.md + a changed daily log. The config has no
+    // provider/key, so distillMemory returns not-ok (provider build fails) —
+    // standing in for a lossy-rejected consolidation, which is likewise not-ok.
+    // The invariant under test is identical: the watermark must NOT advance.
+    ws.writeFile("MEMORY.md", "# MEMORY\n\n- a substantial curated fact worth keeping around\n");
+    ws.writeFile("memory/2026-06-16.md", "# 2026-06-16\n- a\n");
+
+    const sched = new MemoryScheduler({ getConfig: () => STUB_CONFIG, workspace: ws });
+    const r = await sched.tick();
+    expect(r.ran).toBe(false);
+
+    // No watermark was persisted, so a subsequent tick would re-attempt.
+    const statePath = join(ws.getWorkspacePath(), "memory", ".consolidation-state.json");
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  test("a lossy-REJECTED consolidation advances the watermark so the LLM is not re-run every tick", async () => {
+    // Drive an ACTUAL anti-lossy rejection (not a provider-build failure):
+    // substantial MEMORY.md + a changed daily log, but the injected provider
+    // returns a tiny output that the gate rejects → proposedRejection. The
+    // scheduler must advance the watermark so a same-inputs tick does not
+    // re-invoke the LLM (the fix for the "propose thrash" every 6h).
+    ws.writeFile(
+      "MEMORY.md",
+      "# MEMORY\n\n" +
+        Array.from({ length: 12 }, (_, i) => `- curated fact number ${i} worth keeping around`).join("\n") +
+        "\n",
+    );
+    ws.writeFile("memory/2026-06-16.md", "# 2026-06-16\n- a\n");
+    const stat = statSync(join(ws.getMemoryDir(), "2026-06-16.md"));
+
+    const provider = new StubProvider("- one lone fact\n"); // far too short → rejected
+    const sched = new MemoryScheduler({ getConfig: () => STUB_CONFIG, workspace: ws, provider });
+
+    const r1 = await sched.tick();
+    expect(r1.ran).toBe(false);
+    expect(r1.reason).toMatch(/lossy/i);
+    expect(provider.calls.length).toBe(1);
+
+    // The watermark WAS advanced to the daily log's mtime.
+    const statePath = join(ws.getWorkspacePath(), "memory", ".consolidation-state.json");
+    expect(existsSync(statePath)).toBe(true);
+
+    // A second tick with the SAME (unchanged) daily log must NOT re-run the LLM.
+    const r2 = await sched.tick();
+    expect(r2.ran).toBe(false);
+    expect(r2.reason).toMatch(/no change/i);
+    expect(provider.calls.length).toBe(1); // no additional LLM call
+    // Sanity: watermark is at least the daily log mtime we consolidated up to.
+    expect(existsSync(statePath)).toBe(true);
+    void stat;
+  });
 });
 
 describe("distillAllSessions sweep", () => {
@@ -150,7 +204,15 @@ describe("distillAllSessions sweep", () => {
 
   test("uses the real LLM path through an injected provider", async () => {
     seedSession("realtime/real-1", 6);
-    const provider = new StubProvider("- distilled fact\n");
+    // Start from an empty (trivial) MEMORY.md so the anti-lossy gate is bypassed
+    // for this first consolidation — the template file is above the trivial
+    // threshold and would (correctly) reject a tiny consolidation output.
+    ws.writeFile("MEMORY.md", "");
+    // The global consolidation output must itself be substantial to pass the gate
+    // once MEMORY.md has grown; use a multi-fact body.
+    const consolidated =
+      "# MEMORY\n\n- distilled fact one\n- distilled fact two\n- distilled fact three\n";
+    const provider = new StubProvider(consolidated);
     const result = await distillAllSessions(STUB_CONFIG, {
       workspace: ws,
       provider,
@@ -161,5 +223,6 @@ describe("distillAllSessions sweep", () => {
     // provider called for the daily distill + the global consolidation.
     expect(provider.calls.length).toBeGreaterThanOrEqual(2);
     expect(ws.readFile("memory/2026-06-16.md")).toContain("distilled fact");
+    expect(ws.readFile("MEMORY.md")).toContain("distilled fact");
   });
 });

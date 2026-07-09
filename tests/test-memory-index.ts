@@ -371,6 +371,32 @@ describe("MemoryIndex — sync and FTS search", () => {
     }
   });
 
+  test("does NOT index MEMORY.md snapshots under memory/.backups/", async () => {
+    // Backup snapshots are inert recovery artifacts; indexing them would surface
+    // stale, superseded facts in memory_search. The scanner must skip the
+    // hidden .backups directory entirely.
+    const wsDir = makeWorkspace({
+      "MEMORY.md": "# Memory\n\nFavorite color: teal\n",
+      "memory/.backups/MEMORY-2026-07-09T14-30-00-000Z-abc123.md":
+        "# Memory\n\nFavorite color: STALEMAGENTA\n",
+    });
+
+    const dbPath = join(tempDir, "test.db");
+    const index = new MemoryIndex({ dbPath, workspacePath: wsDir, enableWatcher: false });
+
+    try {
+      await index.sync();
+      // The live file is searchable...
+      const live = await index.search("teal");
+      expect(live.length).toBeGreaterThan(0);
+      // ...but the stale backup content is not.
+      const stale = await index.search("STALEMAGENTA");
+      expect(stale.length).toBe(0);
+    } finally {
+      index.close();
+    }
+  });
+
   test("skips memory symlinks that escape the workspace", async () => {
     const wsDir = makeWorkspace({});
     const outside = join(tempDir, "outside.md");
