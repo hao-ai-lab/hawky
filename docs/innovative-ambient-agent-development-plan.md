@@ -152,25 +152,70 @@ unrelated later code. This is a real secret-crossing bug, not a style issue.
 
 ### #14 — Stop the destructive `MEMORY.md` consolidation
 
-**Problem.** Every six hours the global consolidation truncates `MEMORY.md` to 16k,
-feeds it to a 2048-token Haiku rewrite, and overwrites the file unconditionally with no
-backup (`distill.ts:252,288,302`). Separately, daily distillation summarizes the
-*start* of a long session rather than the end, so the most recent — usually most
-relevant — context is the part that gets dropped.
+**Problem.** Every six hours the global consolidation reads `MEMORY.md`, truncates it to
+16k chars (`distill.ts:304`, `MAX_GLOBAL_CHARS`), feeds that to a 2048-token Haiku
+rewrite (`distill.ts:356`, `MAX_GLOBAL_OUTPUT_TOKENS`) prompted to "return the FULL
+updated MEMORY.md", and unconditionally overwrites the file with a bare `writeFileSync`
+and no backup (`distill.ts:370` → `workspace.ts:233`). Separately, daily distillation
+slices the session transcript to the *first* 24k chars (`distill.ts:165`,
+`slice(0, MAX_TRANSCRIPT_CHARS)`), so it summarizes the *start* of a long session and
+drops the end — usually the most recent, most relevant context.
 
-**Blast radius.** User memory is silently and irreversibly lossy: facts past the 16k cut
-or dropped by the small rewrite model are gone with no recovery path. For a product
-whose differentiator is persistent memory, this is a credibility-critical data-loss bug.
+**Blast radius.** User memory is silently and irreversibly lossy on a normal 6h schedule.
+Anything past the 16k cut, or dropped/paraphrased to fit the 2048-token output, is gone
+with no recovery path — and because each run's output is the next run's input, the loss
+compounds (a telephone-game ratchet: facts can only be lost or held, never recovered).
+For a product whose differentiator is persistent memory, this is a credibility-critical
+data-loss bug.
 
-**Fix.**
-1. Never overwrite unconditionally: write a timestamped backup before each
-   consolidation and keep a bounded history.
-2. Change the rewrite from replace to merge/append, with an explicit fact-retention
-   check that fails closed (keep the old file if retention can't be verified).
-3. Fix daily distillation to summarize the tail of the session.
-4. Add a test asserting that a fact present before consolidation survives it.
+**Fix (ship now — safety net, ~1–2 days, low risk).** Make the existing consolidation
+non-destructive without redesigning it:
+1. Snapshot before every write: `memory/.backups/MEMORY-<ISO>.md` (bounded history),
+   then write atomically (temp file → `renameSync`), reusing the house atomic-write /
+   `.bak` pattern (`candidate.ts:326`, `session.ts:568`). Gives a recovery path.
+2. Anti-lossy gate, fail-closed: if the new output is much shorter than the existing
+   file (or its fact count drops sharply), do NOT overwrite — keep the old file, log a
+   warning, and write the candidate to `MEMORY.md.proposed` for review.
+3. Remove the 16k input truncation (`distill.ts:304`) and raise
+   `MAX_GLOBAL_OUTPUT_TOKENS` (`distill.ts:356`) so the model is not forced to compress.
+4. Fix daily distillation to keep the tail: `slice(-MAX_TRANSCRIPT_CHARS)` (or head+tail)
+   at `distill.ts:165`.
+5. Test: a 30k `MEMORY.md` is not truncated, a pre-existing fact survives consolidation,
+   a backup exists, a suspiciously-short rewrite is NOT written, and the daily summary
+   reflects the session tail.
 
-**Effort:** ~1–2 weeks. **Dependencies:** none.
+**Better direction (evidence-gated follow-up).** The deeper fix reframes the problem:
+`MEMORY.md` only needs to be *small* for the system-prompt bootstrap injection
+(`workspace.ts:305`) — retrieval already flows through the SQLite chunk index over ALL
+memory files (`index.ts`), so the durable store never needs a lossy operation. This is a
+*budgeted selection* problem, not a compression one (cf. "budgeted pre-query retention",
+EMBER, arXiv 2606.05894). Target shape: keep an append-only archive (daily logs,
+`.jsonl`, the candidate ledger — all already indexed) as truth, and make `MEMORY.md` a
+**deterministically rendered, budgeted top-K view** of verbatim "capsules" ranked by
+observed usefulness — so "consolidation" becomes "re-select the capsule set", "forgetting"
+becomes reversible demotion (still archived, still searchable), and the compounding LLM
+rewrite is *deleted*, not made safer. The candidate ledger (`candidate.ts`) already has
+verbatim text + content-hash dedup + atomic write + review states, and is the natural
+substrate (its promotion path is currently a stub — `memory-methods.ts:57`).
+
+Do NOT build this speculatively. Three blockers must be resolved first, and it is only
+worth it if evidence shows real memory actually exceeds the budget:
+- **Hand-edit clobber (new data-loss risk):** re-rendering `MEMORY.md` would overwrite the
+  user's manual edits. Must ingest the current file as capsules before each render, or
+  skip render when the file changed since last render.
+- **Feedback signal:** drive the usefulness counter from *index-search hits* (which search
+  the whole archive, so demoted capsules can resurface), not from prompt presence, to
+  avoid a rich-get-richer loop; needs line-range attribution from chunk → capsule.
+- **Conflict resolution:** contradictory capsules must supersede-don't-delete (first-class,
+  not optional) or the rendered view shows stale contradictions.
+Also instrument: duplicate indexing of the rendered view vs. its source archive, and
+render churn (prompt-cache thrash) under a feedback-driven ranking. A simpler high-leverage
+alternative worth measuring first: shrink the always-on core to identity/standing prefs
+and lean on the automatic per-turn retrieval hawky already has.
+
+**Effort:** ~1–2 days (safety net) → ~2 weeks (capsule retention, if evidence justifies
+it). **Dependencies:** none for the safety net; the capsule direction touches the same
+subsystem as #12 and the candidate ledger.
 
 ## Security & trust debt (pre-launch)
 
