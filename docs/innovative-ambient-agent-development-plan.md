@@ -356,7 +356,11 @@ below) and cross-language conformance fixtures possible at all.
   status) plus an explicit streaming cursor (`streamingItemId`, `toolUseId → itemId`).
   This mirrors how all three clients already render (siblings), so selectors are ~1:1
   and migration is low-risk. (A message-with-`parts` model à la the Vercel AI SDK is the
-  cleaner long-term alternative.)
+  cleaner long-term alternative.) The `toolUseId → itemId` map is **keyed log
+  compaction** in the Kafka-Streams sense: `tool_use_start → tool_streaming →
+  tool_result` are successive updates to one key (`tool_use_id`) and the canonical state
+  keeps only that key's latest status — so the reducer is exactly a KTable aggregation
+  over the event stream, and `fromHistory` is a changelog restore of that table.
 - **Reducer API** in a new core module `src/transcript/`: `initialState()`,
   `reduce(state, event)` (pure; covers the whole `StreamEvent` union),
   `fromHistory(messages)` (folds synthetic events → **unifies the live and
@@ -399,6 +403,11 @@ can then be **deleted outright**. This turns "single source of truth" from a con
 into a structural fact (clients have no events to fold) and removes the iOS language wall
 entirely — but it changes the wire protocol and reshapes #27, so it is evaluated
 separately. The Phase-1 purity constraint is the only thing that keeps this door open.
+Reconnect should use **Kafka-style offset/sequence resume** rather than always resending
+the whole transcript: tag each broadcast with a monotonic `seq`, have the client report
+"I have through `seq N`", and the gateway replays only the deltas after `N` (a full
+snapshot only on first connect or when the client is too far behind to catch up). This
+is the consumer-offset pattern — proven, and cheaper than a snapshot per resync.
 
 **Migration safety.** Before deleting any old copy, run the new reducer in parallel and
 assert (in tests over recorded real event logs, plus an optional dev-only runtime check)
