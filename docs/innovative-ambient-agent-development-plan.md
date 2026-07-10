@@ -6111,3 +6111,38 @@ path is OFF by default: it activates only when `voiceprintRealtimeEnabled` AND a
 new default-false `onDeviceEmbeddingEnabled` are both on AND the CoreML model is
 provisioned; otherwise the session keeps sending markers and the server scores as
 before.
+
+## B3: iOS owner enrollment UX
+
+iOS gains the first UI + flow to set up the encrypted owner voice template that
+`score_turns` resolves against. The gateway already exposed the enrollment RPCs;
+before B3, iOS never called them.
+
+- `ios/hawky/Voiceprint/OwnerEnrollmentModel.swift` holds the SwiftUI-independent,
+  unit-tested flow logic: tracked recorded `OwnerEnrollmentSource`s, the
+  fail-closed consent gate, the guided VOICED-speech floor, `enroll_owner` param
+  assembly, and an explicit state machine (`idle` / `recording` / `needsConsent` /
+  `tooShort` / `submitting` / `enrolled` / `failed`). `LiveVoiceprintEnrollmentRequest`
+  builds the params with the EXACT server wire keys — `sources` (each with
+  `audioArtifactId` / `audioPath` / both-or-neither `startMs`/`endMs` / `route`)
+  and a `consent` object (`captureAllowed` / `biometricAllowed` /
+  `memoryPromotionAllowed` / `exportAllowed`).
+- `LiveGatewayBridge` gained `enrollVoiceprintOwner`, `addVoiceprintEnrollmentClip`,
+  and `registerVoiceprintAudioArtifact` helpers (+ typed `LiveVoiceprintEnrollmentResult`
+  / `LiveVoiceprintAudioArtifactRegistration`), reusing the existing `invokeMethod`
+  JSONValue param style. A `VoiceprintEnrollmentGateway` protocol seam makes the
+  logic testable with a fake; `LiveGatewayBridge` conforms.
+- `ios/hawky/Views/OwnerEnrollmentView.swift` is a thin shell (guided prompts, a
+  record/stop control, a live "enough speech" indicator, an explicit
+  biometric-consent toggle, and an Enroll button), linked from the Live settings
+  page in `SettingsView`. `OwnerEnrollmentRecorder` captures a local WAV via
+  `LiveRecordingSink` and registers it as an audio artifact.
+
+CONSENT GATE (fail-closed): `enroll_owner` is NEVER submitted unless the user has
+explicitly granted biometric AND capture consent in this flow. Withholding consent
+leaves the flow in `needsConsent` and submits nothing. The guided floor (~32s
+voiced, above the server's >= 30s VOICED floor since the sidecar counts ~74% of
+clip length) surfaces a "record more" `tooShort` state rather than letting the
+server reject. OFF BY DEFAULT: enrolling sets up the template only — it does NOT
+flip `voiceprintRealtimeEnabled` or `onDeviceEmbeddingEnabled`, and the new screen
+is reachable only by explicit navigation from Settings.

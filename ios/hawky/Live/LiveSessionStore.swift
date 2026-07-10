@@ -920,6 +920,18 @@ final class LiveSessionStore {
         return (LiveGatewayBridge(gatewayURL: url), key)
     }
 
+    /// A bridge + session key for owner voiceprint enrollment (B3). Works in any
+    /// session state — enrollment is a workspace-global owner-template write, so it
+    /// only needs a gateway URL. Reuse the live bridge if present, else build a
+    /// short-lived one. Returns nil when no gateway is configured (offline).
+    func voiceprintEnrollmentGateway() -> (VoiceprintEnrollmentGateway, String)? {
+        let key = Self.resolvedRuntimeGatewayBridgeSessionKey(from: liveConfig, fallback: "realtime:main")
+            ?? "realtime:main"
+        if let bridge = gatewayBridge { return (bridge, key) }
+        guard let url = defaultBrokerURL else { return nil }
+        return (LiveGatewayBridge(gatewayURL: url), key)
+    }
+
     // -------------------------------------------------------------------------
     // Memory feature (#653): bridge access for the Live → More → Memory testing
     // tab. Like peopleBridge(), this works in any session state — the memory.*
