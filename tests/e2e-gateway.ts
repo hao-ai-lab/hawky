@@ -422,8 +422,12 @@ describe("E2E: gateway full pipeline", () => {
     const ws = await connectAndHandshake(port, "e2e:shutdown-test");
     const events = collectEvents(ws);
 
-    // Start a slow chat
-    void sendRequest(ws, "chat.send", { message: "slow" });
+    // Start a slow chat. This request is intentionally abandoned (we shut down before it
+    // resolves), so swallow its eventual rejection: sendRequest arms a 10s timeout that would
+    // otherwise reject with no handler and surface as a cross-file unhandled rejection charged
+    // against whatever test is running when the timer fires (e.g. the alphabetically-later
+    // e2e-voiceprint-* specs), making the aggregate `test:e2e` run non-deterministic.
+    void sendRequest(ws, "chat.send", { message: "slow" }).catch(() => {});
     await new Promise((r) => setTimeout(r, 100));
 
     // Shutdown while agent is running — should wait for it
@@ -514,8 +518,10 @@ describe("E2E: production gateway path", () => {
       const ws = await connectAndHandshake(p, "prod:cancel-test");
       const events = collectEvents(ws);
 
-      // Start chat (will be slow)
-      void sendRequest(ws, "chat.send", { message: "slow" });
+      // Start chat (will be slow). Intentionally abandoned — we cancel it below — so swallow the
+      // eventual rejection from sendRequest's 10s timeout, which would otherwise leak across files
+      // as an unhandled rejection and flake the alphabetically-later e2e-voiceprint-* specs.
+      void sendRequest(ws, "chat.send", { message: "slow" }).catch(() => {});
       await new Promise((r) => setTimeout(r, 200));
 
       // Cancel
@@ -646,8 +652,10 @@ describe("E2E: production gateway path", () => {
       await sendRequest(ws, "permission.mode", { mode: "default" });
       const events = collectEvents(ws);
 
-      // Send chat — agent will call bash, which needs permission
-      void sendRequest(ws, "chat.send", { message: "run it" });
+      // Send chat — agent will call bash, which needs permission. The test asserts on gateway
+      // events rather than this response, so it's abandoned; swallow the eventual rejection from
+      // sendRequest's 10s timeout so it can't leak across files as an unhandled rejection.
+      void sendRequest(ws, "chat.send", { message: "run it" }).catch(() => {});
 
       // Wait for permission.request event
       const permEvent = await waitForEvent(ws, "permission.request", 10000);
@@ -693,7 +701,9 @@ describe("E2E: production gateway path", () => {
       await sendRequest(ws, "permission.mode", { mode: "default" });
       const events = collectEvents(ws);
 
-      void sendRequest(ws, "chat.send", { message: "delete" });
+      // Abandoned (denied below); swallow the eventual 10s-timeout rejection so it can't leak
+      // across files as an unhandled rejection and flake the later e2e-voiceprint-* specs.
+      void sendRequest(ws, "chat.send", { message: "delete" }).catch(() => {});
 
       // Wait for permission request
       const permEvent = await waitForEvent(ws, "permission.request", 10000);
