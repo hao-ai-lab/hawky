@@ -855,6 +855,13 @@ export interface HawkyConfig {
        * template's model+version, or the turn is rejected.
        */
       accept_client_embeddings?: boolean;
+      /**
+       * A8 replay resistance. TTL (ms) for the single-use liveness nonce a client
+       * must attach to a client-supplied embedding submission (see
+       * identity/voiceprint/liveness-nonce.ts). Short by design; defaults to 60s.
+       * Only relevant when `accept_client_embeddings` is true.
+       */
+      liveness_nonce_ttl_ms?: number;
     };
   };
   /** Channel adapters for messaging app integration (Slack, iMessage, etc.). */

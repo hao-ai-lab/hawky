@@ -28,6 +28,7 @@ import {
   registerVoiceprintMethods,
   resolveVoiceprintLiveScoringConfigFromConfig,
 } from "../src/gateway/voiceprint-methods.js";
+import { createVoiceprintLivenessChallengeStore } from "../src/gateway/voiceprint-liveness.js";
 
 const createdAt = "2026-06-23T00:00:00.000Z";
 const sidecarModel = { provider: "custom" as const, modelId: "method-sidecar", version: "1" };
@@ -1515,6 +1516,14 @@ describe("voiceprint gateway methods", () => {
       },
     );
 
+    const challenge = await server.call(
+      "identity.voiceprint.request_embedding_challenge",
+      { sessionKey: "live:voiceprint-methods-client-embed" },
+      {},
+    );
+    expect(typeof challenge.nonce).toBe("string");
+    expect(challenge.nonce.length).toBeGreaterThan(0);
+
     const result = await server.call(
       "identity.voiceprint.score_turns",
       { sessionKey: "live:voiceprint-methods-client-embed" },
@@ -1532,6 +1541,7 @@ describe("voiceprint gateway methods", () => {
             route: "iphone_mic",
             sampleEmbedding: [1, 0],
             sampleEmbeddingModel: sidecarModel,
+            nonce: challenge.nonce,
           },
         ],
         consent: {
@@ -1654,6 +1664,12 @@ describe("voiceprint gateway methods", () => {
       },
     );
 
+    const challenge = await server.call(
+      "identity.voiceprint.request_embedding_challenge",
+      { sessionKey: "live:voiceprint-methods-client-embed-notmodel" },
+      {},
+    );
+
     const result = await server.call(
       "identity.voiceprint.score_turns",
       { sessionKey: "live:voiceprint-methods-client-embed-notmodel" },
@@ -1673,6 +1689,7 @@ describe("voiceprint gateway methods", () => {
             // tagged with a DIFFERENT model version. Must be rejected, not scored.
             sampleEmbedding: [1, 0],
             sampleEmbeddingModel: { ...sidecarModel, version: "2" },
+            nonce: challenge.nonce,
           },
         ],
         consent: {
@@ -1689,6 +1706,437 @@ describe("voiceprint gateway methods", () => {
     expect(result.states[0]?.lifecycle).not.toBe("resolved");
     expect(result.states[0]?.result).not.toBe("owner_speaking");
     expect(result.states[0]?.skipReason).toBe("client_embedding_rejected");
+  });
+
+  // ── A8 liveness nonce gate on the client-embedding path ───────────────────
+
+  test("issues a fresh liveness challenge bound to the connection session", async () => {
+    const server = makeMockServer();
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage());
+
+    const conn = { sessionKey: "live:voiceprint-methods-challenge" };
+    const first = await server.call("identity.voiceprint.request_embedding_challenge", conn, {});
+    const second = await server.call("identity.voiceprint.request_embedding_challenge", conn, {});
+    expect(first.ok).toBe(true);
+    expect(first.sessionKey).toBe("live:voiceprint-methods-challenge");
+    expect(typeof first.nonce).toBe("string");
+    expect(first.nonce.length).toBeGreaterThan(0);
+    expect(typeof first.expiresAtMs).toBe("number");
+    // Each challenge is unique.
+    expect(second.nonce).not.toBe(first.nonce);
+
+    // An unbound connection cannot request a challenge (handler throws sync).
+    expect(() =>
+      server.call("identity.voiceprint.request_embedding_challenge", { sessionKey: null }, {}),
+    ).toThrow(/bind a session/);
+    // A mismatched requested sessionKey is rejected.
+    expect(() =>
+      server.call("identity.voiceprint.request_embedding_challenge", conn, {
+        sessionKey: "live:voiceprint-methods-other",
+      }),
+    ).toThrow(/does not match/);
+  });
+
+  test("client embedding + valid fresh nonce is scored and the nonce is consumed (replay rejected)", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-nonce-ok-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    registerVoiceprintMethods(server as any, storage, undefined, {
+      sidecar: {
+        command: process.execPath,
+        args: ["-e", "process.stderr.write('sidecar must not spawn'); process.exit(99)"],
+        timeoutMs: 5_000,
+      },
+      ownerEmbeddings: [[1, 0]],
+      allowedAudioRoots: [dir],
+      consent: trustedProcessingConsent,
+      expectedModel: sidecarModel,
+      acceptClientEmbeddings: true,
+    });
+
+    const sessionKey = "live:voiceprint-methods-nonce-ok";
+    const conn = { sessionKey };
+    const challenge = await server.call(
+      "identity.voiceprint.request_embedding_challenge",
+      conn,
+      {},
+    );
+
+    const scoreTurn = (nonce: string) => ({
+      turns: [
+        {
+          sessionKey,
+          transcriptItemId: "rt_nonce_ok",
+          role: "user",
+          text: "owner spoke here",
+          startMs: 0,
+          endMs: 1500,
+          audioArtifactId: "audio_nonce_ok",
+          audioPath,
+          route: "iphone_mic",
+          sampleEmbedding: [1, 0],
+          sampleEmbeddingModel: sidecarModel,
+          nonce,
+        },
+      ],
+      consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+      createdAt,
+      updatedAt: "2026-06-23T00:00:01.000Z",
+    });
+
+    const result = await server.call(
+      "identity.voiceprint.score_turns",
+      conn,
+      scoreTurn(challenge.nonce),
+    );
+    expect(result.status).toBe("scored");
+    expect(result.states[0]?.lifecycle).toBe("resolved");
+    expect(storage.snapshot?.().transcriptSpeakerAnnotations[0]).toMatchObject({
+      transcriptItemId: "rt_nonce_ok",
+      result: "owner_speaking",
+    });
+
+    // Replay of the SAME (consumed) nonce is rejected and never scored.
+    await expect(
+      server.call("identity.voiceprint.score_turns", conn, scoreTurn(challenge.nonce)),
+    ).rejects.toThrow(/already been used/);
+  });
+
+  test("client embedding with no nonce (opt-in on) is rejected and never scored", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-nonce-missing-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    registerVoiceprintMethods(server as any, storage, undefined, {
+      sidecar: {
+        command: process.execPath,
+        args: ["-e", "process.exit(99)"],
+        timeoutMs: 5_000,
+      },
+      ownerEmbeddings: [[1, 0]],
+      allowedAudioRoots: [dir],
+      consent: trustedProcessingConsent,
+      expectedModel: sidecarModel,
+      acceptClientEmbeddings: true,
+    });
+
+    const sessionKey = "live:voiceprint-methods-nonce-missing";
+    await expect(
+      server.call(
+        "identity.voiceprint.score_turns",
+        { sessionKey },
+        {
+          turns: [
+            {
+              sessionKey,
+              transcriptItemId: "rt_nonce_missing",
+              role: "user",
+              startMs: 0,
+              endMs: 1500,
+              audioArtifactId: "audio_nonce_missing",
+              audioPath,
+              sampleEmbedding: [1, 0],
+              sampleEmbeddingModel: sidecarModel,
+              // no nonce
+            },
+          ],
+          consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+          createdAt,
+          updatedAt: "2026-06-23T00:00:01.000Z",
+        },
+      ),
+    ).rejects.toThrow(/requires a liveness nonce/);
+    // Nothing was scored/stored for the rejected turn.
+    expect(storage.snapshot?.().transcriptSpeakerAnnotations.length).toBe(0);
+  });
+
+  test("client embedding with an expired nonce is rejected and never scored", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-nonce-expired-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+
+    // Drive the liveness clock so the nonce is expired by score time.
+    let clock = 1_000;
+    const liveness = createVoiceprintLivenessChallengeStore({
+      ttlMs: 60_000,
+      now: () => clock,
+    });
+    registerVoiceprintMethods(
+      server as any,
+      storage,
+      undefined,
+      {
+        sidecar: { command: process.execPath, args: ["-e", "process.exit(99)"], timeoutMs: 5_000 },
+        ownerEmbeddings: [[1, 0]],
+        allowedAudioRoots: [dir],
+        consent: trustedProcessingConsent,
+        expectedModel: sidecarModel,
+        acceptClientEmbeddings: true,
+      },
+      undefined,
+      liveness,
+    );
+
+    const sessionKey = "live:voiceprint-methods-nonce-expired";
+    const conn = { sessionKey };
+    const challenge = await server.call(
+      "identity.voiceprint.request_embedding_challenge",
+      conn,
+      {},
+    );
+    // Advance past the TTL.
+    clock = 1_000 + 60_000;
+
+    await expect(
+      server.call("identity.voiceprint.score_turns", conn, {
+        turns: [
+          {
+            sessionKey,
+            transcriptItemId: "rt_nonce_expired",
+            role: "user",
+            startMs: 0,
+            endMs: 1500,
+            audioArtifactId: "audio_nonce_expired",
+            audioPath,
+            sampleEmbedding: [1, 0],
+            sampleEmbeddingModel: sidecarModel,
+            nonce: challenge.nonce,
+          },
+        ],
+        consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+        createdAt,
+        updatedAt: "2026-06-23T00:00:01.000Z",
+      }),
+    ).rejects.toThrow(/expired/);
+    expect(storage.snapshot?.().transcriptSpeakerAnnotations.length).toBe(0);
+  });
+
+  test("client embedding with a nonce from another session is rejected", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-nonce-xsession-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    registerVoiceprintMethods(server as any, storage, undefined, {
+      sidecar: { command: process.execPath, args: ["-e", "process.exit(99)"], timeoutMs: 5_000 },
+      ownerEmbeddings: [[1, 0]],
+      allowedAudioRoots: [dir],
+      consent: trustedProcessingConsent,
+      expectedModel: sidecarModel,
+      acceptClientEmbeddings: true,
+    });
+
+    // Nonce issued for a DIFFERENT session.
+    const otherChallenge = await server.call(
+      "identity.voiceprint.request_embedding_challenge",
+      { sessionKey: "live:voiceprint-methods-nonce-xsession-other" },
+      {},
+    );
+
+    const sessionKey = "live:voiceprint-methods-nonce-xsession";
+    await expect(
+      server.call(
+        "identity.voiceprint.score_turns",
+        { sessionKey },
+        {
+          turns: [
+            {
+              sessionKey,
+              transcriptItemId: "rt_nonce_xsession",
+              role: "user",
+              startMs: 0,
+              endMs: 1500,
+              audioArtifactId: "audio_nonce_xsession",
+              audioPath,
+              sampleEmbedding: [1, 0],
+              sampleEmbeddingModel: sidecarModel,
+              nonce: otherChallenge.nonce,
+            },
+          ],
+          consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+          createdAt,
+          updatedAt: "2026-06-23T00:00:01.000Z",
+        },
+      ),
+    ).rejects.toThrow(/different session/);
+    expect(storage.snapshot?.().transcriptSpeakerAnnotations.length).toBe(0);
+  });
+
+  test("an ineligible turn carrying a vector+nonce does NOT burn the nonce", async () => {
+    // Regression: the nonce must be consumed only on the path that actually
+    // trusts the client vector. A turn that carries a sampleEmbedding + a fresh
+    // nonce but is ineligible for the client-embedding path (here: role !=="user")
+    // must leave the nonce spendable, so a later eligible turn can still use it.
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-nonce-ineligible-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    registerVoiceprintMethods(server as any, storage, undefined, {
+      sidecar: {
+        command: process.execPath,
+        args: ["-e", "process.stderr.write('sidecar must not spawn'); process.exit(99)"],
+        timeoutMs: 5_000,
+      },
+      ownerEmbeddings: [[1, 0]],
+      allowedAudioRoots: [dir],
+      consent: trustedProcessingConsent,
+      expectedModel: sidecarModel,
+      acceptClientEmbeddings: true,
+    });
+
+    const sessionKey = "live:voiceprint-methods-nonce-ineligible";
+    const conn = { sessionKey };
+    const challenge = await server.call(
+      "identity.voiceprint.request_embedding_challenge",
+      conn,
+      {},
+    );
+
+    // First submission: ineligible turn (assistant role) that still carries a
+    // vector + the fresh nonce. It is not scored from the client embedding and
+    // must NOT consume the nonce.
+    const ineligible = await server.call("identity.voiceprint.score_turns", conn, {
+      turns: [
+        {
+          sessionKey,
+          transcriptItemId: "rt_nonce_ineligible",
+          role: "assistant",
+          startMs: 0,
+          endMs: 1500,
+          audioArtifactId: "audio_nonce_ineligible",
+          audioPath,
+          sampleEmbedding: [1, 0],
+          sampleEmbeddingModel: sidecarModel,
+          nonce: challenge.nonce,
+        },
+      ],
+      consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+      createdAt,
+      updatedAt: "2026-06-23T00:00:01.000Z",
+    });
+    // No client-embedding scoring happened for the assistant turn.
+    expect(ineligible.states[0]?.result).not.toBe("owner_speaking");
+
+    // The SAME nonce is still valid for a subsequent eligible turn.
+    const scored = await server.call("identity.voiceprint.score_turns", conn, {
+      turns: [
+        {
+          sessionKey,
+          transcriptItemId: "rt_nonce_ineligible_then_ok",
+          role: "user",
+          startMs: 0,
+          endMs: 1500,
+          audioArtifactId: "audio_nonce_ineligible_ok",
+          audioPath,
+          sampleEmbedding: [1, 0],
+          sampleEmbeddingModel: sidecarModel,
+          nonce: challenge.nonce,
+        },
+      ],
+      consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+      createdAt,
+      updatedAt: "2026-06-23T00:00:02.000Z",
+    });
+    expect(scored.status).toBe("scored");
+    expect(scored.states[0]?.lifecycle).toBe("resolved");
+    expect(storage.snapshot?.().transcriptSpeakerAnnotations[0]).toMatchObject({
+      transcriptItemId: "rt_nonce_ineligible_then_ok",
+      result: "owner_speaking",
+    });
+
+    // And now that it has been spent, a replay is rejected.
+    await expect(
+      server.call("identity.voiceprint.score_turns", conn, {
+        turns: [
+          {
+            sessionKey,
+            transcriptItemId: "rt_nonce_ineligible_replay",
+            role: "user",
+            startMs: 0,
+            endMs: 1500,
+            audioArtifactId: "audio_nonce_ineligible_replay",
+            audioPath,
+            sampleEmbedding: [1, 0],
+            sampleEmbeddingModel: sidecarModel,
+            nonce: challenge.nonce,
+          },
+        ],
+        consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+        createdAt,
+        updatedAt: "2026-06-23T00:00:03.000Z",
+      }),
+    ).rejects.toThrow(/already been used/);
+  });
+
+  test("with acceptClientEmbeddings off the nonce is irrelevant and the vector is never trusted", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-nonce-optoff-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    const scriptPath = join(dir, "sidecar.js");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    // Impostor sidecar embedding orthogonal to the owner template: if the client
+    // [1,0] vector were trusted the turn would resolve to owner; it must not.
+    writeFileSync(scriptPath, `
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      process.stdout.write(JSON.stringify({
+        version: 1,
+        responses: request.requests.map((item) => ({
+          id: item.id,
+          embedding: [0, 1],
+          model: { provider: "custom", modelId: "method-sidecar", version: "1" }
+        }))
+      }));
+    `, "utf8");
+    registerVoiceprintMethods(server as any, storage, undefined, {
+      sidecar: { command: process.execPath, args: [scriptPath], timeoutMs: 5_000 },
+      ownerEmbeddings: [[1, 0]],
+      allowedAudioRoots: [dir],
+      consent: trustedProcessingConsent,
+      expectedModel: sidecarModel,
+      // opt-in OFF
+    });
+
+    const sessionKey = "live:voiceprint-methods-nonce-optoff";
+    // A garbage / absent nonce is irrelevant when the flag is off — the request
+    // still succeeds via the audio/sidecar path and the client vector is ignored.
+    const result = await server.call("identity.voiceprint.score_turns", { sessionKey }, {
+      turns: [
+        {
+          sessionKey,
+          transcriptItemId: "rt_nonce_optoff",
+          role: "user",
+          startMs: 0,
+          endMs: 1500,
+          audioArtifactId: "audio_nonce_optoff",
+          audioPath,
+          sampleEmbedding: [1, 0],
+          sampleEmbeddingModel: sidecarModel,
+          nonce: "bogus-never-issued",
+        },
+      ],
+      consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+      createdAt,
+      updatedAt: "2026-06-23T00:00:01.000Z",
+    });
+
+    expect(result.status).toBe("scored");
+    expect(result.states[0]?.lifecycle).not.toBe("resolved");
+    expect(result.states[0]?.result).not.toBe("owner_speaking");
   });
 });
 

@@ -20,6 +20,11 @@ import {
   createVoiceprintRealtimeSessionStore,
   type VoiceprintRealtimeSessionStore,
 } from "./voiceprint-realtime.js";
+import {
+  createVoiceprintLivenessChallengeStore,
+  type VoiceprintLivenessChallengeStore,
+} from "./voiceprint-liveness.js";
+import type { VoiceprintLivenessRejectionReason } from "../identity/voiceprint/index.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import { getConfigDir } from "../storage/config.js";
 import {
@@ -171,6 +176,12 @@ export interface VoiceprintLiveScoringConfig {
    * and the trust-boundary note in identity/voiceprint/live-client-embedding.ts.
    */
   acceptClientEmbeddings?: boolean;
+  /**
+   * A8 replay resistance: TTL (ms) for the single-use liveness nonce a client
+   * embedding submission must carry (see identity/voiceprint/liveness-nonce.ts).
+   * Defaults to DEFAULT_VOICEPRINT_LIVENESS_NONCE_TTL_MS when unset.
+   */
+  livenessNonceTtlMs?: number;
 }
 
 export interface VoiceprintScoreTurnsResult {
@@ -218,6 +229,10 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     // no biometric audio). See identity/voiceprint/live-client-embedding.ts.
     acceptClientEmbeddings:
       optionalBoolean(raw.accept_client_embeddings) ?? false,
+    livenessNonceTtlMs: optionalPositiveNumber(
+      raw.liveness_nonce_ttl_ms,
+      "voiceprint.live_scoring.liveness_nonce_ttl_ms",
+    ),
   };
 }
 
@@ -316,6 +331,9 @@ export function registerVoiceprintMethods(
   realtime: VoiceprintRealtimeSessionStore = createVoiceprintRealtimeSessionStore(),
   scoring?: VoiceprintLiveScoringConfig,
   audioArtifacts: VoiceprintAudioArtifactStore = createInMemoryVoiceprintAudioArtifactStore(),
+  liveness: VoiceprintLivenessChallengeStore = createVoiceprintLivenessChallengeStore({
+    ttlMs: scoring?.livenessNonceTtlMs,
+  }),
 ): void {
   server.registerMethod("identity.voiceprint.realtime_event", async (conn, params) => {
     const input = parseRealtimeEventParams(params);
@@ -350,6 +368,29 @@ export function registerVoiceprintMethods(
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     audioArtifacts.reset?.(sessionKey);
     return realtime.reset(sessionKey);
+  });
+
+  // A8 replay resistance. Issue a fresh, single-use, session-bound liveness nonce
+  // for the authenticated connection. A client-supplied embedding submission MUST
+  // carry a nonce from THIS RPC (see the client-embedding nonce gate in
+  // buildScorePlanTurns). This alone stops NAIVE REPLAY of a captured submission;
+  // it does NOT bind the nonce to the on-device capture — see the HONESTY note in
+  // identity/voiceprint/liveness-nonce.ts (attestation/capture-binding is a
+  // follow-up that must land before enabling accept_client_embeddings in prod).
+  server.registerMethod("identity.voiceprint.request_embedding_challenge", (conn, params) => {
+    const input = parseRequestEmbeddingChallengeParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const challenge = liveness.issueChallenge(sessionKey);
+    log.info("identity.voiceprint.request_embedding_challenge", {
+      session_key: sessionKey,
+      expires_at_ms: challenge.expiresAtMs,
+    });
+    return {
+      ok: true as const,
+      sessionKey,
+      nonce: challenge.nonce,
+      expiresAtMs: challenge.expiresAtMs,
+    };
   });
 
   server.registerMethod("identity.voiceprint.audio_artifact.register", (conn, params) => {
@@ -405,6 +446,7 @@ export function registerVoiceprintMethods(
         input,
         scoring,
         audioArtifacts,
+        liveness,
       });
       const { run, storage: storageResult } = await runAndStoreLiveVoiceprintScoringPlan({
         storage,
@@ -679,6 +721,13 @@ interface VoiceprintScoreTurnInput {
   sampleEmbedding?: number[];
   /** Model+version that produced `sampleEmbedding`; must match the owner template. */
   sampleEmbeddingModel?: VoiceprintModelInfo;
+  /**
+   * A8 replay resistance: single-use liveness nonce from
+   * identity.voiceprint.request_embedding_challenge. REQUIRED (and verified +
+   * consumed) whenever a `sampleEmbedding` is accepted under
+   * `acceptClientEmbeddings`.
+   */
+  nonce?: string;
 }
 
 function parseScoreTurnsParams(params: unknown): ScoreTurnsParams {
@@ -734,6 +783,7 @@ function parseScoreTurnInput(value: unknown): VoiceprintScoreTurnInput {
     sampleEmbeddingModel: parseOptionalClientEmbeddingModel(
       turn.sampleEmbeddingModel ?? turn.sample_embedding_model,
     ),
+    nonce: optionalString(turn.nonce),
   };
 }
 
@@ -787,6 +837,13 @@ function parseOptionalClientEmbeddingModel(value: unknown): VoiceprintModelInfo 
     ),
     version: optionalString(model.version),
     notes: optionalString(model.notes),
+  };
+}
+
+function parseRequestEmbeddingChallengeParams(params: unknown): { sessionKey?: string } {
+  const p = objectOrUndefined(params);
+  return {
+    sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
   };
 }
 
@@ -909,6 +966,7 @@ async function buildScorePlanTurns(input: {
   input: ScoreTurnsParams;
   scoring: VoiceprintLiveScoringConfig;
   audioArtifacts: VoiceprintAudioArtifactStore;
+  liveness: VoiceprintLivenessChallengeStore;
 }): Promise<LiveVoiceprintPlanItemInput[]> {
   const turns: LiveVoiceprintPlanItemInput[] = [];
   const policy = resolveScoreTurnsPolicy(input.scoring, input.input);
@@ -941,6 +999,37 @@ async function buildScorePlanTurns(input: {
     const useClientEmbedding =
       input.scoring.acceptClientEmbeddings === true && turn.sampleEmbedding !== undefined;
 
+    // A turn is only scored from its client embedding when the opt-in is on, the
+    // turn carries a vector, AND it is a consentful `user` turn with a usable
+    // audio artifact reference. Compute that eligibility up front so the A8
+    // liveness nonce is consumed ONLY on the path that actually trusts the
+    // vector (see the gate below).
+    const scoresClientEmbedding =
+      useClientEmbedding &&
+      turn.role === "user" &&
+      Boolean(turn.audioArtifactId) &&
+      Boolean(audioPath) &&
+      voiceprintConsentAllowsProcessing(policy.consent);
+
+    // A8 replay-resistance gate. When this turn will actually be scored from a
+    // client embedding, the submission MUST present a fresh, single-use,
+    // session-bound liveness nonce that we verify + consume BEFORE the vector is
+    // trusted. Any nonce failure (missing / unknown / expired / wrong session /
+    // already used) rejects the turn — we DO NOT fall through to accepting the
+    // vector and we DO NOT silently score it. Consuming here makes an identical
+    // resubmission fail (the nonce is burned). We intentionally consume ONLY when
+    // `scoresClientEmbedding` (not merely when a vector is present) so a turn that
+    // carries a vector+nonce but is ineligible (wrong role / missing artifact /
+    // consent denied) does NOT burn a fresh nonce it can never spend. This is
+    // ONLY replay resistance, not capture-binding (see liveness-nonce.ts HONESTY).
+    if (scoresClientEmbedding) {
+      assertClientEmbeddingLivenessNonce({
+        sessionKey: input.sessionKey,
+        nonce: turn.nonce,
+        liveness: input.liveness,
+      });
+    }
+
     const planTurn: LiveVoiceprintPlanItemInput = {
       sessionKey: input.sessionKey,
       transcriptItemId: turn.transcriptItemId,
@@ -966,13 +1055,7 @@ async function buildScorePlanTurns(input: {
       updatedAt: input.input.updatedAt,
     };
 
-    if (
-      useClientEmbedding &&
-      turn.role === "user" &&
-      turn.audioArtifactId &&
-      audioPath &&
-      voiceprintConsentAllowsProcessing(policy.consent)
-    ) {
+    if (scoresClientEmbedding) {
       // On-device path: score the client embedding directly. We DO NOT read or
       // slice the biometric audio here — the server never sees it. The audio
       // artifact reference (audioArtifactId + registered audioPath) is still
@@ -1021,6 +1104,46 @@ async function buildScorePlanTurns(input: {
   }
 
   return turns;
+}
+
+/**
+ * A8 replay-resistance gate for a client-supplied embedding. A missing nonce is
+ * rejected up front with a clear reason; otherwise the nonce is verified AND
+ * consumed (single-use) against the session. Any failure throws so the turn is
+ * rejected — never scored from the untrusted vector.
+ */
+function assertClientEmbeddingLivenessNonce(input: {
+  sessionKey: string;
+  nonce: string | undefined;
+  liveness: VoiceprintLivenessChallengeStore;
+}): void {
+  const nonce = input.nonce?.trim();
+  if (!nonce) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      "Voiceprint client embedding requires a liveness nonce from identity.voiceprint.request_embedding_challenge (replay resistance).",
+    );
+  }
+  const outcome = input.liveness.verifyAndConsume(input.sessionKey, nonce);
+  if (!outcome.ok) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      livenessRejectionMessage(outcome.reason),
+    );
+  }
+}
+
+function livenessRejectionMessage(reason: VoiceprintLivenessRejectionReason): string {
+  switch (reason) {
+    case "unknown_nonce":
+      return "Voiceprint client embedding liveness nonce is unknown (never issued or already evicted).";
+    case "expired":
+      return "Voiceprint client embedding liveness nonce has expired; request a fresh challenge.";
+    case "wrong_session":
+      return "Voiceprint client embedding liveness nonce was issued for a different session.";
+    case "already_used":
+      return "Voiceprint client embedding liveness nonce has already been used (replay rejected).";
+  }
 }
 
 async function runAndStoreLiveVoiceprintScoringPlan(input: {
