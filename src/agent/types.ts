@@ -773,6 +773,16 @@ export interface HawkyConfig {
   voiceprint?: {
     live_scoring?: {
       enabled?: boolean;
+      /**
+       * Local/dev opt-in ONLY. When true AND `sidecar.command` is omitted, the
+       * gateway defaults the embedding sidecar to the bundled Python reference
+       * backend (`services/voiceprint/embed.py` with VOICEPRINT_BACKEND=reference).
+       * The reference backend is deterministic but NON-DISCRIMINATIVE — it cannot
+       * tell speakers apart — so it must never be used for real identity decisions.
+       * For production, leave this false and set `sidecar.command`/`args`/`env` to
+       * the onnx backend with a real CAM++ model (see services/voiceprint/README.md).
+       */
+      dev_reference_backend?: boolean;
       sidecar?: {
         command?: string;
         args?: string[];
@@ -798,7 +808,7 @@ export interface HawkyConfig {
         reason?: string;
       };
       expected_model?: {
-        provider?: "external-json" | "signal-baseline" | "speechbrain" | "wespeaker" | "picovoice" | "custom";
+        provider?: "external-json" | "signal-baseline" | "speechbrain" | "wespeaker" | "picovoice" | "sherpa-onnx" | "reference" | "custom";
         model_id?: string;
         modelId?: string;
         version?: string;

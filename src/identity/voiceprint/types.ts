@@ -27,6 +27,8 @@ export interface VoiceprintModelInfo {
     | "speechbrain"
     | "wespeaker"
     | "picovoice"
+    | "sherpa-onnx"
+    | "reference"
     | "custom";
   modelId: string;
   version?: string;
