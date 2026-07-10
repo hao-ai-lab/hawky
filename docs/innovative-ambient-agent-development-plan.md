@@ -932,6 +932,76 @@ producers. It should make the identity signal -> review -> person capsule ->
 memory candidate -> durable memory path visible and operable. PR 3 is the
 next best PR, ahead of everything else in this plan.
 
+### Completing voiceprint: the missing embedding model + on-device evaluation
+
+The ~10k-line TS/gateway/iOS voiceprint pipeline is built, wired, and green (172
+tests): 5 `identity.voiceprint.*` RPCs are registered live (`src/index.ts`),
+`score_turns` drives the turn-tracker → plan → sidecar-runner path, and
+`sidecar-client.ts` spawns a configurable command (`config.voiceprint.live_scoring`)
+over stdio JSON (`{audioPath,startMs,endMs}[]` → `{embedding[],model}[]`). The
+only functional gap is the **embedding model itself**: there is no
+`services/voiceprint`, and the sole in-tree embedding is `signal-baseline-v0`
+(`audio-features.ts`) — a ~10-dim RMS/Goertzel/band-power descriptor that
+captures loudness/spectral shape but **cannot discriminate speakers**. It exists
+only to exercise the pipeline. "Completing voiceprint" = plugging a real learned
+speaker-embedding model into the existing protocol.
+
+Because a voiceprint is biometric data (BIPA / GDPR Art. 9, the same category as
+the face concerns above), **where the embedding is computed matters as much as
+which model**. The current architecture ships raw audio to the server
+(`audio_artifact.register` + `score_turns` with `audioPath`); computing the
+embedding **on the phone and sending only the vector** keeps the biometric audio
+off the server entirely.
+
+On-device feasibility (evaluated 2026-07-10): running a speaker embedder on
+iPhone is proven and cheap. sherpa-onnx runs CAM++ / ResNet34 / WeSpeaker ONNX
+models on iOS offline with a bundled matched fbank front-end; FluidAudio runs a
+WeSpeaker embedding on the Apple Neural Engine (fp16), ~10–20× faster than
+PyTorch. A single 3–10 s utterance is ~5–25 ms on A17/A18/M-series (≈8–35 ms on
+A16); resident memory ~50–150 MB; per-turn energy is single-digit millijoules
+(the always-on mic/VAD/ASR dominates power, not the embedder). Apple ships **no**
+public speaker-embedding (SoundAnalysis is classification-only; Speech is
+transcription-only), so a third-party model must be converted.
+
+Model choice (must fit the existing contract: audio → fixed-dim vector, tagged
+`provider/modelId/version`, cosine + threshold, templates comparable only within
+one model+version):
+
+| Use | Model | Why |
+|-----|-------|-----|
+| On-device primary | **3D-Speaker CAM++** (7.2M, 192-dim, ~0.65–0.73% VoxCeleb1-O EER, ~27 MB ONNX / ~7 MB int8) via sherpa-onnx | best accuracy-per-MB; front-end ships matched |
+| On-device via Core ML/ANE | **WeSpeaker ResNet34-LM** (6.6M, 256-dim, ~0.72% EER) | FluidAudio proves clean ANE conversion |
+| Avoid on-device | ECAPA-TDNN, Resemblyzer | ECAPA's FFT+ASP splits into 3 graphs; Resemblyzer's LSTM has no ANE path |
+
+Need ~2–3 s of **voiced** speech (post-VAD) for a reliable embedding (3 s ≈ 1.3%
+EER, 2 s ≈ 1.9%); score once per conversational turn. **Biggest technical risk:
+front-end parity** — the FFT cannot live inside a Core ML/ONNX graph, so the
+on-device log-mel (vDSP/Accelerate) must byte-for-byte match the training
+front-end (kaldi fbank params, mel scale, log offset, CMN/CMVN); a subtle
+mismatch silently collapses cosine scores, so enroll-on-server / verify-on-phone
+would fail to match even though both "work". Using sherpa-onnx's bundled matched
+front-end is the mitigation.
+
+**Recommended architecture — hybrid.** Live "who's speaking" scoring runs
+**on-device** (CAM++ via sherpa-onnx, or WeSpeaker via Core ML): the phone emits
+the embedding vector, not audio. Keep a **server sidecar using the exact same
+model+version** for enrollment/backfill (re-embedding stored audio on a version
+bump), batch enrollment, and any non-iOS client. Standardize on one
+`provider/modelId/version` across phone and sidecar so cosine comparison stays
+valid — the code already tags every embedding this way, so the versioning
+machinery is in place.
+
+**Deployment fork / first increment.** The two paths share one model+version:
+(a) **server sidecar only** (`services/voiceprint`, CAM++ via onnxruntime) is the
+fastest way to make the whole built pipeline functional and testable end-to-end —
+point `config.voiceprint.live_scoring` at it — but ships biometric audio to the
+server; (b) **on-device (hybrid)** is the privacy-correct target and is proven
+feasible, but adds iOS model integration plus a small protocol change so the
+gateway receives vectors. The pragmatic first increment is the **server sidecar**
+(it is also the hybrid's enrollment/backfill component and the fallback), with
+on-device live scoring as the follow-on. Front-end parity must be validated
+against the reference implementation before trusting cross-device cosine scores.
+
 ## Target Shape
 
 The identity system should have four durable concepts:
