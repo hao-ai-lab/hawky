@@ -28,6 +28,7 @@ import {
   buildVoiceprintConsentGrant,
   buildVoiceprintConsentWithdrawal,
   effectiveConsentAllowsProcessing,
+  hashVoiceprintSessionRef,
   isVoiceprintConsentExpired,
   type VoiceprintAuditOp,
   type VoiceprintAuditRecord,
@@ -898,6 +899,11 @@ export function registerVoiceprintMethods(
         outcome: run.status === "error" ? "error" : "ok",
         counts: { turns: turns.length, patches: run.patches.length },
       });
+      // A7 privacy-safe scoring-decision telemetry: one record per SCORED turn
+      // (decision + scalar score + threshold + model), and a distinct no-score
+      // "error" record when the whole batch degraded. Never emits a score on the
+      // skip/error path. Inert unless a recording sink is configured (default OFF).
+      emitVoiceprintScoreTelemetry(lifecycle, sessionKey, run);
       return serializeScoreTurnsResult({
         sessionKey,
         turns: turns.length,
@@ -910,7 +916,14 @@ export function registerVoiceprintMethods(
         op: "score",
         outcome: "error",
       });
-      throw voiceprintMethodError(error);
+      const methodError = voiceprintMethodError(error);
+      // A fault thrown BEFORE a run object exists (e.g. a batch-integrity/security
+      // guard that throws rather than degrading to run.status === "error") would
+      // otherwise record an audit error but ZERO telemetry — asymmetric with the
+      // in-band error run that emits a scoreless `error` record. Emit one here too so
+      // the error-visibility story is symmetric. Never a score on the error path.
+      emitVoiceprintScoreTelemetryError(lifecycle, sessionKey, methodError.code);
+      throw methodError;
     }
   });
 
@@ -1553,6 +1566,34 @@ function registerVoiceprintLifecycleMethods(
         ok: true as const,
         sessionKey,
         records,
+      };
+    } catch (error) {
+      throw voiceprintLifecycleMethodError(error);
+    }
+  });
+
+  // A7 — read the privacy-safe scoring-decision telemetry (scalar scores +
+  // decisions + thresholds + model) and per-decision-class histograms for this
+  // subject. `sessionRef` is the OPAQUE hash the sink keyed records under (never the
+  // raw sessionKey). Returns empty/zeroed when telemetry is OFF (default). This is a
+  // read-only distribution view; it carries no embeddings/audio/keys.
+  server.registerMethod("identity.voiceprint.get_score_telemetry", (conn, params) => {
+    const input = parseSessionOnlyParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    try {
+      const sessionRef = hashVoiceprintSessionRef(sessionKey);
+      const records = lifecycle.scoreTelemetry.read(sessionRef);
+      const aggregate = lifecycle.scoreTelemetry.aggregate(sessionRef);
+      return {
+        ok: true as const,
+        sessionKey,
+        sessionRef,
+        enabled: lifecycle.scoreTelemetry.enabled,
+        records,
+        histograms: aggregate.histograms,
+        outcomeCounts: aggregate.outcomeCounts,
+        decisionCounts: aggregate.decisionCounts,
+        total: aggregate.total,
       };
     } catch (error) {
       throw voiceprintLifecycleMethodError(error);
@@ -3027,6 +3068,135 @@ function flattenPurgeCounts(counts: VoiceprintStorageCounts): Record<string, num
  * persisted; a bad record throws rather than leaking. Audit failures are isolated
  * so a lifecycle store hiccup never takes down the primary operation.
  */
+/**
+ * A7 — emit privacy-safe scoring-decision telemetry for a completed score run.
+ *
+ * One telemetry record per SCORED turn carries the scalar score + decision +
+ * threshold + model. The `sessionRef` is an OPAQUE hash of the sessionKey (never the
+ * raw key, which could be PII). When the whole batch degraded to an `error` run, we
+ * emit a single distinct `error` record with NO score/decision (the constraint: do
+ * not emit a score on the failure/skip path). The sink guards every record against
+ * embedding/audio/key leaks; the default no-op sink records nothing (telemetry OFF).
+ */
+function emitVoiceprintScoreTelemetry(
+  lifecycle: VoiceprintLifecycle,
+  sessionKey: string,
+  run: LiveVoiceprintScoringPlanRun,
+): void {
+  const sink = lifecycle.scoreTelemetry;
+  if (!sink.enabled) {
+    // OFF by default: skip building any record so scoring stays byte-for-byte
+    // unchanged. (The no-op sink would drop records anyway; this avoids the work.)
+    return;
+  }
+  const sessionRef = hashVoiceprintSessionRef(sessionKey);
+  const at = new Date().toISOString();
+  try {
+    if (run.status === "error") {
+      sink.record({
+        version: 1,
+        op: "score",
+        at,
+        outcome: "error",
+        sessionRef,
+        ...(run.error?.code !== undefined ? { reason: run.error.code } : {}),
+      });
+      return;
+    }
+    for (const result of run.batch?.results ?? []) {
+      const score = result.result.score;
+      const model = result.response.model;
+      sink.record({
+        version: 1,
+        op: "score",
+        at,
+        outcome: "scored",
+        sessionRef,
+        decision: score.decision,
+        score: score.similarity,
+        thresholdUsed: score.thresholdUsed,
+        ...(model?.provider !== undefined ? { modelProvider: model.provider } : {}),
+        ...(model?.modelId !== undefined ? { modelId: model.modelId } : {}),
+        ...(model?.version !== undefined ? { modelVersion: model.version } : {}),
+      });
+    }
+    // A turn can be dropped WITHIN a successful/partial run (consent filter, missing
+    // audio, unusable client/sidecar embedding). Those turns are never scored, so we
+    // emit a scoreless `skipped` record (reason only, no score/decision) rather than
+    // dropping them silently — otherwise `outcomeCounts.skipped` is always 0 in real
+    // telemetry and decision/skip drift is under-reported. This preserves the
+    // "never a bogus score on the skip path" rule (no score field is set).
+    for (const skipped of run.plan.skipped) {
+      sink.record({
+        version: 1,
+        op: "score",
+        at,
+        outcome: "skipped",
+        sessionRef,
+        reason: skipped.reason,
+      });
+    }
+    for (const rejected of run.plan.clientRejected) {
+      sink.record({
+        version: 1,
+        op: "score",
+        at,
+        outcome: "skipped",
+        sessionRef,
+        reason: rejected.reason,
+      });
+    }
+    for (const skipped of run.batch?.skipped ?? []) {
+      sink.record({
+        version: 1,
+        op: "score",
+        at,
+        outcome: "skipped",
+        sessionRef,
+        reason: skipped.reason,
+      });
+    }
+  } catch (error) {
+    log.warn("identity.voiceprint.score_telemetry_failed", {
+      session_key: sessionKey,
+      error: errorMessage(error),
+    });
+  }
+}
+
+/**
+ * Emit a single scoreless `error` telemetry record for a score_turns fault that
+ * THREW before a run object was produced (so `emitVoiceprintScoreTelemetry` never
+ * ran). `reason` is the sanitized MethodError code — a stable non-biometric class
+ * string, never a raw path/message. Failure-isolated and inert unless a recording
+ * sink is configured (default OFF); never emits a score.
+ */
+function emitVoiceprintScoreTelemetryError(
+  lifecycle: VoiceprintLifecycle,
+  sessionKey: string,
+  reason: string,
+): void {
+  const sink = lifecycle.scoreTelemetry;
+  if (!sink.enabled) {
+    return;
+  }
+  try {
+    sink.record({
+      version: 1,
+      op: "score",
+      at: new Date().toISOString(),
+      outcome: "error",
+      sessionRef: hashVoiceprintSessionRef(sessionKey),
+      reason,
+    });
+  } catch (error) {
+    log.warn("identity.voiceprint.score_telemetry_failed", {
+      session_key: sessionKey,
+      error: errorMessage(error),
+    });
+  }
+}
+
 function emitVoiceprintAudit(
   lifecycle: VoiceprintLifecycle,
   entry: {

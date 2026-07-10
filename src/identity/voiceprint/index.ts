@@ -20,6 +20,7 @@ export * from "./policy.js";
 export * from "./quality.js";
 export * from "./report.js";
 export * from "./review.js";
+export * from "./scoring-telemetry.js";
 export * from "./sidecar-client.js";
 export * from "./sidecar-manifest.js";
 export * from "./sidecar-protocol.js";

@@ -1171,6 +1171,14 @@ The real levers are in *how we score*, not the threshold, in bang-for-buck order
    Enrollment quality (longer, multi-condition capture; the 30 s minimum is the
    right direction) does more for the margin than threshold tuning.
 
+   *No-biometric guarantee:* the AS-Norm cohort that anchors this calibration
+   holds only **non-owner (impostor)** embeddings and carries no owner biometric
+   data — `VoiceprintCohort`/`asNormScore` in `as-norm.ts` never read the owner
+   template and take the owner↔test cosine as an opaque scalar. Calibration
+   defines the FAR/FRR operating point against that impostor distribution plus a
+   modest set of genuine samples, so the shippable cohort asset stays free of any
+   broad owner biometric corpus.
+
 ## Target Shape
 
 The identity system should have four durable concepts:

@@ -780,6 +780,19 @@ export interface HawkyConfig {
      */
     retention_days?: number;
     retention_ms?: number;
+    /**
+     * A7 privacy-safe scoring-DECISION telemetry (distinct from the A4 audit log).
+     * OFF by default: when `enabled` is not true, scoring records NOTHING and
+     * behaves exactly as before. When enabled, one telemetry record per scored turn
+     * (scalar score + decision + threshold + model, keyed by an OPAQUE session hash)
+     * is persisted to `sink_path` (default: state/voiceprint/score-telemetry.json
+     * under the config root) so operators can watch decision drift and build the
+     * score distribution for threshold calibration. NEVER stores a vector/audio/key.
+     */
+    telemetry?: {
+      enabled?: boolean;
+      sink_path?: string;
+    };
     live_scoring?: {
       enabled?: boolean;
       /**
