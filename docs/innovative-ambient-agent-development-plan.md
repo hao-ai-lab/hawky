@@ -6063,3 +6063,26 @@ The hard parts are the point:
 
 If those hard parts survive, HaoClaw can become something unusual: not an
 ambient app, but a governed personal agent substrate.
+
+## B1: iOS on-device speaker embedder (seam)
+
+iOS gains a compile/unit-verifiable seam for on-device speaker embeddings under
+`ios/hawky/Voiceprint/`:
+
+- `SpeakerEmbedder` protocol → `SpeakerEmbedding` (Float vector, target 192-dim)
+  plus `SpeakerEmbeddingModelInfo` (`provider`, `modelId`, `version?`), matching
+  the gateway `sampleEmbeddingModel` contract.
+- `CoreMLSpeakerEmbedder` loads a device-provisioned CAM++ `.mlmodelc` BY NAME if
+  present and reports itself unavailable otherwise. The model binary is gitignored
+  (like the server's `campplus.onnx`) and is NOT committed.
+- `DeterministicSpeakerEmbedder` is a dev/test-only, non-discriminative reference
+  (provider `reference`) so the seam + `score_turns` serialization are unit-testable
+  without the real model.
+
+Finalized turns serialize into `identity.voiceprint.score_turns` as
+`sampleEmbedding` (JSON number array) + `sampleEmbeddingModel` (`{provider,
+modelId, version?}`) with an optional `nonce` (A8 liveness, populated by B2). The
+path is OFF by default: it activates only when `voiceprintRealtimeEnabled` AND a
+new default-false `onDeviceEmbeddingEnabled` are both on AND the CoreML model is
+provisioned; otherwise the session keeps sending markers and the server scores as
+before.
