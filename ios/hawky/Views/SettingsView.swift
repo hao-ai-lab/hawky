@@ -893,6 +893,25 @@ struct SettingsView: View {
             .settingsSectionSurface()
 
             LiveSettingsFormContent(store: liveStore)
+
+            Section {
+                NavigationLink {
+                    OwnerEnrollmentView(store: liveStore)
+                } label: {
+                    SettingsLandingRow(
+                        systemImage: "person.wave.2",
+                        color: .teal,
+                        title: "Voice enrollment",
+                        subtitle: "Set up your owner voice template"
+                    )
+                }
+                .accessibilityIdentifier("settings.live.voiceEnrollment.row")
+            } header: {
+                Text("Voice identity")
+            } footer: {
+                Text("Enroll your own voice so Hawky can recognize when you're speaking. This only sets up the template — it does not turn on live voice recognition.")
+            }
+            .settingsSectionSurface()
         }
         .navigationTitle("Live")
         .navigationBarTitleDisplayMode(.inline)

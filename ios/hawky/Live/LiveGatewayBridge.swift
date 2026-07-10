@@ -221,6 +221,91 @@ struct LiveVoiceprintScoreTurnsResult: Equatable {
     }
 }
 
+/// Result of `identity.voiceprint.audio_artifact.register` (B3). Confirms the
+/// gateway accepted the local WAV as a referenceable enrollment source. Returns
+/// the echoed `audioArtifactId` so the enroll flow can carry it in `sources`.
+struct LiveVoiceprintAudioArtifactRegistration: Equatable {
+    var ok: Bool
+    var sessionKey: String?
+    var audioArtifactID: String?
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        if case let .some(.bool(ok)) = root["ok"] {
+            self.ok = ok
+        } else {
+            // Some server versions return the artifact object without a top-level
+            // `ok`; treat presence of the artifact / session key as success.
+            self.ok = root["audioArtifact"] != nil || root["sessionKey"] != nil
+        }
+        if case let .some(.string(sessionKey)) = root["sessionKey"] {
+            self.sessionKey = sessionKey
+        } else {
+            self.sessionKey = nil
+        }
+        if case let .some(.object(artifact)) = root["audioArtifact"],
+           case let .some(.string(id)) = artifact["audioArtifactId"] {
+            self.audioArtifactID = id
+        } else if case let .some(.string(id)) = root["audioArtifactId"] {
+            self.audioArtifactID = id
+        } else {
+            self.audioArtifactID = nil
+        }
+    }
+}
+
+/// Result of `identity.voiceprint.enroll_owner` / `add_enrollment_clip` (B3). The
+/// server returns a status ("accepted" on success; "rejected" / "reembedded" /
+/// "needs_reenrollment" otherwise) plus `sourceCount` and the voiced `speechMs`.
+/// `accepted` is the only success posture the client treats as enrolled.
+struct LiveVoiceprintEnrollmentResult: Equatable {
+    var ok: Bool
+    var status: String?
+    var sessionKey: String?
+    var sourceCount: Int?
+    var speechMs: Double?
+    var reasons: [String]
+
+    /// The server's happy path returns `status: "accepted"`. Anything else — a
+    /// quality rejection, a too-short clip that slipped past the client floor — is
+    /// NOT an enrollment.
+    var accepted: Bool { status == "accepted" }
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        if case let .some(.bool(ok)) = root["ok"] {
+            self.ok = ok
+        } else {
+            self.ok = root["status"] != nil
+        }
+        if case let .some(.string(status)) = root["status"] {
+            self.status = status
+        } else {
+            self.status = nil
+        }
+        if case let .some(.string(sessionKey)) = root["sessionKey"] {
+            self.sessionKey = sessionKey
+        } else {
+            self.sessionKey = nil
+        }
+        if case let .some(.number(sourceCount)) = root["sourceCount"] {
+            self.sourceCount = Int(sourceCount)
+        } else {
+            self.sourceCount = nil
+        }
+        if case let .some(.number(speechMs)) = root["speechMs"] {
+            self.speechMs = speechMs
+        } else {
+            self.speechMs = nil
+        }
+        if case let .some(.array(values)) = root["reasons"] {
+            self.reasons = values.compactMap { if case let .string(s) = $0 { return s }; return nil }
+        } else {
+            self.reasons = []
+        }
+    }
+}
+
 struct LiveVoiceprintRealtimeResult: Equatable {
     var ok: Bool
     var sessionKey: String
@@ -1005,6 +1090,71 @@ actor LiveGatewayBridge {
             timeoutSeconds: timeoutSeconds
         )
         return LiveVoiceprintScoreTurnsResult(payload: payload)
+    }
+
+    // MARK: - Owner voiceprint enrollment (B3)
+
+    /// Register a locally-recorded WAV as a voiceprint audio artifact so a later
+    /// enroll_owner can reference it by `audioArtifactId`. Mirrors how the
+    /// score/realtime paths reference an artifact. Returns nil on any failure.
+    func registerVoiceprintAudioArtifact(
+        sessionKey: String,
+        audioArtifactID: String,
+        mediaID: String,
+        sampleRate: Double?,
+        route: String? = nil,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> LiveVoiceprintAudioArtifactRegistration? {
+        var params: [String: JSONValue] = [
+            "sessionKey": .string(sessionKey),
+            "audioArtifactId": .string(audioArtifactID),
+            "mediaId": .string(mediaID),
+        ]
+        if let sampleRate { params["sampleRate"] = .number(sampleRate) }
+        if let route, !route.isEmpty { params["route"] = .string(route) }
+        let payload = await invokeMethod(
+            "identity.voiceprint.audio_artifact.register",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintAudioArtifactRegistration(payload: payload)
+    }
+
+    /// Enroll the OWNER voiceprint template from one or more recorded sources.
+    /// `params` MUST be built by `LiveVoiceprintEnrollmentRequest.enrollOwnerParams`
+    /// so the wire keys (`sources`, `consent`, `minSpeechMs`) match the server
+    /// parser exactly. Returns nil on transport failure.
+    func enrollVoiceprintOwner(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval = 30
+    ) async -> LiveVoiceprintEnrollmentResult? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.enroll_owner",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEnrollmentResult(payload: payload)
+    }
+
+    /// Append one more source to an existing owner template ("add another clip").
+    /// `params` MUST be built by
+    /// `LiveVoiceprintEnrollmentRequest.addEnrollmentClipParams`. Returns nil on
+    /// transport failure.
+    func addVoiceprintEnrollmentClip(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval = 30
+    ) async -> LiveVoiceprintEnrollmentResult? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.add_enrollment_clip",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEnrollmentResult(payload: payload)
     }
 
     /// Invoke an arbitrary gateway method over a short-lived connection and return
