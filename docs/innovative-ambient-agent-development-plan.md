@@ -989,7 +989,11 @@ model+version** for enrollment/backfill (re-embedding stored audio on a version
 bump), batch enrollment, and any non-iOS client. Standardize on one
 `provider/modelId/version` across phone and sidecar so cosine comparison stays
 valid — the code already tags every embedding this way, so the versioning
-machinery is in place.
+machinery is in place. The server side of this is already shipped: the gateway
+can now score a client-supplied embedding directly against the owner template
+behind the `acceptClientEmbeddings` opt-in (default off), enforcing a
+model+version match against the owner template before it accepts the vector — see
+"Protocol extension shipped" below.
 
 **Deployment fork / first increment.** The two paths share one model+version:
 (a) **server sidecar only** (`services/voiceprint`, CAM++ via onnxruntime) is the
@@ -1001,6 +1005,32 @@ gateway receives vectors. The pragmatic first increment is the **server sidecar*
 (it is also the hybrid's enrollment/backfill component and the fallback), with
 on-device live scoring as the follow-on. Front-end parity must be validated
 against the reference implementation before trusting cross-device cosine scores.
+
+**Protocol extension shipped (server-side prerequisite for on-device).** The
+gateway now accepts an OPTIONAL per-turn **client-supplied embedding** on
+`identity.voiceprint.score_turns` (`turn.sampleEmbedding` +
+`turn.sampleEmbeddingModel`). When present, the turn is scored **directly**
+against the owner template via `scoreVoiceprintTurn(ownerEmbeddings,
+sampleEmbedding)` — **no sidecar spawn, no audio slice, no biometric audio read**
+— producing the exact same `VoiceprintTranscriptIdentityState` + patches a
+sidecar-scored turn would. Turns without a client embedding keep the audio/sidecar
+path unchanged; a mixed batch works. This is what lets the phone send a vector
+instead of shipping biometric audio. It is gated behind an explicit opt-in,
+`config.voiceprint.live_scoring.accept_client_embeddings` (**default false**;
+resolved in `resolveVoiceprintLiveScoringConfigFromConfig` →
+`VoiceprintLiveScoringConfig.acceptClientEmbeddings`). When the flag is off a
+supplied vector is **ignored** for direct scoring (the turn falls back to the
+audio path, or is skipped if it has no usable audio) — the server never silently
+trusts a client vector. **Trust boundary shift:** accepting a client-computed
+embedding means the server can no longer verify the audio actually produced that
+vector; it trusts the authenticated device. To bound that trust the client vector
+is strictly validated (non-empty, finite, non-zero norm, dimension ==
+owner-template dim) and its model+version MUST match the owner template
+(`sameVoiceprintModel`), or the turn is rejected with a clear reason (never a
+spurious accept). Consent gating and thresholds are unchanged; live scoring stays
+off by default. Implementation:
+`src/identity/voiceprint/live-client-embedding.ts`, `.../live-plan.ts`,
+`src/gateway/voiceprint-methods.ts`.
 
 ### Threshold & scoring calibration strategy
 

@@ -30,6 +30,7 @@ import {
   buildVoiceprintTranscriptIdentityStatePatches,
   countVoiceprintStorageSnapshot,
   DEFAULT_VOICEPRINT_AUDIO_QUALITY_THRESHOLDS,
+  deviceAttestedVoiceprintQuality,
   emptyVoiceprintStorageSnapshot,
   formatVoiceprintModel,
   ownerEmbeddingsFromVoiceprintTemplateArtifact,
@@ -48,6 +49,7 @@ import {
   type VoiceprintStorageSnapshot,
   type LiveVoiceRealtimeEvent,
   type LiveVoiceprintPlanItemInput,
+  type LiveVoiceprintScoringBatchResult,
   type LiveVoiceprintScoringPlan,
   type LiveVoiceprintScoringPlanRun,
   type LiveVoiceprintScoringPlanRunStatus,
@@ -149,6 +151,13 @@ export interface VoiceprintLiveScoringConfig {
   ownerTemplateRef?: string;
   targetSampleRate?: number;
   timeoutMs?: number;
+  /**
+   * TRUST BOUNDARY opt-in (default false). When true, a per-turn client-computed
+   * embedding is scored DIRECTLY against the owner template, skipping the sidecar
+   * and the biometric audio entirely. See `accept_client_embeddings` in config
+   * and the trust-boundary note in identity/voiceprint/live-client-embedding.ts.
+   */
+  acceptClientEmbeddings?: boolean;
 }
 
 export interface VoiceprintScoreTurnsResult {
@@ -191,6 +200,11 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     qualityThresholds: resolveConfiguredVoiceprintQualityThresholds(raw.quality_thresholds),
     targetSampleRate: optionalPositiveNumber(raw.target_sample_rate, "voiceprint.live_scoring.target_sample_rate"),
     timeoutMs: optionalPositiveNumber(raw.timeout_ms, "voiceprint.live_scoring.timeout_ms"),
+    // TRUST BOUNDARY opt-in, default false: only when true will a client-supplied
+    // per-turn embedding be scored directly against the owner template (no sidecar,
+    // no biometric audio). See identity/voiceprint/live-client-embedding.ts.
+    acceptClientEmbeddings:
+      optionalBoolean(raw.accept_client_embeddings) ?? false,
   };
 }
 
@@ -461,6 +475,10 @@ interface VoiceprintScoreTurnInput {
   audioArtifactId?: string;
   audioPath?: string;
   route?: string;
+  /** OPTIONAL client-computed (on-device) embedding for this turn. */
+  sampleEmbedding?: number[];
+  /** Model+version that produced `sampleEmbedding`; must match the owner template. */
+  sampleEmbeddingModel?: VoiceprintModelInfo;
 }
 
 function parseScoreTurnsParams(params: unknown): ScoreTurnsParams {
@@ -512,6 +530,63 @@ function parseScoreTurnInput(value: unknown): VoiceprintScoreTurnInput {
     audioArtifactId: optionalString(turn.audioArtifactId),
     audioPath: optionalString(turn.audioPath),
     route: optionalString(turn.route),
+    sampleEmbedding: parseOptionalClientEmbedding(turn.sampleEmbedding),
+    sampleEmbeddingModel: parseOptionalClientEmbeddingModel(
+      turn.sampleEmbeddingModel ?? turn.sample_embedding_model,
+    ),
+  };
+}
+
+function parseOptionalClientEmbedding(value: unknown): number[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new MethodError("INVALID_REQUEST", "turn.sampleEmbedding must be an array of numbers.");
+  }
+  // Shape validation only here; usability/dimension/model checks happen in the
+  // scoring core so a malformed vector cannot manufacture a spurious accept.
+  return value.map((item, index) => {
+    if (typeof item !== "number") {
+      throw new MethodError(
+        "INVALID_REQUEST",
+        `turn.sampleEmbedding[${index}] must be a number.`,
+      );
+    }
+    return item;
+  });
+}
+
+function parseOptionalClientEmbeddingModel(value: unknown): VoiceprintModelInfo | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new MethodError("INVALID_REQUEST", "turn.sampleEmbeddingModel must be an object.");
+  }
+  const model = value as Record<string, unknown>;
+  const provider = requiredString(model.provider, "turn.sampleEmbeddingModel.provider");
+  const validProviders = [
+    "external-json",
+    "signal-baseline",
+    "speechbrain",
+    "wespeaker",
+    "picovoice",
+    "sherpa-onnx",
+    "reference",
+    "custom",
+  ];
+  if (!validProviders.includes(provider)) {
+    throw new MethodError("INVALID_REQUEST", "turn.sampleEmbeddingModel.provider is invalid.");
+  }
+  return {
+    provider: provider as VoiceprintModelInfo["provider"],
+    modelId: requiredString(
+      model.modelId ?? model.model_id,
+      "turn.sampleEmbeddingModel.modelId",
+    ),
+    version: optionalString(model.version),
+    notes: optionalString(model.notes),
   };
 }
 
@@ -568,6 +643,13 @@ async function buildScorePlanTurns(input: {
     const audioPath = registeredArtifact?.audioPath ?? turn.audioPath;
     const requestStartMs = registeredArtifact?.requestStartMs ?? turn.startMs;
     const requestEndMs = registeredArtifact?.requestEndMs ?? turn.endMs;
+    // A turn is scored from its client-supplied embedding ONLY when the gateway
+    // is explicitly opted in AND the turn actually carries one. Otherwise the
+    // client vector is ignored for direct scoring and the turn keeps the audio
+    // path (or is skipped if it has no usable audio).
+    const useClientEmbedding =
+      input.scoring.acceptClientEmbeddings === true && turn.sampleEmbedding !== undefined;
+
     const planTurn: LiveVoiceprintPlanItemInput = {
       sessionKey: input.sessionKey,
       transcriptItemId: turn.transcriptItemId,
@@ -594,6 +676,23 @@ async function buildScorePlanTurns(input: {
     };
 
     if (
+      useClientEmbedding &&
+      turn.role === "user" &&
+      turn.audioArtifactId &&
+      audioPath &&
+      voiceprintConsentAllowsProcessing(policy.consent)
+    ) {
+      // On-device path: score the client embedding directly. We DO NOT read or
+      // slice the biometric audio here — the server never sees it. The audio
+      // artifact reference (audioArtifactId + registered audioPath) is still
+      // required to build the job, but the file is never read. A device-attested
+      // quality lets the shared scoring path run without server-side samples.
+      planTurn.acceptClientEmbeddings = true;
+      planTurn.sampleEmbedding = turn.sampleEmbedding;
+      planTurn.sampleEmbeddingModel = turn.sampleEmbeddingModel;
+      planTurn.quality = deviceAttestedVoiceprintQuality();
+      needsOwnerTemplate = true;
+    } else if (
       turn.role === "user" &&
       turn.audioArtifactId &&
       audioPath &&
@@ -618,6 +717,15 @@ async function buildScorePlanTurns(input: {
     for (const turn of turns) {
       turn.ownerTemplateRef = ownerTemplate.ownerTemplateRef;
       turn.ownerEmbeddings = ownerTemplate.ownerEmbeddings;
+      // Model-match (requirement 3) MUST be enforced for the client-embedding
+      // path even when config `expected_model` is unset. The owner template
+      // itself carries the model that produced its vectors, so derive the
+      // expected model from it and require the client vector to match. Config
+      // `expected_model`, when present, takes precedence (and is already
+      // cross-checked against the template model in resolveOwnerVoiceprintTemplate).
+      if (turn.acceptClientEmbeddings === true && turn.sampleEmbedding !== undefined) {
+        turn.expectedModel = input.scoring.expectedModel ?? ownerTemplate.ownerTemplateModel;
+      }
     }
   }
 
@@ -639,26 +747,61 @@ async function runAndStoreLiveVoiceprintScoringPlan(input: {
   const initialStorage = initialBundle ? await input.storage.applyBundle(initialBundle) : null;
 
   if (plan.jobContexts.length === 0) {
+    // No sidecar jobs. If any turns were scored from a client embedding, still
+    // build their patches WITHOUT spawning the sidecar; otherwise nothing to do.
+    if (plan.clientScored.length === 0) {
+      return {
+        run: {
+          version: 1,
+          status: plan.status === "empty" ? "empty" : "skipped",
+          plan,
+          batch: null,
+          patches: [],
+          states: plan.states,
+          storageBundle: initialBundle,
+        },
+        storage: initialStorage,
+      };
+    }
+    const clientBatch = clientOnlyGuardedBatchResult(plan);
+    const currentStates = currentTranscriptStatesForPlan(
+      requireVoiceprintStorageSnapshot(input.storage),
+      plan,
+      input.createdAt,
+    );
+    const patches = buildVoiceprintTranscriptIdentityStatePatches({
+      batch: clientBatch,
+      existingStates: currentStates,
+      createdAt: input.createdAt,
+      updatedAt: input.updatedAt,
+      staleUpdateHandling: "ignore",
+    });
+    const states = mergeVoiceprintStatePatches(currentStates, patches);
+    const finalBundle = bundleForPatches(patches, input.updatedAt ?? input.createdAt);
+    const finalStorage = finalBundle ? await input.storage.applyBundle(finalBundle) : initialStorage;
     return {
       run: {
         version: 1,
-        status: plan.status === "empty" ? "empty" : "skipped",
+        status: statusForGuardedRun(plan, clientBatch.status, patches),
         plan,
-        batch: null,
-        patches: [],
-        states: plan.states,
-        storageBundle: initialBundle,
+        batch: clientBatch,
+        patches,
+        states,
+        storageBundle: finalBundle ?? initialBundle,
       },
-      storage: initialStorage,
+      storage: finalStorage,
     };
   }
 
   let batch: Awaited<ReturnType<typeof runLiveVoiceprintScoringJobs>>;
   try {
-    batch = await runLiveVoiceprintScoringJobs({
-      sidecar: input.sidecar,
-      jobs: plan.jobContexts,
-    });
+    batch = mergeClientScoredIntoGuardedBatch(
+      await runLiveVoiceprintScoringJobs({
+        sidecar: input.sidecar,
+        jobs: plan.jobContexts,
+      }),
+      plan,
+    );
   } catch (error) {
     const message = errorMessage(error);
     const currentStates = currentTranscriptStatesForPlan(
@@ -666,12 +809,28 @@ async function runAndStoreLiveVoiceprintScoringPlan(input: {
       plan,
       input.createdAt,
     );
-    const states = markCurrentVoiceprintScoringStatesErrored({
+    // Client-embedding-scored turns do not depend on the sidecar, so resolve
+    // them from clientScored even though the sidecar failed; only the
+    // sidecar-bound scoring states are marked errored.
+    const erroredStates = markCurrentVoiceprintScoringStatesErrored({
       plan,
       states: currentStates,
       message,
       updatedAt: input.updatedAt,
     });
+    const states =
+      plan.clientScored.length > 0
+        ? mergeVoiceprintStatePatches(
+            erroredStates,
+            buildVoiceprintTranscriptIdentityStatePatches({
+              batch: clientOnlyGuardedBatchResult(plan),
+              existingStates: currentStates,
+              createdAt: input.createdAt,
+              updatedAt: input.updatedAt,
+              staleUpdateHandling: "ignore",
+            }),
+          )
+        : erroredStates;
     const finalBundle = bundleForChangedStates(states, currentStates, input.updatedAt ?? input.createdAt);
     const finalStorage = finalBundle ? await input.storage.applyBundle(finalBundle) : initialStorage;
     return {
@@ -719,6 +878,31 @@ async function runAndStoreLiveVoiceprintScoringPlan(input: {
       storageBundle: finalBundle ?? initialBundle,
     },
     storage: finalStorage,
+  };
+}
+
+function clientOnlyGuardedBatchResult(
+  plan: LiveVoiceprintScoringPlan,
+): LiveVoiceprintScoringBatchResult {
+  return {
+    status: "scored",
+    request: null,
+    model: plan.clientScored[0]?.response.model,
+    results: [...plan.clientScored],
+    skipped: [],
+  };
+}
+
+function mergeClientScoredIntoGuardedBatch(
+  batch: LiveVoiceprintScoringBatchResult,
+  plan: LiveVoiceprintScoringPlan,
+): LiveVoiceprintScoringBatchResult {
+  if (plan.clientScored.length === 0) {
+    return batch;
+  }
+  return {
+    ...batch,
+    results: [...batch.results, ...plan.clientScored],
   };
 }
 
@@ -854,6 +1038,7 @@ function transcriptJoinKey(input: { sessionKey: string; transcriptItemId: string
 function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
   ownerEmbeddings: number[][];
   ownerTemplateRef?: string;
+  ownerTemplateModel?: VoiceprintModelInfo;
 } {
   const sourceCount = [
     scoring.ownerTemplateArtifact,
@@ -901,6 +1086,7 @@ function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
       return {
         ownerEmbeddings: ownerEmbeddingsFromVoiceprintTemplateArtifact(artifact),
         ownerTemplateRef,
+        ownerTemplateModel: templateModel,
       };
     } catch (error) {
       throw new MethodError(

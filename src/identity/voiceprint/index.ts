@@ -2,6 +2,7 @@ export * from "./audio-features.js";
 export * from "./contracts.js";
 export * from "./manifest.js";
 export * from "./live-adapter.js";
+export * from "./live-client-embedding.js";
 export * from "./live-plan.js";
 export * from "./live-queue.js";
 export * from "./live-realtime-events.js";

@@ -1487,6 +1487,209 @@ describe("voiceprint gateway methods", () => {
       ),
     ).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
   });
+
+  test("scores a client-supplied embedding without spawning the sidecar when opted in", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-client-embed-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    registerVoiceprintMethods(
+      server as any,
+      storage,
+      undefined,
+      {
+        // A sidecar that fails if ever spawned: the client-embedding path must
+        // resolve without touching it.
+        sidecar: {
+          command: process.execPath,
+          args: ["-e", "process.stderr.write('sidecar must not spawn'); process.exit(99)"],
+          timeoutMs: 5_000,
+        },
+        ownerEmbeddings: [[1, 0]],
+        allowedAudioRoots: [dir],
+        consent: trustedProcessingConsent,
+        expectedModel: sidecarModel,
+        acceptClientEmbeddings: true,
+      },
+    );
+
+    const result = await server.call(
+      "identity.voiceprint.score_turns",
+      { sessionKey: "live:voiceprint-methods-client-embed" },
+      {
+        turns: [
+          {
+            sessionKey: "live:voiceprint-methods-client-embed",
+            transcriptItemId: "rt_voiceprint_methods_client_embed",
+            role: "user",
+            text: "owner spoke here",
+            startMs: 0,
+            endMs: 1500,
+            audioArtifactId: "audio_voiceprint_methods_client_embed",
+            audioPath,
+            route: "iphone_mic",
+            sampleEmbedding: [1, 0],
+            sampleEmbeddingModel: sidecarModel,
+          },
+        ],
+        consent: {
+          captureAllowed: true,
+          biometricAllowed: true,
+          memoryPromotionAllowed: true,
+        },
+        createdAt,
+        updatedAt: "2026-06-23T00:00:01.000Z",
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("scored");
+    expect(result.states[0]?.lifecycle).toBe("resolved");
+    expect(storage.snapshot?.().transcriptSpeakerAnnotations[0]).toMatchObject({
+      transcriptItemId: "rt_voiceprint_methods_client_embed",
+      result: "owner_speaking",
+    });
+    // The server never echoes or stores the client biometric vector back out.
+    expect(JSON.stringify(result)).not.toContain("\"sampleEmbedding\"");
+  });
+
+  test("ignores a client embedding when acceptClientEmbeddings is off (uses the audio/sidecar path)", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-client-embed-off-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    const scriptPath = join(dir, "sidecar.js");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    // Sidecar returns an impostor embedding orthogonal to the owner template,
+    // so if it is used the turn resolves to unknown (NOT owner_speaking). This
+    // proves the client's [1,0] vector was NOT trusted.
+    writeFileSync(scriptPath, `
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      process.stdout.write(JSON.stringify({
+        version: 1,
+        responses: request.requests.map((item) => ({
+          id: item.id,
+          embedding: [0, 1],
+          model: { provider: "custom", modelId: "method-sidecar", version: "1" }
+        }))
+      }));
+    `, "utf8");
+    registerVoiceprintMethods(
+      server as any,
+      storage,
+      undefined,
+      {
+        sidecar: { command: process.execPath, args: [scriptPath], timeoutMs: 5_000 },
+        ownerEmbeddings: [[1, 0]],
+        allowedAudioRoots: [dir],
+        consent: trustedProcessingConsent,
+        expectedModel: sidecarModel,
+        // Opt-in OFF (default).
+      },
+    );
+
+    const result = await server.call(
+      "identity.voiceprint.score_turns",
+      { sessionKey: "live:voiceprint-methods-client-embed-off" },
+      {
+        turns: [
+          {
+            sessionKey: "live:voiceprint-methods-client-embed-off",
+            transcriptItemId: "rt_voiceprint_methods_client_embed_off",
+            role: "user",
+            startMs: 0,
+            endMs: 1500,
+            audioArtifactId: "audio_voiceprint_methods_client_embed_off",
+            audioPath,
+            sampleEmbedding: [1, 0],
+            sampleEmbeddingModel: sidecarModel,
+          },
+        ],
+        consent: {
+          captureAllowed: true,
+          biometricAllowed: true,
+          memoryPromotionAllowed: true,
+        },
+        createdAt,
+        updatedAt: "2026-06-23T00:00:01.000Z",
+      },
+    );
+
+    expect(result.status).toBe("scored");
+    // The sidecar (impostor embedding) decided the result -> the client vector
+    // was ignored; the turn is not resolved as the owner.
+    expect(result.states[0]?.lifecycle).not.toBe("resolved");
+    expect(result.states[0]?.result).not.toBe("owner_speaking");
+  });
+
+  test("enforces the model match from the owner template when expected_model is unconfigured", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-client-embed-notmodel-"));
+    tempDirs.push(dir);
+    const audioPath = join(dir, "owner.wav");
+    writeSineWav(audioPath, 16000, 1800, 0.16);
+    registerVoiceprintMethods(
+      server as any,
+      storage,
+      undefined,
+      {
+        sidecar: {
+          command: process.execPath,
+          args: ["-e", "process.stderr.write('sidecar must not spawn'); process.exit(99)"],
+          timeoutMs: 5_000,
+        },
+        // Owner template carries model = sidecarModel. Crucially, expected_model
+        // is NOT configured here — the model match must still be enforced from
+        // the template model so a mismatched client vector cannot be accepted.
+        ownerTemplateArtifact: makeOwnerTemplateArtifact(),
+        allowedAudioRoots: [dir],
+        consent: trustedProcessingConsent,
+        acceptClientEmbeddings: true,
+      },
+    );
+
+    const result = await server.call(
+      "identity.voiceprint.score_turns",
+      { sessionKey: "live:voiceprint-methods-client-embed-notmodel" },
+      {
+        turns: [
+          {
+            sessionKey: "live:voiceprint-methods-client-embed-notmodel",
+            transcriptItemId: "rt_voiceprint_methods_client_embed_notmodel",
+            role: "user",
+            text: "owner spoke here",
+            startMs: 0,
+            endMs: 1500,
+            audioArtifactId: "audio_voiceprint_methods_client_embed_notmodel",
+            audioPath,
+            route: "iphone_mic",
+            // Vector geometrically aligned with the owner template [1,0], but
+            // tagged with a DIFFERENT model version. Must be rejected, not scored.
+            sampleEmbedding: [1, 0],
+            sampleEmbeddingModel: { ...sidecarModel, version: "2" },
+          },
+        ],
+        consent: {
+          captureAllowed: true,
+          biometricAllowed: true,
+          memoryPromotionAllowed: true,
+        },
+        createdAt,
+        updatedAt: "2026-06-23T00:00:01.000Z",
+      },
+    );
+
+    // The mismatched client vector is rejected (skipped), never resolved as owner.
+    expect(result.states[0]?.lifecycle).not.toBe("resolved");
+    expect(result.states[0]?.result).not.toBe("owner_speaking");
+    expect(result.states[0]?.skipReason).toBe("client_embedding_rejected");
+  });
 });
 
 function makeOwnerTemplateArtifact(

@@ -8,11 +8,17 @@ import {
 import {
   buildVoiceprintTranscriptIdentityStatePatches,
   markVoiceprintTranscriptStateError,
+  markVoiceprintTranscriptStateSkipped,
   type VoiceprintTranscriptIdentityErrorCode,
   type VoiceprintStaleUpdateHandling,
   type VoiceprintTranscriptIdentityState,
   type VoiceprintTranscriptIdentityStatePatch,
 } from "./transcript-state.js";
+import {
+  scoreClientEmbeddingForQueuedTurn,
+  type ClientEmbeddingRejectionReason,
+} from "./live-client-embedding.js";
+import type { LiveVoiceprintScoringJobResult } from "./live-sidecar-jobs.js";
 import {
   buildVoiceprintStorageBundle,
   type VoiceprintStorageBundle,
@@ -32,6 +38,31 @@ export interface LiveVoiceprintPlanItemInput extends LiveVoiceprintQueueInput {
   templateLearningReviewed?: boolean;
   eventId?: string;
   expectedModel?: VoiceprintModelInfo;
+  /**
+   * OPTIONAL client-supplied (on-device) embedding for this turn. When present
+   * AND `acceptClientEmbeddings` is true, the turn is scored DIRECTLY against
+   * the owner template without the sidecar / without any audio slice. See the
+   * trust-boundary note in live-client-embedding.ts. When absent, or when
+   * `acceptClientEmbeddings` is false, the turn keeps using the audio/sidecar
+   * path exactly as before.
+   */
+  sampleEmbedding?: number[];
+  /** Model+version that produced `sampleEmbedding`; must match the owner template. */
+  sampleEmbeddingModel?: VoiceprintModelInfo;
+  /**
+   * Explicit opt-in for scoring this turn from a client-supplied embedding.
+   * Default false: when false a `sampleEmbedding` is IGNORED for direct scoring
+   * (the turn falls back to the audio/sidecar path, or is skipped if it has no
+   * usable audio) — the server never silently trusts a client vector.
+   */
+  acceptClientEmbeddings?: boolean;
+}
+
+export interface LiveVoiceprintClientEmbeddingSkip {
+  sessionKey: string;
+  transcriptItemId: string;
+  reason: ClientEmbeddingRejectionReason;
+  message: string;
 }
 
 export type LiveVoiceprintPlanStatus = "empty" | "queued" | "partial" | "skipped";
@@ -44,6 +75,14 @@ export interface LiveVoiceprintScoringPlan {
   skipped: LiveVoiceprintSkippedQueueTurn[];
   jobContexts: LiveVoiceprintScoringJobContext[];
   states: VoiceprintTranscriptIdentityState[];
+  /**
+   * Turns scored DIRECTLY from a client-supplied embedding (no sidecar). These
+   * results are merged into the sidecar batch results before patch/state
+   * building so they flow through the exact same downstream machinery.
+   */
+  clientScored: LiveVoiceprintScoringJobResult[];
+  /** Turns that carried a client embedding but were rejected (invalid/mismatch). */
+  clientRejected: LiveVoiceprintClientEmbeddingSkip[];
 }
 
 export type LiveVoiceprintScoringPlanRunStatus =
@@ -79,36 +118,89 @@ export function buildLiveVoiceprintScoringPlan(input: {
   const skipped: LiveVoiceprintSkippedQueueTurn[] = [];
   const jobContexts: LiveVoiceprintScoringJobContext[] = [];
   const states: VoiceprintTranscriptIdentityState[] = [];
+  const clientScored: LiveVoiceprintScoringJobResult[] = [];
+  const clientRejected: LiveVoiceprintClientEmbeddingSkip[] = [];
 
   for (const [index, result] of queueResults.entries()) {
     const turn = input.turns[index]!;
-    states.push(result.state);
 
-    if (result.status === "queued") {
-      queued.push(result);
-      jobContexts.push({
-        job: result.job,
-        ownerEmbeddings: turn.ownerEmbeddings,
-        thresholds: turn.thresholds,
-        consent: turn.consent,
-        templateLearningReviewed: turn.templateLearningReviewed,
-        eventId: turn.eventId,
-        createdAt: turn.createdAt,
-        expectedModel: turn.expectedModel,
-      });
-    } else {
+    if (result.status !== "queued") {
+      states.push(result.state);
       skipped.push(result);
+      continue;
     }
+
+    // A turn is only scored from its client embedding when it supplies one AND
+    // the caller has explicitly opted in. Otherwise it takes the audio/sidecar
+    // path exactly as before (opt-in OFF never silently trusts a client vector).
+    if (turn.acceptClientEmbeddings === true && turn.sampleEmbedding !== undefined) {
+      const outcome = scoreClientEmbeddingForQueuedTurn({
+        queued: result,
+        context: {
+          ownerEmbeddings: turn.ownerEmbeddings,
+          sampleEmbedding: turn.sampleEmbedding,
+          sampleEmbeddingModel: turn.sampleEmbeddingModel,
+          expectedModel: turn.expectedModel,
+          thresholds: turn.thresholds,
+          consent: turn.consent,
+          templateLearningReviewed: turn.templateLearningReviewed,
+          eventId: turn.eventId,
+          createdAt: turn.createdAt,
+        },
+      });
+
+      if (outcome.ok) {
+        // Keep the "scoring" state; the merged client result produces the same
+        // resolve/skip patch a sidecar-scored turn would, via the shared
+        // patch/state machinery. No jobContext -> the sidecar is never invoked
+        // for this turn.
+        queued.push(result);
+        states.push(result.state);
+        clientScored.push(outcome.result);
+      } else {
+        // Rejected client embedding: never a spurious accept. Mark the turn
+        // skipped with a clear reason and DO NOT queue it for the sidecar.
+        states.push(
+          markVoiceprintTranscriptStateSkipped({
+            state: result.baseState,
+            reason: "client_embedding_rejected",
+            updatedAt: turn.updatedAt,
+          }),
+        );
+        clientRejected.push({
+          sessionKey: turn.sessionKey,
+          transcriptItemId: turn.transcriptItemId,
+          reason: outcome.reason,
+          message: outcome.message,
+        });
+      }
+      continue;
+    }
+
+    states.push(result.state);
+    queued.push(result);
+    jobContexts.push({
+      job: result.job,
+      ownerEmbeddings: turn.ownerEmbeddings,
+      thresholds: turn.thresholds,
+      consent: turn.consent,
+      templateLearningReviewed: turn.templateLearningReviewed,
+      eventId: turn.eventId,
+      createdAt: turn.createdAt,
+      expectedModel: turn.expectedModel,
+    });
   }
 
   return {
     version: 1,
-    status: planStatus(queued.length, skipped.length),
+    status: planStatus(queued.length, skipped.length + clientRejected.length),
     queueResults,
     queued,
     skipped,
     jobContexts,
     states,
+    clientScored,
+    clientRejected,
   };
 }
 
@@ -122,16 +214,42 @@ export async function runLiveVoiceprintScoringPlan(input: {
 }): Promise<LiveVoiceprintScoringPlanRun> {
   const plan = buildLiveVoiceprintScoringPlan({ turns: input.turns });
   if (plan.jobContexts.length === 0) {
+    // No sidecar jobs. If any turns were scored from a client embedding, still
+    // build their patches (from clientScored) without ever spawning the sidecar.
+    if (plan.clientScored.length === 0) {
+      return {
+        version: 1,
+        status: plan.status === "empty" ? "empty" : "skipped",
+        plan,
+        batch: null,
+        patches: [],
+        states: plan.states,
+        storageBundle: storageBundleForPlanRun({
+          states: plan.states,
+          patches: [],
+          createdAt: input.updatedAt ?? input.createdAt,
+        }),
+      };
+    }
+    const clientBatch = clientOnlyBatchResult(plan);
+    const patches = buildLiveVoiceprintScoringPlanPatches({
+      plan,
+      batch: clientBatch,
+      createdAt: input.createdAt,
+      updatedAt: input.updatedAt,
+      staleUpdateHandling: input.staleUpdateHandling,
+    });
+    const states = applyLiveVoiceprintScoringPlanPatches({ plan, patches });
     return {
       version: 1,
-      status: plan.status === "empty" ? "empty" : "skipped",
+      status: runStatus(plan, clientBatch),
       plan,
-      batch: null,
-      patches: [],
-      states: plan.states,
+      batch: clientBatch,
+      patches,
+      states,
       storageBundle: storageBundleForPlanRun({
-        states: plan.states,
-        patches: [],
+        states,
+        patches,
         createdAt: input.updatedAt ?? input.createdAt,
       }),
     };
@@ -139,31 +257,55 @@ export async function runLiveVoiceprintScoringPlan(input: {
 
   let batch: LiveVoiceprintScoringBatchResult;
   try {
-    batch = await runLiveVoiceprintScoringJobs({
-      sidecar: input.sidecar,
-      jobs: plan.jobContexts,
-    });
+    batch = mergeClientScoredIntoBatch(
+      await runLiveVoiceprintScoringJobs({
+        sidecar: input.sidecar,
+        jobs: plan.jobContexts,
+      }),
+      plan,
+    );
   } catch (error) {
     if (input.sidecarErrorHandling === "throw") {
       throw error;
     }
     const message = errorMessage(error);
-    const states = markLiveVoiceprintScoringPlanErrorStates({
+    // Client-embedding-scored turns do NOT depend on the sidecar, so a sidecar
+    // failure must not error them: apply their patches first, then error only
+    // the remaining (sidecar-bound) scoring states.
+    const clientPatches =
+      plan.clientScored.length > 0
+        ? buildLiveVoiceprintScoringPlanPatches({
+            plan,
+            batch: clientOnlyBatchResult(plan),
+            createdAt: input.createdAt,
+            updatedAt: input.updatedAt,
+            staleUpdateHandling: input.staleUpdateHandling,
+          })
+        : [];
+    const clientResolvedJoins = new Set(
+      clientPatches.map((patch) => transcriptJoinKey(patch.sessionKey, patch.transcriptItemId)),
+    );
+    const erroredStates = markLiveVoiceprintScoringPlanErrorStates({
       plan,
       code: "sidecar_failed",
       message,
       updatedAt: input.updatedAt,
+      skipJoins: clientResolvedJoins,
+    });
+    const states = applyLiveVoiceprintScoringPlanPatches({
+      plan: { ...plan, states: erroredStates },
+      patches: clientPatches,
     });
     return {
       version: 1,
       status: "error",
       plan,
       batch: null,
-      patches: [],
+      patches: clientPatches,
       states,
       storageBundle: storageBundleForPlanRun({
         states,
-        patches: [],
+        patches: clientPatches,
         createdAt: input.updatedAt ?? input.createdAt,
       }),
       error: {
@@ -202,6 +344,8 @@ export function markLiveVoiceprintScoringPlanErrorStates(input: {
   code?: VoiceprintTranscriptIdentityErrorCode;
   message: string;
   updatedAt?: IsoTime;
+  /** Transcript joins to leave untouched (e.g. client-embedding-scored turns). */
+  skipJoins?: ReadonlySet<string>;
 }): VoiceprintTranscriptIdentityState[] {
   if (!input.message.trim()) {
     throw new Error("Live voiceprint scoring plan error requires message.");
@@ -209,6 +353,9 @@ export function markLiveVoiceprintScoringPlanErrorStates(input: {
 
   return input.plan.states.map((state) => {
     if (state.lifecycle !== "scoring") {
+      return state;
+    }
+    if (input.skipJoins?.has(transcriptJoinKey(state.sessionKey, state.transcriptItemId))) {
       return state;
     }
     return markVoiceprintTranscriptStateError({
@@ -301,13 +448,45 @@ function runStatus(
   plan: LiveVoiceprintScoringPlan,
   batch: LiveVoiceprintScoringBatchResult,
 ): LiveVoiceprintScoringPlanRunStatus {
-  if (batch.status === "skipped") {
-    return plan.skipped.length > 0 ? "partial" : "skipped";
+  const skippedCount = plan.skipped.length + plan.clientRejected.length;
+  if (batch.status === "skipped" && plan.clientScored.length === 0) {
+    return skippedCount > 0 ? "partial" : "skipped";
   }
-  if (plan.skipped.length > 0 || batch.skipped.length > 0 || batch.status === "partial") {
+  if (skippedCount > 0 || batch.skipped.length > 0 || batch.status === "partial") {
     return "partial";
   }
   return "scored";
+}
+
+/**
+ * Synthesize a batch result that carries ONLY the client-embedding-scored turns
+ * (no sidecar involved). Its results flow through the same patch/state machinery
+ * as sidecar-scored turns.
+ */
+function clientOnlyBatchResult(
+  plan: LiveVoiceprintScoringPlan,
+): LiveVoiceprintScoringBatchResult {
+  return {
+    status: "scored",
+    request: null,
+    model: plan.clientScored[0]?.response.model,
+    results: [...plan.clientScored],
+    skipped: [],
+  };
+}
+
+/** Merge client-embedding-scored results into a sidecar batch's results. */
+function mergeClientScoredIntoBatch(
+  batch: LiveVoiceprintScoringBatchResult,
+  plan: LiveVoiceprintScoringPlan,
+): LiveVoiceprintScoringBatchResult {
+  if (plan.clientScored.length === 0) {
+    return batch;
+  }
+  return {
+    ...batch,
+    results: [...batch.results, ...plan.clientScored],
+  };
 }
 
 function rejectDuplicatePlanTurns(turns: readonly LiveVoiceprintPlanItemInput[]): void {
