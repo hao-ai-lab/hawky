@@ -29,6 +29,7 @@ import { registerMemoryMethods } from "./gateway/memory-methods.js";
 import {
   registerVoiceprintMethods,
   resolveVoiceprintLiveScoringConfigFromConfig,
+  resolveVoiceprintMemoryBridgeConfigFromConfig,
 } from "./gateway/voiceprint-methods.js";
 import { resolveVoiceprintLifecycleFromConfig } from "./gateway/voiceprint-lifecycle.js";
 import { MemoryScheduler } from "./memory/scheduler.js";
@@ -1060,6 +1061,7 @@ async function main() {
         undefined,
         undefined,
         resolveVoiceprintLifecycleFromConfig(gwConfig),
+        resolveVoiceprintMemoryBridgeConfigFromConfig(gwConfig),
       );
 
       // Memory feature (#653): consolidate daily → global every 6h, but only if

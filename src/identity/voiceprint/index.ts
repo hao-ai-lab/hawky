@@ -4,6 +4,7 @@ export * from "./consent-ledger.js";
 export * from "./contracts.js";
 export * from "./evidence.js";
 export * from "./manifest.js";
+export * from "./memory-bridge.js";
 export * from "./live-adapter.js";
 export * from "./live-client-embedding.js";
 export * from "./live-plan.js";
