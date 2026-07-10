@@ -71,6 +71,13 @@ import {
   voiceprintTemplateFileRefFromSource,
   voiceprintConsentAllowsProcessing,
   writeEncryptedVoiceprintTemplateArtifact,
+  assertVoiceprintModelIntegrity,
+  classifyVoiceprintModelMismatch,
+  isReferenceVoiceprintModel,
+  sidecarEnvSelectsReferenceBackend,
+  REFERENCE_VOICEPRINT_PROVIDER,
+  REFERENCE_VOICEPRINT_MODEL_ID,
+  type VoiceprintModelIntegrityPin,
   markVoiceprintTranscriptStateError,
   type VoiceprintAudioQualityStatus,
   type VoiceprintEnrollmentAssessment,
@@ -200,6 +207,19 @@ export interface VoiceprintLiveScoringConfig {
   targetSampleRate?: number;
   timeoutMs?: number;
   /**
+   * A5 PRODUCTION GUARD (default false). When true, the reference (non-discriminative)
+   * backend can NEVER score real turns: a reference-tagged config is rejected at
+   * config-resolve time and any reference-tagged owner template / per-turn embedding
+   * is refused at scoring time. See `require_discriminative_model` in config.
+   */
+  requireDiscriminativeModel?: boolean;
+  /**
+   * A5 MODEL INTEGRITY PIN. When set, the pinned model file's SHA-256 is verified
+   * (once) before the first score, and scoring is REFUSED on mismatch. See
+   * `model_sha256` / `model_path` in config.
+   */
+  modelIntegrityPin?: VoiceprintModelIntegrityPin;
+  /**
    * TRUST BOUNDARY opt-in (default false). When true, a per-turn client-computed
    * embedding is scored DIRECTLY against the owner template, skipping the sidecar
    * and the biometric audio entirely. See `accept_client_embeddings` in config
@@ -251,17 +271,42 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     return undefined;
   }
 
+  const requireDiscriminativeModel = optionalBoolean(raw.require_discriminative_model) ?? false;
   const sidecar = resolveConfiguredVoiceprintSidecar(raw.sidecar, raw.dev_reference_backend === true);
   const ownerTemplate = resolveConfiguredOwnerTemplateSource(raw.owner_template);
   const allowedAudioRoots = resolveConfiguredAudioRoots(raw.allowed_audio_roots);
   const consent = resolveConfiguredVoiceprintConsent(raw.consent);
+  const expectedModel = resolveConfiguredVoiceprintModel(raw.expected_model);
+
+  // A5 PRODUCTION GUARD: with `require_discriminative_model`, a config that would
+  // score real turns with the NON-DISCRIMINATIVE reference backend is rejected at
+  // resolve/registration time. This is fail-fast: dev_reference_backend, a sidecar
+  // env selecting VOICEPRINT_BACKEND=reference, or a reference-tagged expected_model
+  // all mean the reference model could reach real users, which the guard forbids.
+  if (requireDiscriminativeModel) {
+    assertDiscriminativeVoiceprintConfig({
+      devReferenceBackend: raw.dev_reference_backend === true,
+      sidecar,
+      expectedModel,
+    });
+  }
+
+  // A5 MODEL INTEGRITY PIN: resolve (and eagerly verify) the pinned model hash so a
+  // swapped/corrupt model fails at startup rather than silently scoring later.
+  const modelIntegrityPin = resolveConfiguredModelIntegrityPin(
+    raw.model_sha256,
+    raw.model_path,
+    sidecar,
+  );
 
   return {
     sidecar,
     ownerTemplateFileSource: ownerTemplate,
     allowedAudioRoots,
     consent,
-    expectedModel: resolveConfiguredVoiceprintModel(raw.expected_model),
+    requireDiscriminativeModel,
+    ...(modelIntegrityPin ? { modelIntegrityPin } : {}),
+    expectedModel,
     thresholds: resolveConfiguredVoiceprintThresholds(raw.thresholds),
     qualityThresholds: resolveConfiguredVoiceprintQualityThresholds(raw.quality_thresholds),
     targetSampleRate: optionalPositiveNumber(raw.target_sample_rate, "voiceprint.live_scoring.target_sample_rate"),
@@ -281,9 +326,97 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     // it at config load (see resolveConfiguredVoiceprintAsNorm).
     asNorm: resolveConfiguredVoiceprintAsNorm(
       raw.as_norm,
-      resolveConfiguredVoiceprintModel(raw.expected_model),
+      expectedModel,
     ),
   };
+}
+
+/**
+ * A5 PRODUCTION GUARD assertion. Fail fast (at config-resolve/registration time)
+ * when `require_discriminative_model` is on but the resolved config would let the
+ * NON-DISCRIMINATIVE reference backend score real turns. Three distinct footguns
+ * are closed here:
+ *   - dev_reference_backend: true          (points the sidecar at the reference backend)
+ *   - sidecar env VOICEPRINT_BACKEND=reference (or unset -> reference default)
+ *   - expected_model tagged reference/reference-fbank-v0
+ */
+export function assertDiscriminativeVoiceprintConfig(input: {
+  devReferenceBackend: boolean;
+  sidecar: EmbeddingSidecarCommand;
+  expectedModel: VoiceprintModelInfo | undefined;
+}): void {
+  if (input.devReferenceBackend) {
+    throw new Error(
+      "voiceprint.live_scoring.require_discriminative_model is true but dev_reference_backend is also true: the non-discriminative reference backend must never score real users in production.",
+    );
+  }
+  if (sidecarEnvSelectsReferenceBackend(input.sidecar.env)) {
+    throw new Error(
+      "voiceprint.live_scoring.require_discriminative_model is true but the sidecar env selects VOICEPRINT_BACKEND=reference (or leaves it unset, which defaults to the reference backend): configure the onnx backend with a real model.",
+    );
+  }
+  if (isReferenceVoiceprintModel(input.expectedModel)) {
+    throw new Error(
+      `voiceprint.live_scoring.require_discriminative_model is true but expected_model is the reference tag (${REFERENCE_VOICEPRINT_PROVIDER}/${REFERENCE_VOICEPRINT_MODEL_ID}): the reference backend is non-discriminative and must not score real users.`,
+    );
+  }
+}
+
+/**
+ * A5 PRODUCTION GUARD assertion at the SCORING boundary (per-RPC, per-turn). The
+ * config-time {@link assertDiscriminativeVoiceprintConfig} closes the resolved-config
+ * footguns; this closes the runtime ones — a stored owner template, a re-embed result,
+ * or a client-supplied vector that is nonetheless tagged with the non-discriminative
+ * reference model. When the guard is on and `model` is reference-tagged, refuse with a
+ * clear `FAILED_PRECONDITION` (never a meaningless "score"). `action` names what is being
+ * refused ("score it" / "store it") so the message stays specific to the call site.
+ */
+function assertDiscriminativeVoiceprintModel(
+  requireDiscriminativeModel: boolean | undefined,
+  model: VoiceprintModelInfo | undefined,
+  subject: string,
+  action: string,
+): void {
+  if (requireDiscriminativeModel && isReferenceVoiceprintModel(model)) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      `${subject} is tagged with the non-discriminative reference model ${formatVoiceprintModel(model!)}; require_discriminative_model refuses to ${action}.`,
+    );
+  }
+}
+
+/**
+ * Resolve (and eagerly verify) the A5 model integrity pin. The model file path
+ * comes from config `model_path`, falling back to the sidecar env `VOICEPRINT_MODEL`.
+ * When `model_sha256` is set, the file is hashed here so a swapped/corrupt model
+ * fails at config load. Returns undefined when no pin is configured.
+ */
+function resolveConfiguredModelIntegrityPin(
+  modelSha256: unknown,
+  modelPath: unknown,
+  sidecar: EmbeddingSidecarCommand,
+): VoiceprintModelIntegrityPin | undefined {
+  const sha256 = optionalConfigString(modelSha256);
+  if (!sha256) {
+    if (optionalConfigString(modelPath)) {
+      throw new Error(
+        "voiceprint.live_scoring.model_path is set but model_sha256 is not; pin the model hash to enable integrity verification.",
+      );
+    }
+    return undefined;
+  }
+  const resolvedPath =
+    optionalConfigPath(modelPath) ?? optionalConfigString(sidecar.env?.VOICEPRINT_MODEL);
+  if (!resolvedPath) {
+    throw new Error(
+      "voiceprint.live_scoring.model_sha256 is set but no model file is resolvable (set model_path or the sidecar env VOICEPRINT_MODEL).",
+    );
+  }
+  const pin: VoiceprintModelIntegrityPin = { modelPath: resolvedPath, sha256 };
+  // Fail fast at config load so an operator provisions a known-good model before
+  // the gateway accepts scoring traffic.
+  assertVoiceprintModelIntegrity(pin);
+  return pin;
 }
 
 type ConfiguredVoiceprintAsNorm = VoiceprintLiveScoringConfigSection["as_norm"];
@@ -964,6 +1097,129 @@ export function registerVoiceprintMethods(
     }
   });
 
+  // ── A5 model-version-mismatch backfill: re-embed the owner template ──────
+  //
+  // When the live scoring model was upgraded (new provider/modelId/version), the
+  // STORED owner template — enrolled with the OLD model — is incomparable to new
+  // turns (cosine across models is meaningless), so score_turns fails with
+  // needs_reenrollment. This RPC RE-EMBEDS the owner template with the CURRENT
+  // model FROM RETAINED ENROLLMENT SOURCE AUDIO (supplied per the retention
+  // policy) and re-stores it (encrypted) with the updated model tag, resolving the
+  // mismatch WITHOUT the owner re-doing the 30s enrollment. If no source audio is
+  // available, the caller omits `sources`: the template is then marked STALE and a
+  // clear needs_reenrollment rejection is returned (never a silent bad score). Both
+  // outcomes emit a `reembed` audit entry.
+  server.registerMethod("identity.voiceprint.reembed_owner_template", async (conn, params) => {
+    const input = parseReembedOwnerTemplateParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const config = requireEnrollmentScoringConfig(scoring);
+
+    try {
+      const existing = readOwnerTemplateArtifactForEnrollment(config);
+      const templateModel = existing.artifact.template.model;
+
+      // No retained source audio: mark the template STALE and refuse (needs_reenroll).
+      if (input.sources.length === 0) {
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey: sessionKey,
+          op: "reembed",
+          outcome: "rejected",
+          reason: "needs_reenrollment_no_retained_source",
+          templateRef: existing.artifact.template.id,
+        });
+        log.info("identity.voiceprint.reembed_owner_template", {
+          session_key: sessionKey,
+          status: "needs_reenrollment",
+          template_ref: existing.artifact.template.id,
+        });
+        return {
+          ok: false as const,
+          sessionKey,
+          status: "needs_reenrollment" as const,
+          reason: "no_retained_source_audio",
+          templateRef: existing.artifact.template.id,
+        };
+      }
+
+      // Re-embed the retained source audio with the CURRENT sidecar model.
+      const embedded = await embedEnrollmentSources({
+        sessionKey,
+        sources: input.sources,
+        scoring: config,
+        audioArtifacts,
+      });
+
+      // A5 GUARD: the re-embed must land on a discriminative model when the guard is
+      // on; a reference re-embed would re-tag the template test-only.
+      assertDiscriminativeVoiceprintModel(
+        config.requireDiscriminativeModel,
+        embedded.model,
+        "Voiceprint re-embed result",
+        "store it",
+      );
+      // The whole point is to move to a DIFFERENT model; if the re-embed produced the
+      // SAME model as the stored template, there was no mismatch to resolve.
+      if (sameVoiceprintModel(embedded.model, templateModel)) {
+        throw new MethodError(
+          "FAILED_PRECONDITION",
+          `Voiceprint re-embed produced the same model ${formatVoiceprintModel(embedded.model)} as the stored template; no version mismatch to resolve.`,
+        );
+      }
+
+      const assessment = assessVoiceprintEnrollment({
+        sources: embedded.sources,
+        minSpeechMs: input.minSpeechMs,
+      });
+      if (assessment.status !== "accepted") {
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey: sessionKey,
+          op: "reembed",
+          outcome: "rejected",
+          reason: "quality_rejected",
+          templateRef: existing.artifact.template.id,
+        });
+        return serializeEnrollmentRejection(sessionKey, assessment);
+      }
+
+      const stored = writeOwnerTemplateFromSources({
+        scoring: config,
+        model: embedded.model,
+        sources: embedded.sources,
+        minSpeechMs: input.minSpeechMs,
+        createdAt: existing.artifact.template.enrollment.createdAt,
+      });
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "reembed",
+        outcome: "ok",
+        templateRef: stored.templateRef,
+        counts: { sourceCount: assessment.sourceCount },
+      });
+      log.info("identity.voiceprint.reembed_owner_template", {
+        session_key: sessionKey,
+        status: "reembedded",
+        template_ref: stored.templateRef,
+        source_count: assessment.sourceCount,
+      });
+      return {
+        ok: true as const,
+        sessionKey,
+        status: "reembedded" as const,
+        templateRef: stored.templateRef,
+        model: embedded.model,
+        sourceCount: assessment.sourceCount,
+        ownerEmbeddingCount: stored.ownerEmbeddingCount,
+      };
+    } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "reembed",
+        outcome: "error",
+      });
+      throw voiceprintMethodError(error);
+    }
+  });
+
   // ── A4 biometric consent + retention + audit lifecycle ───────────────────
   registerVoiceprintLifecycleMethods(server, {
     scoring,
@@ -1205,6 +1461,13 @@ interface DeleteOwnerTemplateParams {
   deletedAt?: string;
 }
 
+interface ReembedOwnerTemplateParams {
+  sessionKey?: string;
+  /** Retained enrollment source audio; empty => no retained source (stale path). */
+  sources: EnrollmentAudioSourceInput[];
+  minSpeechMs?: number;
+}
+
 interface EmbeddedEnrollmentSources {
   sources: VoiceprintEnrollmentSource[];
   model: VoiceprintModelInfo;
@@ -1436,6 +1699,28 @@ function parseEnrollOwnerParams(params: unknown): EnrollOwnerParams {
   };
 }
 
+function parseReembedOwnerTemplateParams(params: unknown): ReembedOwnerTemplateParams {
+  const p = objectOrUndefined(params);
+  // `sources` is OPTIONAL: omitting it (or passing an empty array) means no retained
+  // enrollment source audio is available, which drives the stale/needs_reenrollment
+  // path. When present it must be a non-empty array of enrollment audio sources.
+  const rawSources = p?.sources;
+  let sources: EnrollmentAudioSourceInput[] = [];
+  if (rawSources !== undefined && rawSources !== null) {
+    if (!Array.isArray(rawSources)) {
+      throw new MethodError("INVALID_REQUEST", "sources must be an array.");
+    }
+    sources = rawSources.map(parseEnrollmentAudioSourceInput);
+  }
+  return {
+    sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
+    sources,
+    minSpeechMs: clampEnrollmentMinSpeechMs(
+      optionalNonNegativeFiniteNumber(p?.minSpeechMs ?? p?.min_speech_ms, "minSpeechMs"),
+    ),
+  };
+}
+
 function parseAddEnrollmentClipParams(params: unknown): AddEnrollmentClipParams {
   const p = objectOrUndefined(params);
   if (!p) {
@@ -1561,6 +1846,16 @@ async function buildScorePlanTurns(input: {
     // consent denied) does NOT burn a fresh nonce it can never spend. This is
     // ONLY replay resistance, not capture-binding (see liveness-nonce.ts HONESTY).
     if (scoresClientEmbedding) {
+      // A5 PRODUCTION GUARD: a client-supplied embedding tagged with the
+      // non-discriminative reference model must never score a real user under the
+      // guard. Reject before the nonce is consumed so an ineligible submission does
+      // not burn a fresh nonce.
+      assertDiscriminativeVoiceprintModel(
+        input.scoring.requireDiscriminativeModel,
+        turn.sampleEmbeddingModel,
+        "Voiceprint client embedding",
+        "score it",
+      );
       assertClientEmbeddingLivenessNonce({
         sessionKey: input.sessionKey,
         nonce: turn.nonce,
@@ -1638,15 +1933,25 @@ async function buildScorePlanTurns(input: {
     for (const turn of turns) {
       turn.ownerTemplateRef = ownerTemplate.ownerTemplateRef;
       turn.ownerEmbeddings = ownerTemplate.ownerEmbeddings;
-      // Model-match (requirement 3) MUST be enforced for the client-embedding
-      // path even when config `expected_model` is unset. The owner template
-      // itself carries the model that produced its vectors, so derive the
-      // expected model from it and require the client vector to match. Config
-      // `expected_model`, when present, takes precedence (and is already
-      // cross-checked against the template model in resolveOwnerVoiceprintTemplate).
-      if (turn.acceptClientEmbeddings === true && turn.sampleEmbedding !== undefined) {
-        turn.expectedModel = input.scoring.expectedModel ?? ownerTemplate.ownerTemplateModel;
-      }
+      // Model-match (requirement 3) MUST be enforced even when config
+      // `expected_model` is unset — for BOTH the client-embedding path AND the
+      // ordinary audio-sidecar path. Cosine is only meaningful when the sample
+      // and the owner template came from the same model+version, so the
+      // sidecar's ACTUAL returned model (checked in
+      // scoreLiveVoiceprintScoringJobResponse) must equal the model the owner
+      // template was enrolled with. The owner template itself carries that
+      // model, so derive the expected model from it. Config `expected_model`,
+      // when present, takes precedence (and is already cross-checked against the
+      // template model in resolveOwnerVoiceprintTemplate). When the owner
+      // template has no model tag (inline ownerEmbeddings source), this stays
+      // whatever `expected_model` resolved to.
+      turn.expectedModel =
+        input.scoring.expectedModel ?? ownerTemplate.ownerTemplateModel ?? turn.expectedModel;
+      // A5 PRODUCTION GUARD: propagate the discriminative-model requirement onto
+      // the turn so the sidecar's returned per-turn model is re-validated at
+      // score time (the config env is only the DECLARED backend, not proof of
+      // the model the sidecar actually emitted).
+      turn.requireDiscriminativeModel = input.scoring.requireDiscriminativeModel;
     }
   }
 
@@ -2035,10 +2340,26 @@ function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
     }
 
     const templateModel = artifact.template.model;
-    if (scoring.expectedModel && !sameVoiceprintModel(templateModel, scoring.expectedModel)) {
+    // A5 PRODUCTION GUARD: refuse to score against a reference-tagged owner template
+    // when the guard is on — the reference backend is non-discriminative, so any
+    // "score" it produces is meaningless for a real user.
+    assertDiscriminativeVoiceprintModel(
+      scoring.requireDiscriminativeModel,
+      templateModel,
+      "Voiceprint owner template",
+      "score it (re-enroll with a real discriminative model)",
+    );
+    // A5 MODEL-VERSION MISMATCH: cosine between the owner template and a turn is only
+    // meaningful when both were produced by the same model+version. When the scoring
+    // model (config expected_model) differs from the STORED template model, the
+    // template is incomparable: fail with a clear needs_reenrollment instead of a
+    // silent mismatched score. (A backfill re-embed is available separately via
+    // identity.voiceprint.reembed_owner_template.)
+    const mismatch = classifyVoiceprintModelMismatch(scoring.expectedModel, templateModel);
+    if (mismatch.kind === "mismatch") {
       throw new MethodError(
         "FAILED_PRECONDITION",
-        `Voiceprint owner template model ${formatVoiceprintModel(templateModel)} does not match expected scorer model ${formatVoiceprintModel(scoring.expectedModel)}.`,
+        `needs_reenrollment: voiceprint owner template model ${formatVoiceprintModel(mismatch.templateModel)} does not match the current scorer model ${formatVoiceprintModel(mismatch.scoringModel)}; the template is incomparable. Re-embed the owner template with the current model or re-enroll.`,
       );
     }
 
@@ -2058,6 +2379,13 @@ function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
   }
 
   if (scoring.ownerEmbeddings?.length) {
+    // NOTE (A5): this inline ownerEmbeddings source carries NO model tag, so it is
+    // exempt from the reference/model-mismatch guards above by design. It is NOT
+    // reachable from operator config (resolveVoiceprintLiveScoringConfigFromConfig
+    // only ever populates ownerTemplateFileSource, never ownerEmbeddings) — it
+    // exists solely for programmatic registerVoiceprintMethods wiring in
+    // tests/embedders. If a future config path ever populates ownerEmbeddings,
+    // route it through a model-tagged template so the guard applies.
     return {
       ownerEmbeddings: scoring.ownerEmbeddings,
       ownerTemplateRef: scoring.ownerTemplateRef,
@@ -2251,6 +2579,18 @@ async function embedEnrollmentSources(input: {
   if (!model) {
     throw new MethodError("FAILED_PRECONDITION", "Voiceprint enrollment produced no embedding model.");
   }
+  // A5 GUARD: refuse up front if the sidecar actually EMITTED a reference model
+  // while require_discriminative_model is on (e.g. a wrapper/misconfigured sidecar
+  // whose declared env is non-reference). Without this, enrollment would report
+  // success and persist a reference-tagged template that resolveOwnerVoiceprintTemplate
+  // always rejects at score time, leaving the owner stored-but-unresolvable. This
+  // mirrors the re-embed guard so every enrollment path fails fast at capture.
+  assertDiscriminativeVoiceprintModel(
+    input.scoring.requireDiscriminativeModel,
+    model,
+    "Voiceprint enrollment result",
+    "store it",
+  );
   // Reject up front if the sidecar's model does not match the scorer's expected
   // model. Otherwise enrollment would report success while storing a template
   // that resolveOwnerVoiceprintTemplate always rejects at score time (its guard

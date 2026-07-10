@@ -1040,6 +1040,34 @@ off by default. Implementation:
 `src/identity/voiceprint/live-client-embedding.ts`, `.../live-plan.ts`,
 `src/gateway/voiceprint-methods.ts`.
 
+**A5 — production model-safety guards (reference guard, integrity pin,
+version-mismatch flow; server-side shipped).** Three server-side guards keep a
+non-real or mismatched model from ever producing a "score" for a real user, all
+gated behind `config.voiceprint.live_scoring.require_discriminative_model`
+(default off, so nothing changes until an operator opts in). (1) **Reference
+guard.** The bundled `services/voiceprint` reference backend
+(`VOICEPRINT_BACKEND=reference`, tagged `reference/reference-fbank-v0`) is
+deterministic but **non-discriminative** — it does not tell speakers apart, so a
+"score" from it is meaningless. `assertDiscriminativeVoiceprintConfig` fails fast
+at config-resolve time on the three footguns (`dev_reference_backend`, a sidecar
+env that selects/defaults to the reference backend, an `expected_model` tagged
+reference), and a matching per-RPC assertion refuses a stored template, re-embed
+result, or client vector that is nonetheless reference-tagged. (2) **Model
+integrity pin.** When `model_sha256` (+ `model_path`, or the sidecar env
+`VOICEPRINT_MODEL`) is set, the model file is hashed at config load and REFUSED on
+mismatch, so a swapped/corrupt model cannot silently score. (3)
+**Version-mismatch flow.** Cosine is only meaningful when both embeddings come
+from the same `provider/modelId/version`; when the scorer model differs from the
+STORED owner-template model, `classifyVoiceprintModelMismatch` names the mismatch
+and `score_turns` fails with a clear `needs_reenrollment` instead of a silent bad
+score. The `identity.voiceprint.reembed_owner_template` RPC resolves it without a
+30s re-enroll by re-embedding RETAINED enrollment audio with the current model
+(and, absent retained source, marks the template stale + returns
+`needs_reenrollment`). Implementation:
+`src/identity/voiceprint/model-lifecycle.ts` (pure predicates) +
+`src/gateway/voiceprint-methods.ts` (wiring). These are prerequisites for, not a
+substitute for, the A8/attestation work below.
+
 **A8 — liveness nonce (replay resistance for client embeddings; server half
 shipped).** A leaked/captured owner vector could otherwise be **replayed** and
 accepted as the owner every time, because nothing in the protocol above ties a

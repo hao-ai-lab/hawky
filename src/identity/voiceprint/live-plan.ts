@@ -40,6 +40,14 @@ export interface LiveVoiceprintPlanItemInput extends LiveVoiceprintQueueInput {
   eventId?: string;
   expectedModel?: VoiceprintModelInfo;
   /**
+   * A5 PRODUCTION GUARD: when true, refuse to score any sidecar/client embedding
+   * whose returned model tag is the non-discriminative reference backend. This is
+   * a runtime check against the model the sidecar ACTUALLY emitted (the declared
+   * sidecar env is only the requested backend, not proof of what ran). Default
+   * false: off preserves the existing reference-backend dev/test behavior.
+   */
+  requireDiscriminativeModel?: boolean;
+  /**
    * OPTIONAL client-supplied (on-device) embedding for this turn. When present
    * AND `acceptClientEmbeddings` is true, the turn is scored DIRECTLY against
    * the owner template without the sidecar / without any audio slice. See the
@@ -149,6 +157,7 @@ export function buildLiveVoiceprintScoringPlan(input: {
           sampleEmbedding: turn.sampleEmbedding,
           sampleEmbeddingModel: turn.sampleEmbeddingModel,
           expectedModel: turn.expectedModel,
+          requireDiscriminativeModel: turn.requireDiscriminativeModel,
           thresholds: turn.thresholds,
           consent: turn.consent,
           templateLearningReviewed: turn.templateLearningReviewed,
@@ -197,6 +206,7 @@ export function buildLiveVoiceprintScoringPlan(input: {
       eventId: turn.eventId,
       createdAt: turn.createdAt,
       expectedModel: turn.expectedModel,
+      requireDiscriminativeModel: turn.requireDiscriminativeModel,
       asNorm: turn.asNorm,
     });
   }

@@ -43,6 +43,12 @@ export interface LiveVoiceprintScoringJobContext {
   eventId?: string;
   createdAt?: IsoTime;
   expectedModel?: VoiceprintModelInfo;
+  /**
+   * A5 production guard: when true, refuse to score any sidecar response whose
+   * returned model tag is the non-discriminative reference backend. This is a
+   * runtime check against the model the sidecar ACTUALLY emitted. Default off.
+   */
+  requireDiscriminativeModel?: boolean;
   /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
   asNorm?: VoiceprintTurnAsNormOptions;
 }

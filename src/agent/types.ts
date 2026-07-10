@@ -792,6 +792,33 @@ export interface HawkyConfig {
        * the onnx backend with a real CAM++ model (see services/voiceprint/README.md).
        */
       dev_reference_backend?: boolean;
+      /**
+       * A5 PRODUCTION GUARD. When true, the gateway HARD-REJECTS any configuration
+       * that would score real turns with the NON-DISCRIMINATIVE reference backend
+       * (`dev_reference_backend: true`, a sidecar env selecting
+       * `VOICEPRINT_BACKEND=reference`, or an `expected_model` tagged with the
+       * reference provider/modelId `reference-fbank-v0`) at config-resolve /
+       * registration time, AND refuses to score any turn whose owner template or
+       * per-turn embedding carries the reference model tag. Default false keeps the
+       * current dev/test behavior; PRODUCTION MUST set this to true.
+       */
+      require_discriminative_model?: boolean;
+      /**
+       * A5 MODEL INTEGRITY PIN. When set, the gateway verifies the production model
+       * file's SHA-256 (lowercase hex) on first use and REFUSES with a clear error
+       * on mismatch, so an operator must provision a known-good model. Pair with
+       * `model_path` (the resolved model file). The model file lives OUTSIDE git and
+       * is never downloaded automatically; production must provision the known-good
+       * `.onnx` model out-of-band (see services/voiceprint/README.md, "Getting a real
+       * CAM++ model") and pin its hash here.
+       */
+      model_sha256?: string;
+      /**
+       * A5 MODEL INTEGRITY PIN — the model file to hash. When omitted, the gateway
+       * uses the sidecar env's `VOICEPRINT_MODEL` path. Required (here or via that
+       * env) whenever `model_sha256` is set.
+       */
+      model_path?: string;
       sidecar?: {
         command?: string;
         args?: string[];

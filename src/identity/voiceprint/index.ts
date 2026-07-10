@@ -14,6 +14,7 @@ export * from "./live-sidecar-runner.js";
 export * from "./live-turn-tracker.js";
 export * from "./liveness-nonce.js";
 export * from "./model.js";
+export * from "./model-lifecycle.js";
 export * from "./persistence.js";
 export * from "./policy.js";
 export * from "./quality.js";

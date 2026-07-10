@@ -155,6 +155,62 @@ describe("live voiceprint sidecar jobs", () => {
       }),
     ).toThrow(/finite startMs and endMs/);
   });
+
+  test("A5 guard: refuses a reference-tagged returned model even when expectedModel is unset", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // The sidecar RETURNED a reference-backend model tag (e.g. a misconfigured or
+    // wrapper process) while expected_model is unset. With the guard on this MUST
+    // refuse at score time — the reference backend is non-discriminative.
+    expect(() =>
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "reference", modelId: "reference-fbank-v0", version: "0" },
+        },
+        requireDiscriminativeModel: true,
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      }),
+    ).toThrow(/non-discriminative reference model/);
+
+    // A mislabeled tag (reference modelId under a "custom" provider) is caught too.
+    expect(() =>
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "reference-fbank-v0", version: "0" },
+        },
+        requireDiscriminativeModel: true,
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      }),
+    ).toThrow(/non-discriminative reference model/);
+  });
+
+  test("A5 guard OFF (default): reference-tagged responses still score for dev/test", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // Default posture (requireDiscriminativeModel omitted) preserves the existing
+    // behavior: the reference backend remains fully usable in dev/test.
+    const result = scoreLiveVoiceprintScoringJobResponse({
+      job,
+      response: {
+        id: job.embeddingRequest.id,
+        embedding: [1, 0],
+        model: { provider: "reference", modelId: "reference-fbank-v0", version: "0" },
+      },
+      ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+      consent: { ...processingConsent, memoryPromotionAllowed: true },
+    });
+    expect(result.status).toBe("scored");
+  });
 });
 
 function readyTurn(route: "iphone_mic" | "speaker" = "iphone_mic"): LiveVoiceprintReadyTurn {

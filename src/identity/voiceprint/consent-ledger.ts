@@ -95,7 +95,10 @@ export type VoiceprintAuditOp =
   | "score"
   | "delete"
   | "withdraw"
-  | "purge";
+  | "purge"
+  // A5 model-version-mismatch backfill: re-embed the owner template with the
+  // current model, or (no retained source) mark it stale -> needs_reenrollment.
+  | "reembed";
 
 /**
  * One append-only audit entry. METADATA ONLY: no embeddings, no audio, no keys.
