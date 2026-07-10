@@ -24,11 +24,15 @@ import { dirname, join } from "node:path";
 import { getConfigDir } from "../storage/config.js";
 import {
   assertVoiceprintAuditRecordHasNoSecrets,
+  assertVoiceprintScoreTelemetryHasNoSecrets,
+  aggregateVoiceprintScoreTelemetry,
   DEFAULT_VOICEPRINT_RETENTION_MS,
   foldVoiceprintConsentHistory,
   type VoiceprintAuditRecord,
   type VoiceprintConsentRecord,
   type VoiceprintEffectiveConsent,
+  type VoiceprintScoreTelemetryAggregate,
+  type VoiceprintScoreTelemetryRecord,
 } from "../identity/voiceprint/index.js";
 
 const LIFECYCLE_FILE_MODE = 0o600;
@@ -57,6 +61,26 @@ export interface VoiceprintAuditLogStore {
 }
 
 /**
+ * A7 privacy-safe scoring-DECISION telemetry sink. Distinct from the A4 audit log:
+ * it records the scalar SCORE + decision + threshold + model per scoring decision so
+ * operators can watch decision drift and build a score DISTRIBUTION (the raw material
+ * for A10 threshold calibration). Every record is guarded by
+ * `assertVoiceprintScoreTelemetryHasNoSecrets` (no vectors/audio/keys) on write AND
+ * read. The DEFAULT sink is a NO-OP/in-memory-non-persisting sink so wiring it changes
+ * nothing for existing call sites (telemetry OFF by default).
+ */
+export interface VoiceprintScoreTelemetrySink {
+  /** True when this sink actually records (the default no-op sink is false). */
+  readonly enabled: boolean;
+  /** Record one scoring-decision telemetry record. Rejects records carrying secrets. */
+  record(record: VoiceprintScoreTelemetryRecord): void;
+  /** Read recorded telemetry (optionally filtered to one opaque sessionRef). */
+  read(sessionRef?: string): VoiceprintScoreTelemetryRecord[];
+  /** Per-decision-class histograms + counts for the session (or all). */
+  aggregate(sessionRef?: string): VoiceprintScoreTelemetryAggregate;
+}
+
+/**
  * The lifecycle bundle wired into the gateway. `enforceConsentLedger` controls
  * whether enroll/score consult the PERSISTED ledger (restrict-only). It defaults
  * to false so existing behavior is unchanged unless a caller opts in.
@@ -64,6 +88,8 @@ export interface VoiceprintAuditLogStore {
 export interface VoiceprintLifecycle {
   consentLedger: VoiceprintConsentLedgerStore;
   auditLog: VoiceprintAuditLogStore;
+  /** A7 scoring-decision telemetry sink. Defaults to a no-op (OFF) sink. */
+  scoreTelemetry: VoiceprintScoreTelemetrySink;
   retentionMs: number;
   /**
    * When true, enroll_owner/score_turns require the subject's PERSISTED effective
@@ -119,6 +145,116 @@ export function createInMemoryVoiceprintAuditLog(
         : all.filter((record) => record.subjectKey === subjectKey);
     },
   };
+}
+
+// ── A7 score-telemetry sinks ─────────────────────────────────────────────────
+
+/**
+ * DEFAULT sink: a NO-OP. `enabled` is false, `record` drops the record on the
+ * floor, and reads return empty. This makes telemetry OFF by default: wiring the
+ * lifecycle in changes nothing and records NOTHING until an operator opts in. It
+ * STILL runs the no-secrets guard on `record` so a mis-shaped record is rejected
+ * loudly even when nothing is persisted (a leak must never be silently swallowed).
+ */
+export function createNoopVoiceprintScoreTelemetrySink(): VoiceprintScoreTelemetrySink {
+  return {
+    enabled: false,
+    record(record) {
+      assertVoiceprintScoreTelemetryHasNoSecrets(record);
+    },
+    read() {
+      return [];
+    },
+    aggregate() {
+      return aggregateVoiceprintScoreTelemetry([]);
+    },
+  };
+}
+
+/**
+ * In-memory RECORDING sink (opt-in). Retains raw records (which carry no vector)
+ * and can aggregate them into per-decision-class histograms. Non-persisting.
+ */
+export function createInMemoryVoiceprintScoreTelemetrySink(
+  initial: readonly VoiceprintScoreTelemetryRecord[] = [],
+): VoiceprintScoreTelemetrySink {
+  const records: VoiceprintScoreTelemetryRecord[] = [];
+  for (const record of initial) {
+    records.push(assertVoiceprintScoreTelemetryHasNoSecrets(record));
+  }
+  const filtered = (sessionRef?: string) =>
+    sessionRef === undefined
+      ? records.map((record) => ({ ...record }))
+      : records.filter((record) => record.sessionRef === sessionRef).map((r) => ({ ...r }));
+  return {
+    enabled: true,
+    record(record) {
+      records.push(assertVoiceprintScoreTelemetryHasNoSecrets(record));
+    },
+    read(sessionRef) {
+      return filtered(sessionRef);
+    },
+    aggregate(sessionRef) {
+      return aggregateVoiceprintScoreTelemetry(filtered(sessionRef));
+    },
+  };
+}
+
+interface ScoreTelemetryFile {
+  version: 1;
+  records: VoiceprintScoreTelemetryRecord[];
+}
+
+export function defaultVoiceprintScoreTelemetryPath(): string {
+  return join(getConfigDir(), "state", "voiceprint", "score-telemetry.json");
+}
+
+/**
+ * File-backed RECORDING sink (opt-in, append-only JSONL-style). Round-trips through
+ * the same atomic temp+rename 0600 writer as the audit log, and RE-VALIDATES every
+ * record with the no-secrets guard on read (so a tampered file that smuggled a
+ * vector is rejected, not loaded).
+ */
+export function createFileVoiceprintScoreTelemetrySink(
+  options: { filePath?: string } = {},
+): VoiceprintScoreTelemetrySink {
+  const filePath = options.filePath ?? defaultVoiceprintScoreTelemetryPath();
+  const readAll = (sessionRef?: string) => {
+    const all = loadScoreTelemetry(filePath).records;
+    return sessionRef === undefined
+      ? all
+      : all.filter((record) => record.sessionRef === sessionRef);
+  };
+  return {
+    enabled: true,
+    record(record) {
+      const safe = assertVoiceprintScoreTelemetryHasNoSecrets(record);
+      const file = loadScoreTelemetry(filePath);
+      file.records.push(safe);
+      writeLifecycleFile(filePath, file);
+    },
+    read(sessionRef) {
+      return readAll(sessionRef);
+    },
+    aggregate(sessionRef) {
+      return aggregateVoiceprintScoreTelemetry(readAll(sessionRef));
+    },
+  };
+}
+
+function loadScoreTelemetry(filePath: string): ScoreTelemetryFile {
+  if (!existsSync(filePath)) {
+    return { version: 1, records: [] };
+  }
+  const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Partial<ScoreTelemetryFile>;
+  if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.records)) {
+    throw new Error(`Invalid voiceprint score telemetry file at ${filePath}.`);
+  }
+  // Defense in depth: reject a tampered file that smuggled a vector/audio/key.
+  for (const record of parsed.records) {
+    assertVoiceprintScoreTelemetryHasNoSecrets(record);
+  }
+  return { version: 1, records: parsed.records };
 }
 
 function appendTo(
@@ -269,15 +405,40 @@ function writeLifecycleFile(filePath: string, file: unknown): void {
  * `identity/voiceprint/consent-ledger.ts`. Default window = 365 days.
  */
 export function resolveVoiceprintLifecycleFromConfig(config: {
-  voiceprint?: { retention_days?: number; retention_ms?: number };
+  voiceprint?: {
+    retention_days?: number;
+    retention_ms?: number;
+    telemetry?: { enabled?: boolean; sink_path?: string };
+  };
 }): VoiceprintLifecycle {
   const retentionMs = resolveRetentionMs(config.voiceprint);
   return {
     consentLedger: createFileVoiceprintConsentLedger(),
     auditLog: createFileVoiceprintAuditLog(),
+    // A7 telemetry: OFF by default. Only an explicit `telemetry.enabled: true`
+    // activates a recording sink (file-backed under the config root); otherwise the
+    // no-op sink records nothing, leaving scoring behavior unchanged.
+    scoreTelemetry: resolveVoiceprintScoreTelemetrySinkFromConfig(config.voiceprint?.telemetry),
     retentionMs,
     enforceConsentLedger: false,
   };
+}
+
+/**
+ * Resolve the A7 telemetry sink from config. DEFAULT (unconfigured or
+ * `enabled !== true`) is the NO-OP sink: telemetry is inert. When enabled, a
+ * file-backed sink is used (at `sink_path` if set, else the default path under the
+ * config root).
+ */
+export function resolveVoiceprintScoreTelemetrySinkFromConfig(
+  telemetry: { enabled?: boolean; sink_path?: string } | undefined,
+): VoiceprintScoreTelemetrySink {
+  if (telemetry?.enabled !== true) {
+    return createNoopVoiceprintScoreTelemetrySink();
+  }
+  return createFileVoiceprintScoreTelemetrySink(
+    telemetry.sink_path ? { filePath: telemetry.sink_path } : {},
+  );
 }
 
 function resolveRetentionMs(
@@ -302,11 +463,18 @@ export function createInMemoryVoiceprintLifecycle(
   options: {
     retentionMs?: number;
     enforceConsentLedger?: boolean;
+    /**
+     * A7 telemetry sink override. Defaults to the NO-OP sink so telemetry is OFF
+     * by default (scoring works unchanged and NOTHING is recorded). Pass
+     * `createInMemoryVoiceprintScoreTelemetrySink()` to opt into recording.
+     */
+    scoreTelemetry?: VoiceprintScoreTelemetrySink;
   } = {},
 ): VoiceprintLifecycle {
   return {
     consentLedger: createInMemoryVoiceprintConsentLedger(),
     auditLog: createInMemoryVoiceprintAuditLog(),
+    scoreTelemetry: options.scoreTelemetry ?? createNoopVoiceprintScoreTelemetrySink(),
     retentionMs: options.retentionMs ?? DEFAULT_VOICEPRINT_RETENTION_MS,
     enforceConsentLedger: options.enforceConsentLedger ?? false,
   };

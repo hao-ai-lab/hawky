@@ -38,6 +38,21 @@ import { bestOwnerClip, isUsableEmbeddingVector, safeCosineSimilarity } from "./
  * normalization reference. The `model` MUST match the owner template model
  * (checked with {@link sameVoiceprintModel}) — cohort cosines are only
  * comparable to owner<->test cosines when produced by the same model+version.
+ *
+ * NO-BIOMETRIC GUARANTEE. A cohort holds ONLY non-owner (impostor) embeddings; it
+ * carries no owner biometric data. Nothing here reads the owner template, and the
+ * owner<->test cosine is passed in as an opaque scalar (`rawScore`), never derived
+ * from the cohort. That separation is what makes cohort-based normalization — and
+ * the threshold calibration built on top of it — a fixed background asset that
+ * ships without exposing any owner biometric secret.
+ *
+ * HOW THIS FEEDS THRESHOLD CALIBRATION. AS-Norm re-expresses the raw cosine as a
+ * z-score against THIS cohort's impostor distribution, so the operating point
+ * (FAR/FRR) is defined against the impostor scores, not against replayed owner
+ * audio. The calibration follow-up (see the plan's "Threshold & scoring
+ * calibration strategy") therefore fits the normalized thresholds from the cohort
+ * distribution plus a modest set of genuine samples — it does not require, and
+ * this asset never stores, a broad owner biometric corpus.
  */
 export interface VoiceprintCohort {
   model: VoiceprintModelInfo;
