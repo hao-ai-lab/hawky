@@ -14,6 +14,11 @@ import {
   isUsableEmbeddingVector,
   ownerSimilarity,
 } from "./similarity.js";
+import {
+  computeVoiceprintOperatingPoint,
+  type VoiceprintOperatingPoint,
+  type VoiceprintOperatingPointOptions,
+} from "./calibration.js";
 
 const DEFAULT_MODEL: VoiceprintModelInfo = {
   provider: "external-json",
@@ -130,6 +135,53 @@ export function formatVoiceprintReport(report: VoiceprintScoreReport): string {
   );
 
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * ADDITIVE. Derive genuine (expected "owner") vs impostor (expected "non_owner"
+ * or "assistant_leakage") similarity arrays from a scored report and compute the
+ * operating point (EER, FAR/FRR curve, recommended thresholds). "noise"/"unknown"
+ * rows are excluded — they are not a genuine/impostor label. Rows whose similarity
+ * is the not-a-match sentinel are excluded too (they carry no comparable score).
+ *
+ * This is a labeled-manifest calibration on FIXTURE data. Per the A10 honesty
+ * note, fixture/TTS data is NOT a production cohort: the recommendation here is a
+ * MACHINERY demonstration + a fixture operating point, not a production number.
+ */
+export function computeVoiceprintReportOperatingPoint(
+  report: VoiceprintScoreReport,
+  options: VoiceprintOperatingPointOptions = {},
+): VoiceprintOperatingPoint {
+  const genuineScores: number[] = [];
+  const impostorScores: number[] = [];
+  for (const row of report.rows) {
+    if (!Number.isFinite(row.similarity) || row.similarity <= -1) {
+      continue;
+    }
+    if (row.expected === "owner") {
+      genuineScores.push(row.similarity);
+    } else if (row.expected === "non_owner" || row.expected === "assistant_leakage") {
+      impostorScores.push(row.similarity);
+    }
+  }
+  return computeVoiceprintOperatingPoint(genuineScores, impostorScores, options);
+}
+
+/**
+ * ADDITIVE. Format the operating point for the report tail. Returns an empty
+ * string when there was insufficient labeled data (so existing report output is
+ * unchanged unless a caller opts to append this).
+ */
+export function formatVoiceprintOperatingPoint(point: VoiceprintOperatingPoint): string {
+  if (point.kind === "insufficient_data") {
+    return `Operating point: insufficient labeled data (${point.reason}; genuine=${point.genuineCount}, impostor=${point.impostorCount}).\n`;
+  }
+  return [
+    "Operating point (fixture calibration — PROVISIONAL, not a production cohort):",
+    `  genuine=${point.genuineCount}, impostor=${point.impostorCount}, space=${point.scoreSpace}`,
+    `  EER=${point.eer.rate.toFixed(4)} at threshold=${point.eer.threshold.toFixed(4)} (FAR=${point.eer.far.toFixed(4)}, FRR=${point.eer.frr.toFixed(4)})`,
+    `  Recommended (targetFar=${point.targets.targetFar}, targetFrr=${point.targets.targetFrr}): ownerAccept=${point.recommended.ownerAccept.toFixed(4)}, ownerPossible=${point.recommended.ownerPossible.toFixed(4)}`,
+  ].join("\n") + "\n";
 }
 
 function validateManifest(manifest: VoiceprintManifest): void {

@@ -1243,6 +1243,44 @@ The real levers are in *how we score*, not the threshold, in bang-for-buck order
    modest set of genuine samples, so the shippable cohort asset stays free of any
    broad owner biometric corpus.
 
+   *Status (A10 — calibration machinery landed):* A10 shipped the calibration
+   machinery plus a provisional per-model profile (opt-in, `DEFAULT_VOICEPRINT_THRESHOLDS`
+   unchanged); production calibration remains device/cohort testing. The FAR/FRR /
+   EER / operating-point math now exists as a pure module,
+   `src/identity/voiceprint/calibration.ts`.
+   `computeVoiceprintOperatingPoint(genuineScores, impostorScores)` returns the
+   FAR/FRR curve, the EER + its threshold, and a recommended
+   `{ ownerAccept, ownerPossible }` under a stated rule — ownerAccept is the
+   lowest threshold whose FAR ≤ `targetFar` (default 0.01), ownerPossible the
+   highest whose FRR ≤ `targetFrr` (default 0.05), then clamped ≤ ownerAccept and
+   run through the production `validateVoiceprintThresholds` so a recommendation
+   can never fall below `MIN_OWNER_ACCEPT_THRESHOLD` (0.5) or invert the accept/
+   possible ordering. Empty or one-sided input is **refused** (an
+   `insufficient_data` result) rather than emitting a bogus threshold. A helper
+   (`voiceprintCalibrationScoresFromTelemetry`) derives genuine/impostor score
+   arrays from the A7 privacy-safe score histograms (per-bin counts →
+   midpoint-representative scores; the within-bin position is lost, an accuracy-
+   to-bin-width approximation documented in code) so a running deployment's field
+   telemetry can feed calibration.
+
+   Thresholds are now keyed per **model + score space** via
+   `VoiceprintCalibrationProfile` and `resolveVoiceprintThresholdsForModel`. A
+   **PROVISIONAL** CAM++ raw-cosine profile ships
+   (`CAMPLUSPLUS_PROVISIONAL_RAW_COSINE_PROFILE`: ownerAccept 0.55 / ownerPossible
+   0.45, derived from the documented real margins above — owner ~0.88, cross-
+   recording owner ~0.60, real-human impostor ~0.38, TTS ~0.10 **excluded** — plus
+   the sr-data fixture operating point). It is explicitly labeled
+   `provisional: true`: **not** a production operating point. The final numbers
+   require a real, diverse **human** impostor cohort embedded with this exact
+   model (not TTS, not same-mic fixtures), run through
+   `computeVoiceprintOperatingPoint` — that is device/cohort testing, out of scope
+   here. This increment ships the **machinery + a provisional profile**, nothing
+   more. Wiring is strictly **opt-in**: `DEFAULT_VOICEPRINT_THRESHOLDS` (0.82/0.72)
+   is unchanged, and `resolveVoiceprintThresholdsForModel` returns DEFAULT for the
+   reference backend and for any model when no matching profile is passed, so the
+   live scoring path's effective thresholds are byte-for-byte unchanged unless an
+   operator explicitly supplies a calibration profile.
+
 ## Target Shape
 
 The identity system should have four durable concepts:

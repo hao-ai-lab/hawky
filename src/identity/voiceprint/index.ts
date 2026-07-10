@@ -1,5 +1,6 @@
 export * from "./as-norm.js";
 export * from "./audio-features.js";
+export * from "./calibration.js";
 export * from "./consent-ledger.js";
 export * from "./contracts.js";
 export * from "./evidence.js";
