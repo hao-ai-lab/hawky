@@ -6,6 +6,21 @@ import {
   type VoiceprintEmbeddingBatchResponse,
 } from "./sidecar-protocol.js";
 
+/**
+ * A fault in the embedding sidecar SUBPROCESS or host — spawn failure (ENOENT),
+ * timeout, non-zero exit, stdout/stderr overflow, stdin write failure, or garbage
+ * output that fails to parse. These are INFRASTRUCTURE / SERVER faults, NOT
+ * client-request faults: callers that translate this to an RPC error should use
+ * an internal/transient code (INTERNAL_ERROR) so client retry/backoff works, not
+ * INVALID_REQUEST which would tell the client it sent a bad request.
+ */
+export class VoiceprintSidecarError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options as ErrorOptions);
+    this.name = "VoiceprintSidecarError";
+  }
+}
+
 export interface EmbeddingSidecarCommand {
   command: string;
   args?: string[];
@@ -50,7 +65,9 @@ export async function runEmbeddingSidecar(input: {
 
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      finish(() => reject(new Error(`Voiceprint sidecar timed out after ${timeoutMs}ms.`)));
+      finish(() =>
+        reject(new VoiceprintSidecarError(`Voiceprint sidecar timed out after ${timeoutMs}ms.`)),
+      );
     }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
@@ -60,7 +77,9 @@ export async function runEmbeddingSidecar(input: {
       stdout += chunk;
       if (Buffer.byteLength(stdout, "utf8") > maxStdoutBytes) {
         child.kill("SIGTERM");
-        finish(() => reject(new Error("Voiceprint sidecar stdout exceeded maxStdoutBytes.")));
+        finish(() =>
+          reject(new VoiceprintSidecarError("Voiceprint sidecar stdout exceeded maxStdoutBytes.")),
+        );
       }
     });
 
@@ -68,17 +87,26 @@ export async function runEmbeddingSidecar(input: {
       stderr += chunk;
       if (Buffer.byteLength(stderr, "utf8") > maxStderrBytes) {
         child.kill("SIGTERM");
-        finish(() => reject(new Error("Voiceprint sidecar stderr exceeded maxStderrBytes.")));
+        finish(() =>
+          reject(new VoiceprintSidecarError("Voiceprint sidecar stderr exceeded maxStderrBytes.")),
+        );
       }
     });
 
     child.on("error", (error) => {
-      finish(() => reject(error));
+      // spawn failure (e.g. ENOENT for a missing command) — an infrastructure fault.
+      finish(() =>
+        reject(
+          new VoiceprintSidecarError(`Voiceprint sidecar failed to run: ${errorMessage(error)}.`, {
+            cause: error,
+          }),
+        ),
+      );
     });
 
     child.stdin.on("error", (error) => {
       finish(() =>
-        reject(new Error(`Voiceprint sidecar stdin error: ${errorMessage(error)}.`)),
+        reject(new VoiceprintSidecarError(`Voiceprint sidecar stdin error: ${errorMessage(error)}.`)),
       );
     });
 
@@ -86,7 +114,7 @@ export async function runEmbeddingSidecar(input: {
       finish(() => {
         if (code !== 0) {
           reject(
-            new Error(
+            new VoiceprintSidecarError(
               `Voiceprint sidecar exited with code ${String(code)}${signal ? ` signal ${signal}` : ""}: ${sidecarFailureDetail(stdout, stderr)}`,
             ),
           );
@@ -96,7 +124,14 @@ export async function runEmbeddingSidecar(input: {
         try {
           resolve(parseEmbeddingBatchResponseJson(stdout, requestIds));
         } catch (error) {
-          reject(error);
+          // Garbage / truncated / non-JSON sidecar output — a host/subprocess fault,
+          // not a client-request fault. Preserve the parse detail as the cause.
+          reject(
+            new VoiceprintSidecarError(
+              `Voiceprint sidecar produced an unparseable response: ${errorMessage(error)}.`,
+              { cause: error },
+            ),
+          );
         }
       });
     });
@@ -105,7 +140,7 @@ export async function runEmbeddingSidecar(input: {
       child.stdin.end(`${JSON.stringify(input.request)}\n`);
     } catch (error) {
       finish(() =>
-        reject(new Error(`Voiceprint sidecar stdin error: ${errorMessage(error)}.`)),
+        reject(new VoiceprintSidecarError(`Voiceprint sidecar stdin error: ${errorMessage(error)}.`)),
       );
     }
   });

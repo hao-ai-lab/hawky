@@ -11,6 +11,7 @@ import {
 import {
   buildLiveVoiceprintScoringBatchRequest,
   scoreLiveVoiceprintScoringJobResponse,
+  UnusableVoiceprintEmbeddingError,
   type LiveVoiceprintScoringJob,
   type LiveVoiceprintScoringJobResult,
 } from "./live-sidecar-jobs.js";
@@ -67,7 +68,15 @@ export interface LiveVoiceprintSkippedScoringJob {
   requestId: string;
   sessionKey: string;
   transcriptItemId: string;
-  reason: "consent_denied";
+  /**
+   * `consent_denied`: the turn was filtered before the sidecar ran.
+   * `scoring_failed`: the sidecar produced a per-turn embedding that is unusable
+   * for scoring (empty / NaN / infinite / zero-norm / wrong dimension). This is a
+   * FAIL-CLOSED skip — the turn is never resolved — isolated to one turn so a
+   * single garbage embedding does not fail the whole batch. Batch-integrity and
+   * security-guard faults are NOT this reason; they still throw.
+   */
+  reason: "consent_denied" | "scoring_failed";
 }
 
 export type VoiceprintTranscriptIdentityStatus =
@@ -138,29 +147,61 @@ export function scoreLiveVoiceprintScoringBatchResponse(input: {
   const request = input.request ?? buildBatchRequestFromContexts(partition.processable);
   validateRequestMatchesJobs(request, partition.processable);
   const requestIds = request.requests.map((item) => item.id);
-  validateEmbeddingBatchResponse(input.response, requestIds);
+  // Defer per-turn embedding-usability to the scoring loop so a single garbage
+  // embedding (empty / NaN / zero-norm / wrong dim) is isolated to ONE turn
+  // (fail-closed skip) rather than throwing out of the whole batch. Structural
+  // integrity (ids, model presence, duplicate/missing/unexpected ids) is still
+  // enforced batch-level here.
+  validateEmbeddingBatchResponse(input.response, requestIds, {
+    skipEmbeddingUsability: true,
+  });
   const model = commonBatchModel(input.response);
   const responseById = new Map(input.response.responses.map((item) => [item.id, item] as const));
 
-  const results = partition.processable.map((context) => {
+  const results: LiveVoiceprintScoringJobResult[] = [];
+  // Per-turn UNUSABLE-embedding faults skip only that turn (fail-closed) so a
+  // single garbage embedding does not throw out of the whole batch and lose the
+  // good turns. Structural/security faults (missing response, model mismatch,
+  // reference-model guard, id mismatch) are NOT isolated — they still throw as
+  // clean typed precondition failures.
+  const embeddingSkipped: LiveVoiceprintSkippedScoringJob[] = [];
+  for (const context of partition.processable) {
     const response = responseById.get(context.job.embeddingRequest.id);
     if (!response) {
       throw new Error(
         `Missing live voiceprint sidecar response for ${context.job.embeddingRequest.id}.`,
       );
     }
-    return scoreLiveVoiceprintScoringJobResponse({
-      ...context,
-      response,
-    });
-  });
+    try {
+      results.push(
+        scoreLiveVoiceprintScoringJobResponse({
+          ...context,
+          response,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof UnusableVoiceprintEmbeddingError) {
+        embeddingSkipped.push({
+          status: "skipped",
+          jobId: context.job.id,
+          requestId: context.job.embeddingRequest.id,
+          sessionKey: context.job.prepared.turn.sessionKey,
+          transcriptItemId: context.job.prepared.turn.transcriptItemId,
+          reason: "scoring_failed",
+        });
+        continue;
+      }
+      throw error;
+    }
+  }
 
+  const skipped = [...partition.skipped, ...embeddingSkipped];
   return {
-    status: partition.skipped.length > 0 ? "partial" : "scored",
+    status: skipped.length > 0 ? "partial" : "scored",
     request,
     model,
     results,
-    skipped: partition.skipped,
+    skipped,
   };
 }
 

@@ -88,6 +88,32 @@ describe("live voiceprint sidecar runner", () => {
     ).toThrow(/mixed models/);
   });
 
+  test("A5 guard: batch refuses a reference-tagged returned model per-job (expectedModel unset)", () => {
+    const guarded = {
+      ...jobContext("rt_runner_guard", "audio_runner_guard"),
+      expectedModel: undefined,
+      requireDiscriminativeModel: true,
+    };
+    const request = buildLiveVoiceprintScoringBatchRequest([guarded.job]);
+
+    expect(() =>
+      scoreLiveVoiceprintScoringBatchResponse({
+        request,
+        jobs: [guarded],
+        response: {
+          version: 1,
+          responses: [
+            {
+              id: guarded.job.embeddingRequest.id,
+              embedding: [1, 0],
+              model: { provider: "reference", modelId: "reference-fbank-v0", version: "0" },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/non-discriminative reference model/);
+  });
+
   test("runs sidecar jobs end to end through JSON stdin/stdout", async () => {
     const scriptPath = writeSidecarScript(`
       const chunks = [];
