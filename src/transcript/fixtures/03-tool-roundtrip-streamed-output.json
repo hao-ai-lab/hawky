@@ -1,0 +1,97 @@
+{
+  "events": [
+    {
+      "type": "text",
+      "content": "Let me check."
+    },
+    {
+      "type": "tool_use_start",
+      "tool_use_id": "toolu_01",
+      "name": "bash",
+      "input": {
+        "command": "ls -la"
+      },
+      "approvalReason": "safe_command"
+    },
+    {
+      "type": "tool_streaming",
+      "tool_use_id": "toolu_01",
+      "stream_type": "stdout",
+      "content": "file-a.txt"
+    },
+    {
+      "type": "tool_streaming",
+      "tool_use_id": "toolu_01",
+      "stream_type": "stderr",
+      "content": "warning: slow disk"
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_01",
+      "name": "bash",
+      "content": "file-a.txt\nwarning: slow disk",
+      "is_error": false
+    },
+    {
+      "type": "text",
+      "content": "Found one file."
+    },
+    {
+      "type": "done"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "message",
+        "id": "msg-0",
+        "role": "assistant",
+        "text": "Let me check.",
+        "done": true
+      },
+      {
+        "kind": "tool",
+        "id": "toolu_01",
+        "toolUseId": "toolu_01",
+        "name": "bash",
+        "inputPreview": "ls -la",
+        "status": "ok",
+        "output": [
+          {
+            "type": "stdout",
+            "content": "file-a.txt"
+          },
+          {
+            "type": "stderr",
+            "content": "warning: slow disk"
+          }
+        ],
+        "meta": {
+          "input": {
+            "command": "ls -la"
+          },
+          "approvalReason": "safe_command",
+          "resultContent": "file-a.txt\nwarning: slow disk",
+          "isError": false
+        }
+      },
+      {
+        "kind": "message",
+        "id": "msg-1",
+        "role": "assistant",
+        "text": "Found one file.",
+        "done": true
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 2,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

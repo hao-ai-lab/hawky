@@ -14,6 +14,9 @@ export default defineConfig({
     alias: {
       // Reuse the gateway's wire-protocol types directly (single source of truth).
       "@hawky/protocol": path.resolve(__dirname, "../src/gateway/protocol.ts"),
+      // Shared canonical transcript reducer (single source of truth for the
+      // "history rows -> rendered transcript" fold).
+      "@hawky/transcript": path.resolve(__dirname, "../src/transcript/index.ts"),
     },
   },
   server: {

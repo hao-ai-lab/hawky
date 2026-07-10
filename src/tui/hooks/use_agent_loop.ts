@@ -1,48 +1,45 @@
 // =============================================================================
 // useAgentLoop Hook
 //
-// Custom React hook that manages the AgentLoop lifecycle and converts
-// StreamEvents into React state for the TUI components.
-//
-// Responsibilities:
-// - Creates and owns the AgentLoop instance
-// - Subscribes to StreamEvents → DisplayMessage[] + TuiStatus
-// - Implements PermissionResolver (Promise-based, same as COCO)
-// - Handles ask_user requests with option selection
-// - Tracks tool execution state for tool output rendering
+// Custom React hook that manages the AgentLoop lifecycle and binds the TUI to
+// the shared canonical transcript reducer (src/transcript). Every transcript
+// transition — live StreamEvents, optimistic user bubbles, and history
+// restore — goes through the pure core (reduce / appendUserMessage /
+// fromHistory); this hook only owns SIDE EFFECTS:
+// - AgentLoop lifecycle (send/cancel/session switching)
+// - status bar state, token usage, pending permission/ask_user prompts
+// - TUI-only per-item overlays (wall-clock timestamps, elapsed-timer start,
+//   the " [cancelled]" suffix) — the core never touches Date.now()
+// - terminal redraw + Ink <Static> remount when replace=true lands on
+//   committed text (cursor.replacedCommitted) and on clear/resume
+// The canonical items are projected to DisplayMessage[] via the
+// transcript_display selector.
 // =============================================================================
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import type { AgentEventSource } from "../../gateway/agent-source.js";
 import type { PermissionDecision } from "../../agent/tool_executor.js";
-import type { StreamEvent, TokenUsage, ChatMessage } from "../../agent/types.js";
-import { resolveAskUser } from "../../tools/ask_user.js";
-import { formatToolPreview } from "../utils/format_tool_preview.js";
-import { historyToDisplayMessages } from "../utils/history_to_display.js";
-
-/** Max messages to show when resuming a session. Older messages are hidden. */
-const MAX_RESUME_DISPLAY = 50;
-
-/** Truncate display messages for resume, prepending a "hidden" banner if needed. */
-function truncateForResume(messages: DisplayMessage[]): DisplayMessage[] {
-  if (messages.length <= MAX_RESUME_DISPLAY) return messages;
-  const hidden = messages.length - MAX_RESUME_DISPLAY;
-  const banner: DisplayMessage = {
-    id: "resume-truncated",
-    role: "system",
-    text: `⋯ ${hidden} older messages hidden`,
-    timestamp: messages[0]?.timestamp ?? new Date().toISOString(),
-  };
-  return [banner, ...messages.slice(-MAX_RESUME_DISPLAY)];
-}
+import type { StreamEvent, TokenUsage } from "../../agent/types.js";
+import {
+  appendUserMessage,
+  fromHistory,
+  initialState,
+  reduce,
+  type TranscriptState,
+} from "../../transcript/index.js";
+import {
+  deriveDisplayMessages,
+  type DisplayOverlay,
+} from "../utils/transcript_display.js";
 import type {
   DisplayMessage,
   TuiStatus,
-  ToolDisplayData,
-  ToolOutputLine,
   PendingPermission,
   PendingAskUser,
 } from "../types.js";
+
+/** Max messages to show when resuming a session. Older messages are hidden. */
+const MAX_RESUME_DISPLAY = 50;
 
 // -----------------------------------------------------------------------------
 // Types
@@ -99,21 +96,6 @@ export interface UseAgentLoopReturn {
 }
 
 // -----------------------------------------------------------------------------
-// ID generator
-// -----------------------------------------------------------------------------
-
-let messageCounter = 0;
-
-function nextId(): string {
-  return `msg_${++messageCounter}`;
-}
-
-/** Reset counter (for testing) */
-export function resetMessageCounter(): void {
-  messageCounter = 0;
-}
-
-// -----------------------------------------------------------------------------
 // Hook
 // -----------------------------------------------------------------------------
 
@@ -130,12 +112,16 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
   const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null);
   const [sessionRemountKey, setSessionRemountKey] = useState(0);
 
-  // Track current streaming assistant message ID
-  const streamingMsgIdRef = useRef<string | null>(null);
-  const streamingTextRef = useRef<string>("");
-  const replaceTargetMsgIdRef = useRef<string | null>(null);
-  const replacingCommittedTextRef = useRef<boolean>(false);
-  // Cancel flow flag
+  // Canonical transcript state (the shared reducer's fold) + TUI-only
+  // per-item overlays (timestamps / startedAt / cancelled suffix / order).
+  const transcriptRef = useRef<TranscriptState>(initialState());
+  const overlaysRef = useRef<Map<string, DisplayOverlay>>(new Map());
+  /** Number of leading items hidden by resume truncation. */
+  const hiddenPrefixRef = useRef(0);
+
+  // Cancel flow flag (TUI rule: swallow the first error after a local cancel
+  // entirely — the in-process loop rethrows the provider abort as a generic
+  // "aborted" error that the core's sentinel gate would let through)
   const cancelledRef = useRef<boolean>(false);
   // Track whether we consider the agent busy (independent of loop.isRunning(),
   // because the loop's finally block runs after our cancel handler)
@@ -144,13 +130,93 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
   const sendPromiseRef = useRef<Promise<void> | null>(null);
   // Permission resolver callback (for gateway permission.request events)
   const permissionResolverRef = useRef<((decision: PermissionDecision) => void) | null>(null);
-  // Map tool_use_id → message id for updating tool output entries
-  const toolMsgMapRef = useRef<Map<string, string>>(new Map());
 
   // Agent source ref (stable across renders)
   const sourceRef = useRef<AgentEventSource>(options.agentSource);
   const sessionKeyRef = useRef<string>(options.sessionKey);
   const initializedRef = useRef<boolean>(false);
+
+  /** Get-or-create the overlay record for an item id. */
+  const overlayFor = useCallback((id: string): DisplayOverlay => {
+    let overlay = overlaysRef.current.get(id);
+    if (!overlay) {
+      overlay = {};
+      overlaysRef.current.set(id, overlay);
+    }
+    return overlay;
+  }, []);
+
+  /** Project canonical state → DisplayMessage[] and push it into React,
+   *  applying resume truncation (banner + slice) when active. */
+  const publish = useCallback(() => {
+    const all = deriveDisplayMessages(transcriptRef.current, overlaysRef.current);
+    const hidden = hiddenPrefixRef.current;
+    if (hidden > 0 && all.length > hidden) {
+      const banner: DisplayMessage = {
+        id: "resume-truncated",
+        role: "system",
+        text: `⋯ ${hidden} older messages hidden`,
+        timestamp: all[0]?.timestamp ?? new Date().toISOString(),
+      };
+      setMessages([banner, ...all.slice(hidden)]);
+    } else {
+      setMessages(all);
+    }
+  }, []);
+
+  /** Stamp TUI-only clock fields on items the last transition appended.
+   *  (The pure core never calls Date.now() — ids/ordering are canonical,
+   *  wall-clock presentation is ours.) */
+  const stampNewItems = useCallback((prev: TranscriptState, next: TranscriptState) => {
+    for (let i = prev.items.length; i < next.items.length; i++) {
+      const item = next.items[i];
+      const overlay = overlayFor(item.id);
+      if (overlay.timestamp === undefined) overlay.timestamp = new Date().toISOString();
+      if (item.kind === "tool" && overlay.startedAt === undefined) overlay.startedAt = Date.now();
+    }
+  }, [overlayFor]);
+
+  /** Fold one StreamEvent through the canonical reducer + refresh React state. */
+  const applyEvent = useCallback((event: StreamEvent) => {
+    const prev = transcriptRef.current;
+    const next = reduce(prev, event);
+    transcriptRef.current = next;
+    stampNewItems(prev, next);
+
+    // replace=true landed on ALREADY-COMMITTED text: the core replaces it in
+    // place and reports the transition; reproduce the TUI's old Ink <Static>
+    // filter+re-append+redraw so the final message renders after the tool
+    // cards. Static items were already painted to stdout, so we clear the
+    // terminal and remount Static to repaint the updated text.
+    if (next.cursor.replacedCommitted) {
+      const movedId = next.cursor.streamingItemId;
+      if (movedId) {
+        // Fractional key: after every current item, before any future one.
+        overlayFor(movedId).sortKey = next.items.length - 0.5;
+      }
+      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      setSessionRemountKey((k) => k + 1);
+    }
+
+    setStreamingMsgId(next.cursor.streamingItemId);
+    if (next.items !== prev.items) publish();
+  }, [overlayFor, publish, stampNewItems]);
+
+  /** Apply a local (non-event) canonical mutation, e.g. the optimistic user bubble. */
+  const applyLocal = useCallback((mutate: (s: TranscriptState) => TranscriptState) => {
+    const prev = transcriptRef.current;
+    const next = mutate(prev);
+    transcriptRef.current = next;
+    stampNewItems(prev, next);
+    publish();
+  }, [publish, stampNewItems]);
+
+  /** Reset the canonical transcript + overlays (for /clear, /new, resume). */
+  const resetTranscript = useCallback((state?: TranscriptState) => {
+    transcriptRef.current = state ?? initialState();
+    overlaysRef.current = new Map();
+    hiddenPrefixRef.current = 0;
+  }, []);
 
   // Load session history on first render (async — gateway client needs RPC).
   // History is loaded into React state and rendered by <Static> — no prepaint.
@@ -163,17 +229,20 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       try {
         const history = await sourceRef.current.getHistory();
         if (history.length > 0) {
-          const displayMsgs = historyToDisplayMessages(history);
+          const state = fromHistory(history);
+          const displayMsgs = deriveDisplayMessages(state);
+          resetTranscript(state);
           allMessagesRef.current = displayMsgs; // Keep full list for input history
           if (displayMsgs.length > 0) {
-            setMessages(truncateForResume(displayMsgs));
+            hiddenPrefixRef.current = Math.max(0, displayMsgs.length - MAX_RESUME_DISPLAY);
+            publish();
           }
         }
       } catch {
         // History load failure is non-fatal (new session or gateway just started)
       }
     })();
-  }, []);
+  }, [publish, resetTranscript]);
 
   // In client mode, gateway handles session persistence.
   // This is a no-op placeholder for compatibility with event handlers that call it.
@@ -181,216 +250,51 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     // Gateway persists sessions automatically in agent-methods.ts
   }, []);
 
-  // Subscribe to stream events
+  // Subscribe to stream events. Transitions go through the shared reducer;
+  // this handler keeps ONLY the TUI side effects.
   useEffect(() => {
     const source = sourceRef.current;
 
     const unsub = source.subscribe((event: StreamEvent) => {
+      // --- Pre-reduce adapter concerns -------------------------------------
+      if (event.type === "error" && cancelledRef.current) {
+        // First error after a local cancel is the loop rethrowing the abort —
+        // swallow it entirely (stricter than the core's sentinel gate).
+        cancelledRef.current = false;
+        return;
+      }
+      if (event.type === "cancel") {
+        // The " [cancelled]" suffix is TUI presentation: mark the message
+        // that was streaming when the cancel hit (the reducer finalizes it
+        // unsuffixed, per the canonical rule).
+        const sid = transcriptRef.current.cursor.streamingItemId;
+        if (sid) overlayFor(sid).cancelled = true;
+      }
+
+      // --- Canonical transition ---------------------------------------------
+      applyEvent(event);
+
+      // --- Post-reduce side effects (status bar, prompts, usage, busy) ------
       switch (event.type) {
         case "text": {
-          if (event.replace) {
-            const targetId = streamingMsgIdRef.current ?? replaceTargetMsgIdRef.current;
-            if (targetId) {
-              const replacingCommittedText =
-                !streamingMsgIdRef.current && replaceTargetMsgIdRef.current === targetId;
-              streamingMsgIdRef.current = targetId;
-              replaceTargetMsgIdRef.current = null;
-              replacingCommittedTextRef.current = replacingCommittedText;
-              streamingTextRef.current = event.content;
-              setStatus("streaming");
-              setStatusDetail(null);
-              setStreamingMsgId(targetId);
-              setMessages((prev) => {
-                const target = prev.find((m) => m.id === targetId);
-                if (!target) {
-                  return [
-                    ...prev,
-                    {
-                      id: targetId,
-                      role: "assistant",
-                      text: event.content,
-                      timestamp: new Date().toISOString(),
-                    },
-                  ];
-                }
-                const updatedTarget = { ...target, text: event.content };
-                if (replacingCommittedText) {
-                  return [...prev.filter((m) => m.id !== targetId), updatedTarget];
-                }
-                return prev.map((m) =>
-                  m.id === targetId ? updatedTarget : m,
-                );
-              });
-              if (replacingCommittedText) {
-                process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
-                setSessionRemountKey((k) => k + 1);
-              }
-              break;
-            }
-          }
-
-          if (!streamingMsgIdRef.current) {
-            const id = nextId();
-            streamingMsgIdRef.current = id;
-            replaceTargetMsgIdRef.current = null;
-            replacingCommittedTextRef.current = false;
-            streamingTextRef.current = event.content;
-            setStatus("streaming");
-            setStatusDetail(null);
-            setStreamingMsgId(id);
-            setMessages((prev) => [
-              ...prev,
-              {
-                id,
-                role: "assistant",
-                text: event.content,
-                timestamp: new Date().toISOString(),
-              },
-            ]);
-          } else {
-            streamingTextRef.current += event.content;
-            const currentText = streamingTextRef.current;
-            const currentId = streamingMsgIdRef.current;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === currentId ? { ...m, text: currentText } : m,
-              ),
-            );
-          }
+          setStatus("streaming");
+          setStatusDetail(null);
           break;
         }
 
         case "tool_use_start": {
-          // Commit any in-progress streaming text so it enters <Static> before
-          // tool entries.  Ink's <Static> tracks items by position — if the
-          // assistant message were inserted in the middle later, it would be
-          // silently dropped.
-          if (streamingMsgIdRef.current) {
-            replaceTargetMsgIdRef.current = streamingMsgIdRef.current;
-            streamingMsgIdRef.current = null;
-            streamingTextRef.current = "";
-            setStreamingMsgId(null);
-          }
-
-          // Create a tool output entry in messages
-          const msgId = nextId();
-          toolMsgMapRef.current.set(event.tool_use_id, msgId);
-          const preview = formatToolPreview(event.name, event.input);
-
           setStatus("thinking");
           setStatusDetail(event.name);
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: msgId,
-              role: "tool",
-              text: "",
-              timestamp: new Date().toISOString(),
-              toolData: {
-                toolUseId: event.tool_use_id,
-                toolName: event.name,
-                inputPreview: preview,
-                status: "executing",
-                outputLines: [],
-                isError: false,
-                startedAt: Date.now(),
-                approvalReason: (event as any).approvalReason,
-                batchId: (event as any).batchId,
-                batchSize: (event as any).batchSize,
-              },
-            },
-          ]);
-          break;
-        }
-
-        case "tool_streaming": {
-          // Append streaming line to the tool's output
-          const msgId = toolMsgMapRef.current.get(event.tool_use_id);
-          if (msgId) {
-            const newLine: ToolOutputLine = {
-              type: event.stream_type,
-              content: event.content,
-            };
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== msgId || !m.toolData) return m;
-                return {
-                  ...m,
-                  toolData: {
-                    ...m.toolData,
-                    outputLines: [...m.toolData.outputLines, newLine],
-                  },
-                };
-              }),
-            );
-          }
           break;
         }
 
         case "tool_result": {
           setStatusDetail(null);
-          const msgId = toolMsgMapRef.current.get(event.tool_use_id);
-          if (msgId) {
-            // Use display_content for TUI if available (richer formatting),
-            // otherwise fall back to content (what the LLM sees)
-            const displayText = event.display_content || event.content;
-            const resultLines: ToolOutputLine[] = displayText
-              ? displayText
-                  .split("\n")
-                  .filter((line) => line.length > 0)
-                  .map((line) => ({
-                    type: (event.is_error ? "stderr" : "stdout") as "stdout" | "stderr",
-                    content: line,
-                  }))
-              : [];
-
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== msgId || !m.toolData) return m;
-                // If there were streaming lines, keep them; otherwise use result content
-                const outputLines = m.toolData.outputLines.length > 0
-                  ? m.toolData.outputLines
-                  : resultLines;
-                return {
-                  ...m,
-                  toolData: {
-                    ...m.toolData,
-                    status: event.is_error ? "error" : "success",
-                    outputLines,
-                    isError: event.is_error,
-                    metadata: event.metadata,
-                  },
-                };
-              }),
-            );
-            toolMsgMapRef.current.delete(event.tool_use_id);
-          } else {
-            // No matching tool_use_start (shouldn't happen, but safety net)
-            if (event.is_error) {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: nextId(),
-                  role: "system",
-                  text: `Tool ${event.name} failed: ${event.content.slice(0, 200)}`,
-                  timestamp: new Date().toISOString(),
-                },
-              ]);
-            }
-          }
           break;
         }
 
-        // ask_user_request handled in the gateway-compatible handler below (line ~432)
-
         case "done": {
           busyRef.current = false;
-          streamingMsgIdRef.current = null;
-          replaceTargetMsgIdRef.current = null;
-          replacingCommittedTextRef.current = false;
-          streamingTextRef.current = "";
-          setStreamingMsgId(null);
-          toolMsgMapRef.current.clear();
           setStatus("idle");
           setStatusDetail(null);
           if (event.usage) {
@@ -402,16 +306,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         }
 
         case "error": {
-          if (cancelledRef.current) {
-            cancelledRef.current = false;
-            break;
-          }
           busyRef.current = false;
-          streamingMsgIdRef.current = null;
-          replaceTargetMsgIdRef.current = null;
-          replacingCommittedTextRef.current = false;
-          streamingTextRef.current = "";
-          setStreamingMsgId(null);
           setStatus("error");
           setStatusDetail(null);
           // Clear any pending prompts (permission/ask_user) — the gateway
@@ -419,15 +314,6 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           // stays mounted and hides input after a disconnect.
           setPendingPermission(null);
           setPendingAskUser(null);
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextId(),
-              role: "system",
-              text: `Error: ${event.content}`,
-              timestamp: new Date().toISOString(),
-            },
-          ]);
           break;
         }
 
@@ -444,60 +330,8 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           // Clear pending prompts
           setPendingPermission(null);
           setPendingAskUser(null);
-          // Mark in-flight tools as canceled
-          if (toolMsgMapRef.current.size > 0) {
-            const canceledIds = new Set(toolMsgMapRef.current.values());
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (!canceledIds.has(m.id) || !m.toolData) return m;
-                return {
-                  ...m,
-                  toolData: { ...m.toolData, status: "canceled" },
-                };
-              }),
-            );
-            toolMsgMapRef.current.clear();
-          }
-          // Handle streaming text
-          if (streamingMsgIdRef.current) {
-            const cancelledText = streamingTextRef.current + " [cancelled]";
-            const cancelledId = streamingMsgIdRef.current;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === cancelledId ? { ...m, text: cancelledText } : m,
-              ),
-            );
-          }
-          streamingMsgIdRef.current = null;
-          replaceTargetMsgIdRef.current = null;
-          replacingCommittedTextRef.current = false;
-          streamingTextRef.current = "";
-          setStreamingMsgId(null);
           setStatus("idle");
           setStatusDetail(null);
-          // Show cancel hint (COCO pattern)
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextId(),
-              role: "system",
-              text: "■ Interrupted — tell Hawky what to do next.",
-              timestamp: new Date().toISOString(),
-            },
-          ]);
-          break;
-        }
-
-        case "system_message": {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextId(),
-              role: "system",
-              text: event.content,
-              timestamp: new Date().toISOString(),
-            },
-          ]);
           break;
         }
 
@@ -536,38 +370,22 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           break;
         }
 
-        // Extended thinking (display in message if desired)
-        case "thinking": {
-          // Currently not displayed in TUI — could add a "thinking" indicator
+        // thinking / queue_message / system_message / user_committed /
+        // permission_result / ask_user_response: fully handled by the
+        // reducer (or deliberate no-ops) — no TUI side effects.
+        default:
           break;
-        }
-
-        // Queue message (agent busy)
-        case "queue_message": {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextId(),
-              role: "system",
-              text: "Message queued — agent is busy.",
-              timestamp: new Date().toISOString(),
-            },
-          ]);
-          break;
-        }
       }
     });
 
     return unsub;
-  }, []);
+  }, [applyEvent, overlayFor, persistSession]);
 
   // sendMessage
   const sendMessage = useCallback((text: string, attachments?: Array<{ base64: string; media_type: string }>) => {
     if (busyRef.current) return;
     busyRef.current = true;
     cancelledRef.current = false; // Reset stale cancel flag from previous turn
-    replaceTargetMsgIdRef.current = null;
-    replacingCommittedTextRef.current = false;
 
     // Show image indicators in TUI display (agent receives clean text + image blocks)
     let displayText = text;
@@ -576,10 +394,18 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       displayText = text ? `${text}\n${labels}` : labels;
     }
 
-    setMessages((prev) => [
-      ...prev,
-      { id: nextId(), role: "user", text: displayText, timestamp: new Date().toISOString() },
-    ]);
+    applyLocal((s) => {
+      // A new turn is starting — clear any stale cancelPending in the
+      // canonical cursor (mirrors web's sendMessage). The subscribe
+      // handler's pre-reduce swallow consumes the first post-cancel error
+      // BEFORE the reducer sees it, so the reducer's flag would otherwise
+      // stay armed across turns and silently suppress an unrelated
+      // abort-worded error next turn.
+      const cleared = s.cursor.cancelPending
+        ? { items: s.items, cursor: { ...s.cursor, cancelPending: false } }
+        : s;
+      return appendUserMessage(cleared, displayText);
+    });
     setStatus("thinking");
     setStatusDetail(null);
 
@@ -601,17 +427,12 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         setStatus("error");
         setStatusDetail(null);
         busyRef.current = false;
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: nextId(),
-            role: "system",
-            text: `Unexpected error: ${err instanceof Error ? err.message : String(err)}`,
-            timestamp: new Date().toISOString(),
-          },
-        ]);
+        applyEvent({
+          type: "system_message",
+          content: `Unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+        });
       });
-  }, []);
+  }, [applyEvent, applyLocal]);
 
   const cancel = useCallback(() => {
     sourceRef.current.cancel();
@@ -633,50 +454,36 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     if (!pending) return;
 
     // Show user's answer as a message
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: nextId(),
-        role: "user",
-        text: answers.join(", "),
-        timestamp: new Date().toISOString(),
-      },
-    ]);
+    applyLocal((s) => appendUserMessage(s, answers.join(", ")));
 
     const requestId = (pending as any)._requestId ?? pending.id;
     void sourceRef.current.resolveAskUser?.(requestId, answers);
     setPendingAskUser(null);
-  }, [pendingAskUser]);
+  }, [applyLocal, pendingAskUser]);
 
   // Clear terminal + reset display (for /clear command)
   // Uses ANSI escape codes like COCO: clear screen + scrollback + cursor home
   const clearMessages = useCallback(() => {
     process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    resetTranscript();
     setMessages([]);
     setStaticBaseline(0);
     setSessionRemountKey((k) => k + 1);
-    streamingMsgIdRef.current = null;
-    replaceTargetMsgIdRef.current = null;
-    replacingCommittedTextRef.current = false;
-    streamingTextRef.current = "";
     setStreamingMsgId(null);
-  }, []);
+  }, [resetTranscript]);
 
   // Start new session (for /new command)
   const newSession = useCallback(() => {
     sourceRef.current.clearHistory();
     process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+    resetTranscript();
     setMessages([]);
     setTokenUsage(null);
     setStatus("idle");
     setStatusDetail(null);
     busyRef.current = false;
-    streamingMsgIdRef.current = null;
-    replaceTargetMsgIdRef.current = null;
-    replacingCommittedTextRef.current = false;
-    streamingTextRef.current = "";
     setStreamingMsgId(null);
-  }, []);
+  }, [resetTranscript]);
 
   // Trigger memory flush (for /flush command)
   const flushMemory = useCallback(() => {
@@ -690,11 +497,8 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
   // Add a system message (for slash command output)
   const addSystemMessage = useCallback((text: string) => {
-    setMessages((prev) => [
-      ...prev,
-      { id: nextId(), role: "system", text, timestamp: new Date().toISOString() },
-    ]);
-  }, []);
+    applyEvent({ type: "system_message", content: text });
+  }, [applyEvent]);
 
   // Fetch MCP status from gateway and display as system message (for /mcp command)
   const fetchMcpStatus = useCallback(() => {
@@ -781,10 +585,14 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         setStaticBaseline(0);
         setSessionRemountKey((k) => k + 1);
         if (history.length > 0) {
-          const displayMsgs = historyToDisplayMessages(history);
+          const state = fromHistory(history);
+          const displayMsgs = deriveDisplayMessages(state);
+          resetTranscript(state);
           allMessagesRef.current = displayMsgs; // Keep full list for input history
-          setMessages(truncateForResume(displayMsgs));
+          hiddenPrefixRef.current = Math.max(0, displayMsgs.length - MAX_RESUME_DISPLAY);
+          publish();
         } else {
+          resetTranscript();
           allMessagesRef.current = [];
           setMessages([]);
         }
@@ -792,17 +600,13 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         setStatus("idle");
         setStatusDetail(null);
         busyRef.current = false;
-        streamingMsgIdRef.current = null;
-        replaceTargetMsgIdRef.current = null;
-        replacingCommittedTextRef.current = false;
-        streamingTextRef.current = "";
         setStreamingMsgId(null);
         addSystemMessage(`Switched to session: ${key}`);
       } catch (err) {
         addSystemMessage(`Failed to switch session: ${err instanceof Error ? err.message : String(err)}`);
       }
     })();
-  }, [addSystemMessage]);
+  }, [addSystemMessage, publish, resetTranscript]);
 
   const sessionId = sourceRef.current.getSessionKey?.() ?? sessionKeyRef.current;
 
