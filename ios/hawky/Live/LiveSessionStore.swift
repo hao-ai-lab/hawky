@@ -311,6 +311,11 @@ final class LiveSessionStore {
     private var voiceprintOpenSpeechWindowID: String?
     private var voiceprintClosedSpeechWindowIDs: [String] = []
     private var voiceprintSpeechWindowCounter = 0
+    /// B1 on-device speaker embedder. Lazily resolved to the CoreML CAM++ model
+    /// when `onDeviceEmbeddingEnabled` gates on and the binary is provisioned;
+    /// nil/unavailable otherwise so the marker path is used. Not wired to any
+    /// default-on behavior — see `resolvedSpeakerEmbedder`.
+    @ObservationIgnored private var speakerEmbedder: SpeakerEmbedder?
     // Maps a Realtime output item_id → the assistant bubble it streams into, so
     // re-delivered transcripts for the same item update one bubble instead of
     // appending a duplicate.
@@ -3440,6 +3445,9 @@ final class LiveSessionStore {
         voiceprintOpenSpeechWindowID = nil
         voiceprintClosedSpeechWindowIDs.removeAll()
         voiceprintSpeechWindowCounter = 0
+        // Drop any cached embedder so a config change (flags off, or a newly
+        // provisioned model) is re-resolved on the next finalized turn.
+        speakerEmbedder = nil
     }
 
     private func handleVoiceprintRealtimeResult(_ result: LiveVoiceprintRealtimeResult) {
@@ -3450,6 +3458,97 @@ final class LiveSessionStore {
                 .map { "\($0.transcriptItemID) \(Int($0.startMs))-\(Int($0.endMs))ms" }
                 .joined(separator: "\n")
         )
+        maybeAttachOnDeviceEmbeddings(finalizedTurns: result.finalizedTurns, sessionKey: result.sessionKey)
+    }
+
+    /// B1: OFF-BY-DEFAULT hook. When the on-device embedding gate is on AND a
+    /// CoreML model is provisioned, produce score_turns params carrying an
+    /// on-device `sampleEmbedding` per turn. When the model is absent (the default
+    /// here), the embedder is nil and each turn stays markers-only — the existing
+    /// server-scored path is unchanged. The A8 `nonce` is intentionally omitted
+    /// (B2 populates it); without it the gateway will not score a client
+    /// embedding, so this path is inert until B2 lands. Never blocks the session.
+    private func maybeAttachOnDeviceEmbeddings(
+        finalizedTurns: [LiveVoiceprintFinalizedTurn],
+        sessionKey: String
+    ) {
+        let cfg = activeConfig ?? config
+        guard let embedder = resolvedSpeakerEmbedder(config: cfg) else { return }
+        let scoreTurns = Self.buildVoiceprintScoreTurns(
+            sessionKey: sessionKey,
+            finalizedTurns: finalizedTurns,
+            embedder: embedder,
+            nonce: nil,
+            pcmForTurn: { _ in
+                // The finalized turn's PCM lives in the local WAV; extracting the
+                // exact [startMs, endMs] window is a device-only concern wired when
+                // the CAM++ model is provisioned. Until then the gate is closed
+                // (embedder unavailable), so this closure is never called in the
+                // default build and each turn degrades to markers-only.
+                nil
+            }
+        )
+        let embedded = scoreTurns.filter { $0.embedding != nil }.count
+        appendVerbose(
+            "Voiceprint on-device embeddings: \(embedded)/\(scoreTurns.count) turns via \(embedder.modelInfo.provider.rawValue)"
+        )
+    }
+
+    // MARK: - B1 on-device speaker embedding
+
+    /// Resolve the on-device speaker embedder for the effective config, or nil to
+    /// use the marker path. This is the single OFF-BY-DEFAULT gate: it returns an
+    /// embedder ONLY when the voiceprint side-channel is on, the new
+    /// `onDeviceEmbeddingEnabled` toggle is on, AND a CoreML CAM++ model is
+    /// actually provisioned (available). When the model is absent — the default
+    /// state in this open repo — it returns nil and the caller keeps sending
+    /// markers, so the session never blocks and default behavior is unchanged.
+    private func resolvedSpeakerEmbedder(config: LiveSessionConfig) -> SpeakerEmbedder? {
+        guard config.voiceprintRealtimeEnabled, config.onDeviceEmbeddingEnabled else {
+            return nil
+        }
+        if let speakerEmbedder, speakerEmbedder.isAvailable {
+            return speakerEmbedder
+        }
+        let embedder = CoreMLSpeakerEmbedder.available()
+        speakerEmbedder = embedder
+        return embedder.isAvailable ? embedder : nil
+    }
+
+    /// Build score_turns turn params for finalized turns, attaching an on-device
+    /// `sampleEmbedding` when `embedder` produced one for that turn's PCM. Any
+    /// per-turn embedding failure degrades that turn to markers-only (no crash,
+    /// never blocks). Pure/static so it is unit-testable without a live session.
+    ///
+    /// `pcmForTurn` yields the finalized turn's mono float PCM + sample rate when
+    /// available on-device; returning nil (e.g. media persistence off, WAV not yet
+    /// flushed) leaves the turn markers-only. B2 later supplies the `nonce`.
+    nonisolated static func buildVoiceprintScoreTurns(
+        sessionKey: String,
+        finalizedTurns: [LiveVoiceprintFinalizedTurn],
+        embedder: SpeakerEmbedder?,
+        nonce: String? = nil,
+        pcmForTurn: (LiveVoiceprintFinalizedTurn) -> (samples: [Float], sampleRate: Double)?
+    ) -> [LiveVoiceprintScoreTurn] {
+        finalizedTurns.map { turn in
+            var embedding: SpeakerEmbedding?
+            if let embedder, embedder.isAvailable, let pcm = pcmForTurn(turn) {
+                embedding = try? embedder.embed(pcm.samples, sampleRate: pcm.sampleRate)
+            }
+            return LiveVoiceprintScoreTurn(
+                sessionKey: turn.sessionKey.isEmpty ? sessionKey : turn.sessionKey,
+                transcriptItemID: turn.transcriptItemID,
+                role: turn.role,
+                text: turn.text,
+                startMs: turn.startMs,
+                endMs: turn.endMs,
+                audioArtifactID: turn.audioArtifactID,
+                audioPath: turn.audioPath,
+                route: turn.route,
+                embedding: embedding,
+                nonce: nonce
+            )
+        }
     }
 
     private func nextVoiceprintSpeechWindowID() -> String {

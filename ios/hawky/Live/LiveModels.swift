@@ -724,6 +724,14 @@ struct LiveSessionConfig: Equatable {
     /// Disabled by default until the owner enrollment and biometric consent UI can
     /// explicitly turn on the voice identity side-channel.
     var voiceprintRealtimeEnabled: Bool = false
+    /// B1 on-device speaker embedding. When on (AND voiceprintRealtimeEnabled is on
+    /// AND a CoreML speaker model is provisioned on the device), finalized turns
+    /// carry an on-device `sampleEmbedding` in the score_turns params so the gateway
+    /// can score a client embedding directly against the owner template — no raw
+    /// audio leaves the phone. Default OFF: with this off (or the model absent) the
+    /// session keeps sending markers and the server scores as before. The default
+    /// app behavior is unchanged.
+    var onDeviceEmbeddingEnabled: Bool = false
     /// Cocktail Party Mode (#627): when on, the Live session runs on-device face
     /// detection on each camera frame, matches against the local person DB, and
     /// proactively recalls known people / enrolls new ones. Off by default; needs
