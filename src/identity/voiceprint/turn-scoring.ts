@@ -12,8 +12,7 @@ import {
 import {
   classifyOwnerSimilarity,
   isUsableEmbeddingVector,
-  meanVector,
-  safeCosineSimilarity,
+  ownerSimilarity,
 } from "./similarity.js";
 import {
   assertVoiceprintConsentAllowsProcessing,
@@ -49,8 +48,11 @@ export function scoreVoiceprintTurnFromEmbedding(
   const thresholds = resolveVoiceprintThresholds(input.thresholds);
   validateTurnScoreEmbeddings(input.ownerEmbeddings, input.sampleEmbedding);
   validateTurnQuality(input.quality);
-  const ownerCentroid = meanVector(input.ownerEmbeddings);
-  const similarity = safeCosineSimilarity(ownerCentroid, input.sampleEmbedding);
+  // Score against the best-matching enrolled clip (max over per-clip cosine)
+  // instead of a single mean centroid, so an owner recorded in a different
+  // condition still matches the enrolled clip captured under a similar one.
+  // For a single enrolled embedding this is identical to the old centroid score.
+  const similarity = ownerSimilarity(input.ownerEmbeddings, input.sampleEmbedding);
   const decision = classifyOwnerSimilarity(similarity, thresholds);
   const confidence = confidenceFromCosineSimilarity(similarity);
   const thresholdUsed = thresholdForDecision(decision, thresholds);

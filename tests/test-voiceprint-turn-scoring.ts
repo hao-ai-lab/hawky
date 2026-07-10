@@ -45,6 +45,27 @@ describe("voiceprint turn scorer", () => {
     expect(result.records.eventParticipation?.actor).toEqual({ type: "owner" });
   });
 
+  test("multi-condition owner matches the best enrolled clip, not the centroid", () => {
+    // e1 and e2 are two enrollment conditions 90 degrees apart; the sample is 8
+    // degrees off e1 (near it) but ~37 degrees off the centroid. Under the old
+    // mean-centroid score this landed at ~0.799 (possible_owner); best-matching
+    // clip recovers ~0.990 (owner_speaking) at the 0.82 accept threshold.
+    const q = [Math.cos((8 * Math.PI) / 180), Math.sin((8 * Math.PI) / 180)];
+    const result = scoreVoiceprintTurnFromEmbedding({
+      turn,
+      ownerEmbeddings: [[1, 0], [0, 1]],
+      sampleEmbedding: q,
+      model,
+      thresholds: { ownerAccept: 0.82, ownerPossible: 0.72 },
+      consent: { ...processingConsent, memoryPromotionAllowed: true },
+      eventId: "event_multi",
+    });
+
+    expect(result.similarity).toBeCloseTo(0.99027, 4);
+    expect(result.decision).toBe("owner_speaking");
+    expect(result.records.eventParticipation?.actor).toEqual({ type: "owner" });
+  });
+
   test("keeps similar-but-under-accept sample diagnostic-only", () => {
     const result = scoreVoiceprintTurnFromEmbedding({
       turn,
@@ -119,15 +140,19 @@ describe("voiceprint turn scorer", () => {
       }),
     ).toThrow(/sample embedding.*dimension 2.*expected 3/);
 
+    // A zero-norm enrolled clip among multiple owner embeddings is still rejected
+    // by per-vector validation. (Under best-matching-clip scoring, [[1,0],[-1,0]]
+    // is a legitimate two-condition enrollment rather than a zero-norm centroid, so
+    // the previous mean-centroid "zero norm" error no longer applies to it.)
     expect(() =>
       scoreVoiceprintTurnFromEmbedding({
         turn,
-        ownerEmbeddings: [[1, 0], [-1, 0]],
+        ownerEmbeddings: [[1, 0], [0, 0]],
         sampleEmbedding: [0, 1],
         model,
         consent: processingConsent,
       }),
-    ).toThrow(/zero norm/);
+    ).toThrow(/owner embedding at index 1 is invalid/);
   });
 
   test("rejected audio quality fails before records are created", () => {

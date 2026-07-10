@@ -12,8 +12,7 @@ import { resolveVoiceprintThresholds } from "./thresholds.js";
 import {
   classifyOwnerSimilarity,
   isUsableEmbeddingVector,
-  meanVector,
-  safeCosineSimilarity,
+  ownerSimilarity,
 } from "./similarity.js";
 
 const DEFAULT_MODEL: VoiceprintModelInfo = {
@@ -49,14 +48,25 @@ export async function scoreVoiceprintManifest(
   const enrollmentEmbeddings = await Promise.all(
     manifest.owner.enrollment.map((source) => loadVoiceprintEmbedding(source, baseDir, model)),
   );
-  validateLoadedEmbeddingVectors(enrollmentEmbeddings, "owner enrollment");
-  const ownerCentroid = meanVector(enrollmentEmbeddings.map((embedding) => embedding.vector));
+  // Score samples with the same best-matching-enrolled-clip aggregation the live
+  // turn-scoring path uses (max over per-clip cosine), so the threshold report
+  // reflects production scoring for multi-clip enrollments instead of a
+  // divergent mean-centroid. For single-clip enrollment this is identical to the
+  // old centroid score, so existing single-clip reports are unchanged.
+  //
+  // ownerSimilarity silently skips dimension-mismatched enrolled clips (mixed dims
+  // would have thrown under the old meanVector centroid), so pin every clip to the
+  // first clip's dimension here to keep that hard-fail invariant and avoid quietly
+  // dropping enrollment conditions from the calibration.
+  const enrollmentDim = enrollmentEmbeddings[0]!.vector.length;
+  validateLoadedEmbeddingVectors(enrollmentEmbeddings, "owner enrollment", enrollmentDim);
+  const ownerVectors = enrollmentEmbeddings.map((embedding) => embedding.vector);
 
   const rows: VoiceprintScoreRow[] = [];
   for (const sample of manifest.samples) {
     const loaded = await loadVoiceprintEmbedding(sample, baseDir, model);
-    validateLoadedEmbeddingVectors([loaded], "sample", ownerCentroid.length);
-    const similarity = safeCosineSimilarity(ownerCentroid, loaded.vector);
+    validateLoadedEmbeddingVectors([loaded], "sample", enrollmentDim);
+    const similarity = ownerSimilarity(ownerVectors, loaded.vector);
     const decision = classifyOwnerSimilarity(similarity, thresholds);
     const assessment = assessDecision(sample.expected, decision);
     rows.push({
@@ -80,7 +90,7 @@ export async function scoreVoiceprintManifest(
     thresholds,
     enrollment: {
       count: enrollmentEmbeddings.length,
-      dim: ownerCentroid.length,
+      dim: enrollmentDim,
     },
     summary: summarizeRows(rows),
     rows,
