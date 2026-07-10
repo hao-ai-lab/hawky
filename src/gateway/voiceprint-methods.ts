@@ -24,11 +24,16 @@ import { createSubsystemLogger } from "../logging/index.js";
 import { getConfigDir } from "../storage/config.js";
 import {
   applyVoiceprintStorageBundle,
+  assessVoiceprintAudioQuality,
+  assessVoiceprintEnrollment,
+  buildEmbeddingBatchRequest,
   buildLiveVoiceprintScoringPlan,
   buildVoiceprintStorageBundle,
+  buildVoiceprintTemplateArtifact,
   buildVoiceprintTranscriptIdentityState,
   buildVoiceprintTranscriptIdentityStatePatches,
   countVoiceprintStorageSnapshot,
+  DEFAULT_OWNER_VOICEPRINT_ENROLLMENT_MIN_SPEECH_MS,
   DEFAULT_VOICEPRINT_AUDIO_QUALITY_THRESHOLDS,
   deviceAttestedVoiceprintQuality,
   emptyVoiceprintStorageSnapshot,
@@ -38,12 +43,18 @@ import {
   readEncryptedVoiceprintTemplateArtifact,
   resolveVoiceprintConsent,
   resolveVoiceprintThresholds,
+  runEmbeddingSidecar,
   runLiveVoiceprintScoringJobs,
   sameVoiceprintModel,
   sliceWavAudio,
+  tombstoneVoiceprintTemplate,
   voiceprintTemplateFileRefFromSource,
   voiceprintConsentAllowsProcessing,
+  writeEncryptedVoiceprintTemplateArtifact,
   markVoiceprintTranscriptStateError,
+  type VoiceprintAudioQualityStatus,
+  type VoiceprintEnrollmentAssessment,
+  type VoiceprintEnrollmentSource,
   type VoiceprintStorageBundle,
   type VoiceprintStorageCounts,
   type VoiceprintStorageSnapshot,
@@ -53,6 +64,7 @@ import {
   type LiveVoiceprintScoringPlan,
   type LiveVoiceprintScoringPlanRun,
   type LiveVoiceprintScoringPlanRunStatus,
+  type VoiceprintEmbeddingResponse,
   type VoiceprintTranscriptIdentityStatePatch,
   type VoiceprintAudioQualityThresholds,
   type VoiceprintConsentSnapshot,
@@ -60,6 +72,7 @@ import {
   type VoiceprintTemplateArtifact,
   type VoiceprintTemplateFileRef,
   type VoiceprintTemplateFileSource,
+  type VoiceprintTemplateStorageRef,
   type VoiceprintThresholds,
   type VoiceprintTranscriptIdentityState,
 } from "../identity/voiceprint/index.js";
@@ -441,6 +454,193 @@ export function registerVoiceprintMethods(
       throw voiceprintMethodError(error);
     }
   });
+
+  // ── Owner voiceprint enrollment lifecycle ────────────────────────────────
+  //
+  // These three RPCs manage the OWNER template that `score_turns` resolves. They
+  // all read/write the SAME encrypted, local-only store that `score_turns`'
+  // owner-template resolver reads (`scoring.ownerTemplateFileSource`), so an
+  // enrolled owner immediately becomes the template scoring uses, and a deleted
+  // one immediately stops resolving. They are inert unless a live-scoring config
+  // with an `ownerTemplateFileSource` is present — this changes NO feature-flag
+  // posture (`live_scoring.enabled` / `voiceprintRealtimeEnabled` stay as-is).
+  //
+  // KEY HANDLING: the store is AES-256-GCM encrypted (see template-store.ts). The
+  // 32-byte key lives in the key file at `ownerTemplateFileSource.keyPath` (a path
+  // under the config root, e.g. ~/.hawky/state/voiceprint/owner-template.key.json),
+  // resolved from config by `resolveVoiceprintLiveScoringConfigFromConfig`. LOSING
+  // THAT KEY FILE MEANS THE OWNER MUST RE-ENROLL — the encrypted template can no
+  // longer be decrypted. The raw key and every embedding are treated as secrets:
+  // they are never logged and never echoed in RPC responses.
+
+  server.registerMethod("identity.voiceprint.enroll_owner", async (conn, params) => {
+    const input = parseEnrollOwnerParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const config = requireEnrollmentScoringConfig(scoring);
+    assertEnrollmentConsent(config, input.consent);
+
+    try {
+      const embedded = await embedEnrollmentSources({
+        sessionKey,
+        sources: input.sources,
+        scoring: config,
+        audioArtifacts,
+      });
+      const assessment = assessVoiceprintEnrollment({
+        sources: embedded.sources,
+        minSpeechMs: input.minSpeechMs,
+      });
+      if (assessment.status !== "accepted") {
+        log.info("identity.voiceprint.enroll_owner", {
+          session_key: sessionKey,
+          status: "rejected",
+          reasons: assessment.reasons,
+          source_count: assessment.sourceCount,
+          speech_ms: assessment.speechMs,
+        });
+        return serializeEnrollmentRejection(sessionKey, assessment);
+      }
+
+      const stored = writeOwnerTemplateFromSources({
+        scoring: config,
+        model: embedded.model,
+        sources: embedded.sources,
+        minSpeechMs: input.minSpeechMs,
+      });
+      log.info("identity.voiceprint.enroll_owner", {
+        session_key: sessionKey,
+        status: "enrolled",
+        template_ref: stored.templateRef,
+        source_count: assessment.sourceCount,
+        speech_ms: assessment.speechMs,
+      });
+      return serializeEnrollmentSuccess(sessionKey, assessment, stored);
+    } catch (error) {
+      throw voiceprintMethodError(error);
+    }
+  });
+
+  server.registerMethod("identity.voiceprint.add_enrollment_clip", async (conn, params) => {
+    const input = parseAddEnrollmentClipParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const config = requireEnrollmentScoringConfig(scoring);
+    assertEnrollmentConsent(config, input.consent);
+
+    try {
+      const existing = readOwnerTemplateArtifactForEnrollment(config);
+      const embedded = await embedEnrollmentSources({
+        sessionKey,
+        sources: [input.source],
+        scoring: config,
+        audioArtifacts,
+      });
+      if (!sameVoiceprintModel(existing.artifact.template.model, embedded.model)) {
+        throw new MethodError(
+          "FAILED_PRECONDITION",
+          `New enrollment clip model ${formatVoiceprintModel(embedded.model)} does not match owner template model ${formatVoiceprintModel(existing.artifact.template.model)}.`,
+        );
+      }
+
+      const mergedSources = [
+        ...existing.sources,
+        ...embedded.sources,
+      ];
+      const assessment = assessVoiceprintEnrollment({
+        sources: mergedSources,
+        minSpeechMs: input.minSpeechMs,
+      });
+      if (assessment.status !== "accepted") {
+        // The single new clip failed quality (or the merged set is somehow below
+        // the floor): reject and leave the stored template untouched.
+        log.info("identity.voiceprint.add_enrollment_clip", {
+          session_key: sessionKey,
+          status: "rejected",
+          reasons: assessment.reasons,
+        });
+        return serializeEnrollmentRejection(sessionKey, assessment);
+      }
+
+      const stored = writeOwnerTemplateFromSources({
+        scoring: config,
+        model: existing.artifact.template.model,
+        sources: mergedSources,
+        minSpeechMs: input.minSpeechMs,
+        createdAt: existing.artifact.template.enrollment.createdAt,
+      });
+      log.info("identity.voiceprint.add_enrollment_clip", {
+        session_key: sessionKey,
+        status: "enrolled",
+        template_ref: stored.templateRef,
+        source_count: assessment.sourceCount,
+        speech_ms: assessment.speechMs,
+      });
+      return serializeEnrollmentSuccess(sessionKey, assessment, stored);
+    } catch (error) {
+      throw voiceprintMethodError(error);
+    }
+  });
+
+  server.registerMethod("identity.voiceprint.delete_owner_template", (conn, params) => {
+    const input = parseDeleteOwnerTemplateParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const config = requireEnrollmentScoringConfig(scoring);
+
+    try {
+      const removed = deleteOwnerTemplate(config, input.deletedAt);
+      log.info("identity.voiceprint.delete_owner_template", {
+        session_key: sessionKey,
+        removed: removed.removed,
+        template_ref: removed.templateRef,
+      });
+      return {
+        ok: true as const,
+        sessionKey,
+        removed: removed.removed,
+        templateRef: removed.templateRef,
+      };
+    } catch (error) {
+      throw voiceprintMethodError(error);
+    }
+  });
+}
+
+interface EnrollmentAudioSourceInput {
+  audioArtifactId?: string;
+  audioPath?: string;
+  startMs?: number;
+  endMs?: number;
+  route?: string;
+}
+
+interface EnrollOwnerParams {
+  sessionKey?: string;
+  sources: EnrollmentAudioSourceInput[];
+  consent?: Partial<VoiceprintConsentSnapshot>;
+  minSpeechMs?: number;
+}
+
+interface AddEnrollmentClipParams {
+  sessionKey?: string;
+  source: EnrollmentAudioSourceInput;
+  consent?: Partial<VoiceprintConsentSnapshot>;
+  minSpeechMs?: number;
+}
+
+interface DeleteOwnerTemplateParams {
+  sessionKey?: string;
+  deletedAt?: string;
+}
+
+interface EmbeddedEnrollmentSources {
+  sources: VoiceprintEnrollmentSource[];
+  model: VoiceprintModelInfo;
+}
+
+interface StoredOwnerTemplate {
+  templateRef: string;
+  filePath: string;
+  sourceCount: number;
+  ownerEmbeddingCount: number;
 }
 
 interface ScoreTurnsParams {
@@ -610,6 +810,97 @@ function parseAudioArtifactRegisterParams(params: unknown): VoiceprintAudioArtif
     ),
     route: optionalString(p.route),
     registeredAt: typeof p.registeredAt === "string" ? p.registeredAt : undefined,
+  };
+}
+
+/**
+ * Resolve the enrollment voiced-speech floor for an RPC.
+ *
+ * The client may RAISE the biometric floor but never lower it: the server-side
+ * `DEFAULT_OWNER_VOICEPRINT_ENROLLMENT_MIN_SPEECH_MS` (30s) is a hard minimum, so a
+ * client passing `{minSpeechMs: 0}` cannot enroll the owner from an arbitrarily short
+ * clip. Returns `undefined` when the client did not supply a value so the assessment /
+ * artifact builder apply the default themselves (keeping a single source of truth).
+ */
+function clampEnrollmentMinSpeechMs(minSpeechMs: number | undefined): number | undefined {
+  if (minSpeechMs === undefined) {
+    return undefined;
+  }
+  return Math.max(DEFAULT_OWNER_VOICEPRINT_ENROLLMENT_MIN_SPEECH_MS, minSpeechMs);
+}
+
+function parseEnrollOwnerParams(params: unknown): EnrollOwnerParams {
+  const p = objectOrUndefined(params);
+  if (!p || !Array.isArray(p.sources)) {
+    throw new MethodError("INVALID_REQUEST", "sources must be an array.");
+  }
+  if (p.sources.length === 0) {
+    throw new MethodError("INVALID_REQUEST", "enroll_owner requires at least one source.");
+  }
+  return {
+    sessionKey: typeof p.sessionKey === "string" ? p.sessionKey : undefined,
+    sources: p.sources.map(parseEnrollmentAudioSourceInput),
+    consent: objectOrUndefined(p.consent) as Partial<VoiceprintConsentSnapshot> | undefined,
+    minSpeechMs: clampEnrollmentMinSpeechMs(
+      optionalNonNegativeFiniteNumber(p.minSpeechMs ?? p.min_speech_ms, "minSpeechMs"),
+    ),
+  };
+}
+
+function parseAddEnrollmentClipParams(params: unknown): AddEnrollmentClipParams {
+  const p = objectOrUndefined(params);
+  if (!p) {
+    throw new MethodError("INVALID_REQUEST", "params required.");
+  }
+  const rawSource = p.source ?? p.clip;
+  if (!rawSource || typeof rawSource !== "object" || Array.isArray(rawSource)) {
+    throw new MethodError("INVALID_REQUEST", "source must be an object.");
+  }
+  return {
+    sessionKey: typeof p.sessionKey === "string" ? p.sessionKey : undefined,
+    source: parseEnrollmentAudioSourceInput(rawSource),
+    consent: objectOrUndefined(p.consent) as Partial<VoiceprintConsentSnapshot> | undefined,
+    minSpeechMs: clampEnrollmentMinSpeechMs(
+      optionalNonNegativeFiniteNumber(p.minSpeechMs ?? p.min_speech_ms, "minSpeechMs"),
+    ),
+  };
+}
+
+function parseDeleteOwnerTemplateParams(params: unknown): DeleteOwnerTemplateParams {
+  const p = objectOrUndefined(params);
+  return {
+    sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
+    deletedAt: typeof p?.deletedAt === "string" ? p.deletedAt : undefined,
+  };
+}
+
+function parseEnrollmentAudioSourceInput(value: unknown): EnrollmentAudioSourceInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MethodError("INVALID_REQUEST", "enrollment source must be an object.");
+  }
+  const source = value as Record<string, unknown>;
+  const audioArtifactId = optionalString(source.audioArtifactId ?? source.audio_artifact_id);
+  const audioPath = optionalString(source.audioPath ?? source.audio_path);
+  if (!audioArtifactId && !audioPath) {
+    throw new MethodError(
+      "INVALID_REQUEST",
+      "enrollment source requires audioArtifactId or audioPath.",
+    );
+  }
+  const startMs = optionalNonNegativeFiniteNumber(source.startMs ?? source.start_ms, "startMs");
+  const endMs = optionalNonNegativeFiniteNumber(source.endMs ?? source.end_ms, "endMs");
+  if ((startMs === undefined) !== (endMs === undefined)) {
+    throw new MethodError("INVALID_REQUEST", "enrollment source requires both startMs and endMs.");
+  }
+  if (startMs !== undefined && endMs !== undefined && endMs <= startMs) {
+    throw new MethodError("INVALID_REQUEST", "enrollment source endMs must be greater than startMs.");
+  }
+  return {
+    audioArtifactId,
+    audioPath,
+    startMs,
+    endMs,
+    route: optionalString(source.route),
   };
 }
 
@@ -1107,6 +1398,345 @@ function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
     "FAILED_PRECONDITION",
     "Voiceprint live scorer requires an owner voice template or owner embeddings.",
   );
+}
+
+// ── Enrollment helpers ─────────────────────────────────────────────────────
+
+/**
+ * The owner enrollment RPCs require a file-backed encrypted template source so
+ * enroll -> score wiring goes through the same store. Ad-hoc `ownerEmbeddings` /
+ * inline `ownerTemplateArtifact` scoring configs have no place to persist an
+ * enrollment, so they are rejected here (this is intentional: enrollment is only
+ * meaningful against the durable encrypted store).
+ */
+function requireEnrollmentScoringConfig(
+  scoring: VoiceprintLiveScoringConfig | undefined,
+): VoiceprintLiveScoringConfig & { ownerTemplateFileSource: VoiceprintTemplateFileSource } {
+  if (!scoring) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      "Voiceprint enrollment is not configured on this gateway.",
+    );
+  }
+  if (!scoring.ownerTemplateFileSource) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      "Voiceprint enrollment requires a file-backed encrypted owner template store (voiceprint.live_scoring.owner_template).",
+    );
+  }
+  return scoring as VoiceprintLiveScoringConfig & {
+    ownerTemplateFileSource: VoiceprintTemplateFileSource;
+  };
+}
+
+/** Enrollment is a biometric capture: consent must allow capture + biometric. */
+function assertEnrollmentConsent(
+  scoring: VoiceprintLiveScoringConfig,
+  clientConsent: Partial<VoiceprintConsentSnapshot> | undefined,
+): void {
+  const consent = restrictVoiceprintConsent(scoring.consent, clientConsent);
+  if (!voiceprintConsentAllowsProcessing(consent)) {
+    throw new MethodError(
+      "FORBIDDEN",
+      `Voiceprint enrollment requires capture and biometric consent (${consent.reason ?? "consent_denied"}).`,
+    );
+  }
+}
+
+/**
+ * Resolve each enrollment audio source to its allowed path (registered artifact
+ * or client audioPath under allowedAudioRoots), run the sidecar to get an
+ * embedding + measured speechMs, and quality-gate the clip with
+ * `assessVoiceprintAudioQuality`. A clip whose quality assessment does not allow
+ * enrollment (templateLearning use) is carried into the assessment as
+ * `qualityStatus: "rejected"` so `assessVoiceprintEnrollment` rejects it — the
+ * template is only built from clips that clear quality AND clear 30s total voiced
+ * speech.
+ */
+async function embedEnrollmentSources(input: {
+  sessionKey: string;
+  sources: readonly EnrollmentAudioSourceInput[];
+  scoring: VoiceprintLiveScoringConfig;
+  audioArtifacts: VoiceprintAudioArtifactStore;
+}): Promise<EmbeddedEnrollmentSources> {
+  if (input.sources.length === 0) {
+    throw new MethodError("INVALID_REQUEST", "Voiceprint enrollment requires at least one audio source.");
+  }
+
+  const embedded: VoiceprintEnrollmentSource[] = [];
+  let model: VoiceprintModelInfo | undefined;
+  const seenArtifactIds = new Set<string>();
+
+  for (const [index, source] of input.sources.entries()) {
+    const registered = source.audioArtifactId
+      ? input.audioArtifacts.resolve({
+          sessionKey: input.sessionKey,
+          audioArtifactId: source.audioArtifactId,
+          startMs: source.startMs,
+          endMs: source.endMs,
+        })
+      : undefined;
+    const rawAudioPath = registered?.audioPath ?? source.audioPath;
+    if (!rawAudioPath) {
+      throw new MethodError(
+        "INVALID_REQUEST",
+        `Voiceprint enrollment source at index ${index} requires a registered audioArtifactId or audioPath.`,
+      );
+    }
+    const audioPath = resolveAllowedAudioPath(rawAudioPath, input.scoring.allowedAudioRoots);
+    const requestStartMs = registered?.requestStartMs ?? source.startMs;
+    const requestEndMs = registered?.requestEndMs ?? source.endMs;
+
+    // artifactId identifies the enrollment source; must be unique + stable.
+    const artifactId = source.audioArtifactId ?? `enroll_${index}_${audioPath}`;
+    if (seenArtifactIds.has(artifactId)) {
+      throw new MethodError(
+        "INVALID_REQUEST",
+        `Duplicate voiceprint enrollment audio source: ${artifactId}.`,
+      );
+    }
+    seenArtifactIds.add(artifactId);
+
+    // Quality-gate on the ACTUAL server-side audio (never a client attestation).
+    const audio = sliceWavAudio(await readWavFile(audioPath), requestStartMs, requestEndMs);
+    const quality = assessVoiceprintAudioQuality(
+      audio.samples,
+      audio.sampleRate,
+      input.scoring.qualityThresholds,
+    );
+    const qualityStatus: VoiceprintAudioQualityStatus = quality.allowedUses.templateLearning
+      ? quality.status
+      : "rejected";
+
+    // Embed via the sidecar. speechMs from the sidecar (if reported) is the voiced
+    // duration used for the 30s total; fall back to the clip duration otherwise.
+    const response = await runEmbeddingSidecar({
+      sidecar: input.scoring.sidecar,
+      request: buildEmbeddingBatchRequest([
+        {
+          id: `enroll-${index}`,
+          audioPath,
+          startMs: requestStartMs,
+          endMs: requestEndMs,
+          targetSampleRate: input.scoring.targetSampleRate,
+          route: source.route ?? registered?.route,
+        },
+      ]),
+    });
+    const item = firstEmbeddingResponse(response.responses, `enroll-${index}`);
+    model ??= item.model;
+    if (!sameVoiceprintModel(model, item.model)) {
+      throw new MethodError(
+        "FAILED_PRECONDITION",
+        `Voiceprint enrollment clips produced inconsistent models (${formatVoiceprintModel(model)} vs ${formatVoiceprintModel(item.model)}).`,
+      );
+    }
+
+    embedded.push({
+      artifactId,
+      embedding: item.embedding,
+      speechMs: enrollmentSpeechMs(item, audio.durationMs),
+      route: source.route ?? (registered?.route as VoiceprintEnrollmentSource["route"]),
+      qualityStatus,
+    });
+  }
+
+  if (!model) {
+    throw new MethodError("FAILED_PRECONDITION", "Voiceprint enrollment produced no embedding model.");
+  }
+  // Reject up front if the sidecar's model does not match the scorer's expected
+  // model. Otherwise enrollment would report success while storing a template
+  // that resolveOwnerVoiceprintTemplate always rejects at score time (its guard
+  // at the score-plan resolver), leaving the owner stored-but-unresolvable.
+  if (input.scoring.expectedModel && !sameVoiceprintModel(model, input.scoring.expectedModel)) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      `Voiceprint enrollment model ${formatVoiceprintModel(model)} does not match expected scorer model ${formatVoiceprintModel(input.scoring.expectedModel)}.`,
+    );
+  }
+  return { sources: embedded, model };
+}
+
+function firstEmbeddingResponse(
+  responses: readonly VoiceprintEmbeddingResponse[],
+  id: string,
+): VoiceprintEmbeddingResponse {
+  const found = responses.find((response) => response.id === id) ?? responses[0];
+  if (!found) {
+    throw new MethodError("FAILED_PRECONDITION", "Voiceprint enrollment sidecar returned no embedding.");
+  }
+  return found;
+}
+
+function enrollmentSpeechMs(
+  response: VoiceprintEmbeddingResponse,
+  fallbackDurationMs: number,
+): number {
+  const speechMs = response.audio?.speechMs;
+  if (typeof speechMs === "number" && Number.isFinite(speechMs) && speechMs >= 0) {
+    return speechMs;
+  }
+  return Math.max(0, fallbackDurationMs);
+}
+
+/**
+ * Build the encrypted owner-template artifact from quality-passed sources and write
+ * it to the SAME file `score_turns` resolves. The key file is created on first
+ * enrollment only when the config opted in (`create_key_if_missing`).
+ */
+function writeOwnerTemplateFromSources(input: {
+  scoring: VoiceprintLiveScoringConfig & { ownerTemplateFileSource: VoiceprintTemplateFileSource };
+  model: VoiceprintModelInfo;
+  sources: readonly VoiceprintEnrollmentSource[];
+  minSpeechMs?: number;
+  createdAt?: string;
+}): StoredOwnerTemplate {
+  const fileRef = voiceprintTemplateFileRefFromSource(input.scoring.ownerTemplateFileSource);
+  const storage: VoiceprintTemplateStorageRef = {
+    templateUri: `local-voiceprint://owner/${fileRef.filePath}`,
+    encrypted: true,
+    localOnly: true,
+    keyRef: fileRef.key.keyRef,
+  };
+  const artifact = buildVoiceprintTemplateArtifact({
+    model: input.model,
+    sources: input.sources,
+    storage,
+    thresholds: input.scoring.thresholds,
+    createdAt: input.createdAt,
+    minSpeechMs: input.minSpeechMs,
+  });
+  writeEncryptedVoiceprintTemplateArtifact({
+    filePath: fileRef.filePath,
+    artifact,
+    key: fileRef.key,
+  });
+  return {
+    templateRef: artifact.template.id,
+    filePath: fileRef.filePath,
+    sourceCount: artifact.template.enrollment.sourceCount,
+    ownerEmbeddingCount: ownerEmbeddingsFromVoiceprintTemplateArtifact(artifact).length,
+  };
+}
+
+/** Read the existing owner artifact + reconstruct its per-clip enrollment sources. */
+function readOwnerTemplateArtifactForEnrollment(
+  scoring: VoiceprintLiveScoringConfig & { ownerTemplateFileSource: VoiceprintTemplateFileSource },
+): { artifact: VoiceprintTemplateArtifact; sources: VoiceprintEnrollmentSource[] } {
+  const fileRef = voiceprintTemplateFileRefFromSource(scoring.ownerTemplateFileSource);
+  if (!existsSync(fileRef.filePath)) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      "Voiceprint owner template does not exist; enroll an owner before adding a clip.",
+    );
+  }
+  const artifact = readEncryptedVoiceprintTemplateArtifact(fileRef);
+  if (artifact.template.deletedAt) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      "Voiceprint owner template has been deleted; enroll an owner before adding a clip.",
+    );
+  }
+  // The encrypted artifact stores a single centroid over all enrolled clips (the
+  // per-clip vectors are intentionally NOT retained — biometric minimization). To
+  // grow the multi-clip enrollment we carry the existing centroid forward as one
+  // synthetic prior source (with its recorded speechMs) and append the new clip.
+  const priorSpeechMs = artifact.template.enrollment.speechMs;
+  const perPriorSpeechMs =
+    artifact.template.enrollment.sourceCount > 0
+      ? priorSpeechMs / artifact.template.enrollment.sourceCount
+      : priorSpeechMs;
+  const sources: VoiceprintEnrollmentSource[] = [
+    {
+      artifactId: `owner_prior_${artifact.template.id}`,
+      embedding: artifact.centroid.slice(),
+      speechMs: perPriorSpeechMs,
+      // The stored template only kept its enrollment "quality" grade (good/marginal);
+      // both are enrollment-eligible (only "rejected" blocks), so carry the prior
+      // forward with a non-rejected audio-quality status of the matching grade.
+      qualityStatus:
+        artifact.template.enrollment.quality === "good" ? "accepted" : "marginal",
+    },
+  ];
+  return { artifact, sources };
+}
+
+/** Tombstone + remove the owner template file. Idempotent. */
+function deleteOwnerTemplate(
+  scoring: VoiceprintLiveScoringConfig & { ownerTemplateFileSource: VoiceprintTemplateFileSource },
+  deletedAt?: string,
+): { removed: boolean; templateRef?: string } {
+  const source = scoring.ownerTemplateFileSource;
+  // Deletion only needs the template file path — it never reads the encrypted
+  // contents to erase them. Resolve that path WITHOUT touching the encryption key so
+  // erasure works even when the key file is missing/corrupt (right-to-erasure and
+  // idempotency must not depend on a decryptable store). If the template file never
+  // existed, this is a no-op.
+  if (!existsSync(source.filePath)) {
+    return { removed: false };
+  }
+  let templateRef: string | undefined;
+  try {
+    // Best-effort: if the key is present and the store is readable, tombstone-validate
+    // the template (the withdrawal primitive later phases build on) to recover its id
+    // for the audit log. We do not persist the tombstone since the file is then removed.
+    const fileRef = voiceprintTemplateFileRefFromSource({ ...source, createKeyIfMissing: false });
+    const artifact = readEncryptedVoiceprintTemplateArtifact(fileRef);
+    tombstoneVoiceprintTemplate(artifact.template, deletedAt);
+    templateRef = artifact.template.id;
+  } catch {
+    // Even an unreadable/corrupt store — or one whose key file is gone — must be
+    // removable so the owner cannot be resolved afterward; fall through to unlink.
+  }
+  unlinkSync(source.filePath);
+  return { removed: true, templateRef };
+}
+
+function serializeEnrollmentSuccess(
+  sessionKey: string,
+  assessment: VoiceprintEnrollmentAssessment,
+  stored: StoredOwnerTemplate,
+): {
+  ok: true;
+  sessionKey: string;
+  status: "accepted";
+  templateRef: string;
+  speechMs: number;
+  sourceCount: number;
+  ownerEmbeddingCount: number;
+  quality: VoiceprintEnrollmentAssessment["quality"];
+} {
+  return {
+    ok: true,
+    sessionKey,
+    status: "accepted",
+    templateRef: stored.templateRef,
+    speechMs: assessment.speechMs,
+    sourceCount: assessment.sourceCount,
+    ownerEmbeddingCount: stored.ownerEmbeddingCount,
+    quality: assessment.quality,
+  };
+}
+
+function serializeEnrollmentRejection(
+  sessionKey: string,
+  assessment: VoiceprintEnrollmentAssessment,
+): {
+  ok: false;
+  sessionKey: string;
+  status: "rejected";
+  reasons: string[];
+  speechMs: number;
+  sourceCount: number;
+} {
+  return {
+    ok: false,
+    sessionKey,
+    status: "rejected",
+    reasons: assessment.reasons,
+    speechMs: assessment.speechMs,
+    sourceCount: assessment.sourceCount,
+  };
 }
 
 function ownerTemplateRefForArtifact(
