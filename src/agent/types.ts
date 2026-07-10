@@ -842,6 +842,19 @@ export interface HawkyConfig {
       };
       target_sample_rate?: number;
       timeout_ms?: number;
+      /**
+       * TRUST BOUNDARY opt-in. When true, a score_turns request MAY supply a
+       * per-turn client-computed voiceprint embedding (e.g. from on-device iOS)
+       * and have it scored DIRECTLY against the owner template — without the
+       * server ever seeing the biometric audio or re-deriving the vector via the
+       * sidecar. This deliberately moves the trust boundary: the server can no
+       * longer verify the audio actually produced that vector; it trusts the
+       * authenticated device. Default false: when false, a client-supplied
+       * embedding is IGNORED for direct scoring (the turn falls back to the
+       * audio/sidecar path). The client embedding must still match the owner
+       * template's model+version, or the turn is rejected.
+       */
+      accept_client_embeddings?: boolean;
     };
   };
   /** Channel adapters for messaging app integration (Slack, iMessage, etc.). */

@@ -233,6 +233,36 @@ export function allowedUsesForQualityStatus(
   };
 }
 
+/**
+ * Quality assessment for a turn whose embedding was computed ON-DEVICE and whose
+ * biometric audio the server never receives. There are no server-side audio
+ * samples to measure, so no server-side quality gating is possible: the device is
+ * trusted (under the `acceptClientEmbeddings` opt-in) to have gated capture
+ * quality itself. This yields an "accepted" assessment so the shared scoring
+ * path (which requires `allowedUses.scoring`) can run on the client embedding.
+ */
+export function deviceAttestedVoiceprintQuality(
+  thresholds: VoiceprintAudioQualityThresholds = DEFAULT_VOICEPRINT_AUDIO_QUALITY_THRESHOLDS,
+): VoiceprintAudioQualityAssessment {
+  return {
+    status: "accepted",
+    reasons: [],
+    metrics: {
+      durationMs: Number.NaN,
+      sampleRate: Number.NaN,
+      sampleCount: 0,
+      rms: Number.NaN,
+      peak: Number.NaN,
+      mean: Number.NaN,
+      dynamicRange: Number.NaN,
+      clippingRatio: Number.NaN,
+      zeroCrossingRate: Number.NaN,
+    },
+    thresholds,
+    allowedUses: allowedUsesForQualityStatus("accepted"),
+  };
+}
+
 export function summarizeVoiceprintAudioQuality(
   assessment: VoiceprintAudioQualityAssessment,
 ): Pick<VoiceprintAudioQualityAssessment, "status" | "reasons" | "metrics"> {

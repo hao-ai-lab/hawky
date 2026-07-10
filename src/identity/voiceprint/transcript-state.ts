@@ -38,7 +38,8 @@ export type VoiceprintTranscriptIdentityErrorCode =
 export type VoiceprintTranscriptIdentitySkipReason =
   | LiveVoiceprintSkipReason
   | LiveVoiceprintSkippedScoringJob["reason"]
-  | "missing_audio_artifact";
+  | "missing_audio_artifact"
+  | "client_embedding_rejected";
 
 export interface VoiceprintTranscriptIdentityState {
   version: 1;
