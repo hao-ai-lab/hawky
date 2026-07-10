@@ -793,6 +793,20 @@ export interface HawkyConfig {
       enabled?: boolean;
       sink_path?: string;
     };
+    /**
+     * A9 reviewed voiceprint -> memory-candidate BRIDGE. OFF by default. When
+     * `enabled` is not true, memory distillation and the person snapshot behave
+     * BYTE-FOR-BYTE as before: nothing consumes voiceprint identity signals. When
+     * enabled, the opt-in gateway RPC `identity.voiceprint.bridge_memory_candidate`
+     * maps a reviewed `VoiceprintTurnRecords` into a single, fail-closed
+     * `MemoryCandidate` (durable ONLY for a strong, consented, confirmed owner turn;
+     * quarantined otherwise). It carries scalars + ids + tags only — never a
+     * vector/audio/key. The bridge is a PURE mapping; enabling the flag does NOT
+     * change the default distillation path.
+     */
+    memory_bridge?: {
+      enabled?: boolean;
+    };
     live_scoring?: {
       enabled?: boolean;
       /**

@@ -28,6 +28,7 @@ import {
   buildVoiceprintConsentGrant,
   buildVoiceprintConsentWithdrawal,
   effectiveConsentAllowsProcessing,
+  voiceprintTurnRecordsToMemoryCandidate,
   hashVoiceprintSessionRef,
   isVoiceprintConsentExpired,
   type VoiceprintAuditOp,
@@ -105,8 +106,25 @@ import {
   type VoiceprintThresholds,
   type VoiceprintTranscriptIdentityState,
   type VoiceprintCohort,
+  type VoiceprintTurnRecords,
 } from "../identity/voiceprint/index.js";
 import type { EmbeddingSidecarCommand } from "../identity/voiceprint/index.js";
+
+/**
+ * A9 reviewed-voiceprint -> memory-candidate BRIDGE wiring. OPT-IN and NO-OP BY
+ * DEFAULT: when `enabled` is not true (the default), the bridge RPC refuses with a
+ * clear FAILED_PRECONDITION and NOTHING in the distillation / person-snapshot path
+ * changes. Resolved from `config.voiceprint.memory_bridge`.
+ */
+export interface VoiceprintMemoryBridgeGatewayConfig {
+  enabled: boolean;
+}
+
+export function resolveVoiceprintMemoryBridgeConfigFromConfig(
+  config: HawkyConfig,
+): VoiceprintMemoryBridgeGatewayConfig {
+  return { enabled: config.voiceprint?.memory_bridge?.enabled === true };
+}
 
 const log = createSubsystemLogger("gateway/voiceprint-methods");
 const VOICEPRINT_STORAGE_FILE_MODE = 0o600;
@@ -739,6 +757,10 @@ export function registerVoiceprintMethods(
   // lifecycle so wiring it changes nothing for existing call sites: it records +
   // audits, but does not gate enroll/score unless `enforceConsentLedger` is set.
   lifecycle: VoiceprintLifecycle = createInMemoryVoiceprintLifecycle(),
+  // A9 memory bridge. OPT-IN, NO-OP BY DEFAULT: disabled unless config sets
+  // `voiceprint.memory_bridge.enabled: true`. Disabled => the bridge RPC refuses and
+  // the default distillation / person-snapshot path is byte-for-byte unchanged.
+  memoryBridge: VoiceprintMemoryBridgeGatewayConfig = { enabled: false },
 ): void {
   server.registerMethod("identity.voiceprint.realtime_event", async (conn, params) => {
     const input = parseRealtimeEventParams(params);
@@ -1247,6 +1269,53 @@ export function registerVoiceprintMethods(
         op: "reembed",
         outcome: "error",
       });
+      throw voiceprintMethodError(error);
+    }
+  });
+
+  // ── A9 reviewed voiceprint -> memory-candidate BRIDGE (opt-in, no-op default) ──
+  //
+  // Maps a reviewed `VoiceprintTurnRecords` into a single, FAIL-CLOSED
+  // `MemoryCandidate`: durable ONLY for a strong, consented, confirmed owner turn;
+  // QUARANTINED ("unreviewed_identity_signal", durableMemory=false) otherwise. The
+  // mapping is pure and never throws (a bridge fault degrades to a quarantined
+  // candidate). The candidate carries scalars + ids + tags only — never a
+  // vector/audio/key (enforced by assertVoiceprintMemoryCandidateHasNoSecrets inside
+  // the bridge). DISABLED BY DEFAULT: refuses unless `voiceprint.memory_bridge.enabled`
+  // is true, so the default distillation path is byte-for-byte unchanged.
+  server.registerMethod("identity.voiceprint.bridge_memory_candidate", (conn, params) => {
+    if (!memoryBridge.enabled) {
+      throw new MethodError(
+        "FAILED_PRECONDITION",
+        "Voiceprint memory bridge is disabled (set voiceprint.memory_bridge.enabled to enable).",
+      );
+    }
+    const input = parseBridgeMemoryCandidateParams(params);
+    // Bind the request to the connection's session and reject a cross-session
+    // records payload (the records carry their own sessionKey join).
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.records.speakerTurnTag?.sessionKey);
+    // The bridge is fail-closed and never throws; still classify any unexpected fault.
+    try {
+      const result = voiceprintTurnRecordsToMemoryCandidate(input.records, {
+        ...(input.consent !== undefined ? { consent: input.consent } : {}),
+        ...(input.thresholds !== undefined ? { thresholds: input.thresholds } : {}),
+        ...(input.createdAt !== undefined ? { createdAt: input.createdAt } : {}),
+      });
+      log.info("identity.voiceprint.bridge_memory_candidate", {
+        session_key: sessionKey,
+        promotable: result.promotable,
+        durable_memory: result.candidate.allowedUses.durableMemory,
+        review_state: result.candidate.review.state,
+        quarantine_reason: result.candidate.quarantineReason,
+      });
+      return {
+        ok: true as const,
+        sessionKey,
+        promotable: result.promotable,
+        degradeReason: result.degradeReason,
+        candidate: result.candidate,
+      };
+    } catch (error) {
       throw voiceprintMethodError(error);
     }
   });
@@ -3306,6 +3375,45 @@ function parseSessionOnlyParams(params: unknown): { sessionKey?: string } {
   const p = objectOrUndefined(params);
   return {
     sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
+  };
+}
+
+interface BridgeMemoryCandidateParams {
+  records: VoiceprintTurnRecords;
+  consent?: Partial<VoiceprintConsentSnapshot>;
+  thresholds?: Partial<VoiceprintThresholds>;
+  createdAt?: string;
+}
+
+function parseBridgeMemoryCandidateParams(params: unknown): BridgeMemoryCandidateParams {
+  const p = objectOrUndefined(params);
+  if (!p) {
+    throw new MethodError("INVALID_REQUEST", "bridge_memory_candidate requires an object body.");
+  }
+  const records = objectOrUndefined(p.records);
+  if (
+    !records ||
+    !objectOrUndefined(records.speakerTurnTag) ||
+    !objectOrUndefined(records.identitySignal) ||
+    !objectOrUndefined(records.transcriptSpeakerAnnotation)
+  ) {
+    throw new MethodError(
+      "INVALID_REQUEST",
+      "bridge_memory_candidate requires records.speakerTurnTag, records.identitySignal, and records.transcriptSpeakerAnnotation.",
+    );
+  }
+  const consent = objectOrUndefined(p.consent);
+  const thresholds = objectOrUndefined(p.thresholds);
+  return {
+    // The bridge is fail-closed and defensively reads every field, so we forward the
+    // structurally-shaped records without re-deriving them; a malformed inner field
+    // degrades to a quarantined candidate rather than a throw.
+    records: p.records as VoiceprintTurnRecords,
+    ...(consent !== undefined ? { consent: consent as Partial<VoiceprintConsentSnapshot> } : {}),
+    ...(thresholds !== undefined
+      ? { thresholds: thresholds as Partial<VoiceprintThresholds> }
+      : {}),
+    createdAt: optionalIsoTimeParam(p.createdAt, "createdAt"),
   };
 }
 

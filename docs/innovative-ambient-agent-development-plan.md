@@ -914,9 +914,19 @@ What is still not done:
   `services/deepface/app.py` (acceptable short term; profile facts/recaps are
   no longer canonical there).
 - Voiceprint is not yet an owner-facing product feature: there is no owner
-  enrollment UI, no user-facing encrypted owner-template setup flow, and no
-  reviewed bridge from voiceprint tags into person/memory policy. The
-  `voiceprintRealtimeEnabled` flag stays off.
+  enrollment UI and no user-facing encrypted owner-template setup flow. The
+  `voiceprintRealtimeEnabled` flag stays off. The reviewed bridge from
+  voiceprint tags into person/memory policy now exists in code — A9 shipped
+  `src/identity/voiceprint/memory-bridge.ts`, a pure, fail-closed mapping from a
+  `VoiceprintTurnRecords` into a single `MemoryCandidate` contribution decision
+  (only a strong + consented + confirmed + reviewed `owner_speaking` turn can be
+  promotable; everything else quarantines with `unreviewed_identity_signal` and
+  `durableMemory=false`, and any internal error degrades to quarantine rather
+  than throwing). It is opt-in and no-op by default: the default distillation and
+  person-snapshot paths are byte-for-byte unchanged, and the gateway read RPC is
+  gated behind `voiceprint.memory_bridge.enabled` (default false). What remains is
+  the review UI that would let an owner see and act on those bridged candidates —
+  that is PR 3 / batch B.
 - Cross-modal linking is not implemented. Face candidates, voice clusters, and
   heard-name candidates cannot yet be reviewed into one person capsule.
 - The 15 `rich-localbuild` commits (face signals, memory gating, voiceprint
@@ -1098,6 +1108,48 @@ vector came from a live capture on an attested device) — the **iOS half plus a
 deeper follow-up**. That attestation/capture-binding work MUST land before
 `accept_client_embeddings` is enabled in production; A8 alone is a prerequisite,
 not sufficient.
+
+**A9 — reviewed voiceprint -> memory-candidate BRIDGE (shipped, opt-in, no-op by
+default).** Until A9, nothing outside `src/identity/voiceprint/` consumed voiceprint
+identity signals: `score_turns` built `VoiceprintTurnRecords` into its own storage, but
+there was NO path feeding a **reviewed owner tag** into the person-capsule /
+memory-candidate / distillation flow (`src/memory/person-snapshot.ts` had zero voiceprint
+awareness). A9 is that missing bridge. The pure module
+`src/identity/voiceprint/memory-bridge.ts`
+(`voiceprintTurnRecordsToMemoryCandidate`) maps ONE `VoiceprintTurnRecords` (plus the
+resolved consent + thresholds already on the records) into a single `MemoryCandidate`
+contribution decision, **reusing** the existing candidate contract
+(`src/memory/candidate.ts`) and the existing policy (`src/identity/voiceprint/policy.ts`,
+`allowedUsesForVoiceprintResult` / `voiceprintResultCanInfluenceMemory`) — it
+reimplements neither.
+
+**FAIL-CLOSED is the whole point.** Durable promotion (`allowedUses.durableMemory: true`)
+is granted ONLY for a **strong** (`score >= ownerAccept`), **consented**
+(`memoryPromotionAllowed`), `owner_speaking` tag whose `identitySignal.review.state` is
+`"confirmed"` AND whose annotation `allowedUses` permit `memoryPromotion` — gated
+strictly through `voiceprintResultCanInfluenceMemory` (no looser gate invented). Every
+other case — `possible_owner`, `unknown_cluster`, `unknown_speaker`, any
+unreviewed/rejected/suppressed/deleted signal, withheld/missing consent, a
+below-threshold or non-finite score, a model mismatch, or ANY thrown error inside the
+mapping — degrades to a **quarantined** candidate (`quarantineReason:
+"unreviewed_identity_signal"`, `durableMemory: false`). The candidate `review.state`
+**mirrors** the source signal state and is never upgraded. The mapping **never throws**:
+an internal fault yields a quarantined candidate, not a crash. **No secrets**: an
+allow-list guard `assertVoiceprintMemoryCandidateHasNoSecrets` (mirror of A7's
+`assertVoiceprintScoreTelemetryHasNoSecrets` / the A4 audit guard) runs on every produced
+candidate and rejects any vector-shaped/audio/key/raw-`audioPath` field — a candidate
+carries only opaque ids, the decision/result, scalar confidence/score, model tags, and the
+sessionKey/transcript joins already on the records.
+
+**Opt-in, no-op by default (same posture as A4/A7 sinks).** The default distillation and
+person-snapshot path is **byte-for-byte unchanged**. The bridge is exposed as the opt-in
+gateway RPC `identity.voiceprint.bridge_memory_candidate`, guarded by
+`config.voiceprint.memory_bridge.enabled` (**default false**): disabled, the RPC refuses
+with `FAILED_PRECONDITION` and nothing in the memory path changes. New symbols are exported
+from `src/identity/voiceprint/index.ts`; tests in
+`tests/test-voiceprint-memory-bridge.ts` cover each result type, unreviewed vs confirmed
+owner, consent withheld, sub-threshold score, the no-secrets guard, the fail-closed default,
+and the thrown-error degrade.
 
 **A4 — published retention/destruction schedule + audit-excludes-biometrics
 guarantee (shipped).** The consent/retention/deletion/audit lifecycle has a
