@@ -3,6 +3,7 @@ import {
   LiveVoiceTurnTracker,
   type LiveVoiceRealtimeEvent,
   type LiveVoiceRealtimeEventResult,
+  type LiveVoiceRealtimeProviderHint,
   type LiveVoiceTurnDrainOptions,
   type LiveVoiceTurnFinalized,
 } from "../identity/voiceprint/index.js";
@@ -39,11 +40,15 @@ export class VoiceprintRealtimeSessionStore {
     sessionKey: string;
     event: LiveVoiceRealtimeEvent;
     includeMissingAudio?: boolean;
+    // OPTIONAL provider hint. Defaults to `auto` (registry, OpenAI first) so
+    // existing callers are byte-for-byte unchanged.
+    provider?: LiveVoiceRealtimeProviderHint;
   }): VoiceprintRealtimeSessionApplyResult {
     const sessionKey = normalizedSessionKey(input.sessionKey);
     const tracker = this.trackerFor(sessionKey);
     const event = applyLiveVoiceRealtimeEvent(tracker, input.event, {
       nowMs: this.nowMs,
+      provider: input.provider,
     });
     const drainOptions: LiveVoiceTurnDrainOptions = {
       includeMissingAudio: input.includeMissingAudio === true,
