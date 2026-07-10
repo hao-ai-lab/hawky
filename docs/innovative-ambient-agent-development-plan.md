@@ -307,21 +307,139 @@ also unblock the big rewrites (#27, #31).
 
 ### #15 — Extract one shared stream-event state machine
 
-**Problem.** The stream-event state machine exists in three cross-client copies (TUI
-hook, web `session-store`, iOS `ChatEvent.swift`) plus three more inside web itself
-(active / background / parseHistory).
+**Problem.** The "stream events → rendered transcript" fold — the rules that turn an
+incremental agent event stream (`text` deltas, `tool_use_start`, `tool_streaming`,
+`tool_result`, `thinking`, `permission_request`, `done`, `error`, `cancel`) into an
+ordered list of message + tool bubbles with per-item status (streaming → committed,
+running → ok/error) — is reimplemented in every client, with the same non-obvious rules
+(commit in-flight text before opening a tool bubble; throttled delta append; match
+`tool_result` to its `tool_use_start`; rebuild the same transcript from persisted
+history on cold-open / back-pagination).
 
-**Blast radius.** Every fix has to be applied four times; drift between the copies has
-already shipped bugs. This is the textbook "multiplication tax" — the cost of every
-change is multiplied by the number of copies.
+**Blast radius.** Every fix has to be applied in each copy; drift between copies has
+already shipped render bugs. Textbook "multiplication tax" — the cost of every change is
+multiplied by the number of copies, and the copies diverge over time because the truth
+has no owner.
 
-**Fix.**
-1. Define one framework-agnostic shared reducer/state slice as the single source of
-   truth.
-2. Bind each client to it and delete the duplicate implementations.
-3. Add tests covering the state transitions in the shared machine.
+**Findings from code investigation (corrects the original inventory).**
+- The duplication is **4 TS copies + iOS**, not 3: `src/tui/hooks/use_agent_loop.ts`
+  (raw `StreamEvent`, in-process), `web/src/store/session-store.ts` (2793 lines; live
+  `agent.*` handler ~1871–2199 **and** `parseHistoryMessages` ~671 **and** background),
+  and **`web-ios/src/lib/session-store.ts` — a fourth full copy the original inventory
+  missed**.
+- **iOS `ChatEvent.swift` is a wire *decoder*, not the state machine** (it maps
+  `agent.*` frames to a `ChatEvent` enum); iOS's actual transcript state lives elsewhere
+  (`ChatClient` / `LiveSessionStore`), in Swift.
+- **The wire vocabulary is already unified**: the gateway broadcasts every `StreamEvent`
+  as `agent.${event.type}` (`agent-turn.ts:158`, `agent-methods.ts:773/882`); web and
+  web-ios consume `agent.*`, TUI consumes the raw in-process `StreamEvent`. The semantic
+  event set is the same across all clients — only a prefix and the language differ.
+- The per-client **message shapes legitimately differ** (`DisplayMessage` with terminal
+  fields `outputLines`/`startedAt`/`approvalReason`; `SessionMessage` with
+  `backendIndex`/`images`/`documents`/pagination). So what is duplicated is the
+  **transition logic**, not the message shape.
+- A cross-package sharing mechanism **already exists and is in use**:
+  `@hawky/protocol` is a tsconfig + vite path alias → `src/gateway/protocol.ts`, wired in
+  both `web/` and `web-ios/`. A shared reducer can live in core `src/` and be aliased in
+  the same way; no new package is needed.
 
-**Effort:** ~1–2 weeks. **Dependencies:** none; prerequisite for #27.
+**Design principle (non-negotiable — it decides the long-term outcome).** The reducer
+must be a **zero-framework, pure, deployment-neutral core** — written as "the thing that
+will later run inside the gateway", not as "part of the web store". Concretely: pure
+`(state, event) → state`; no `Date.now()`/`Math.random()`/I/O/React/Zustand inside
+(timestamps and ids come from the event or an injected source); depends only on the
+`StreamEvent` type. This purity is what makes the eventual server-side reduction (Plan B
+below) and cross-language conformance fixtures possible at all.
+
+**Target architecture.**
+- **Canonical state** = an ordered `items` list (`message | tool`, each with an id +
+  status) plus an explicit streaming cursor (`streamingItemId`, `toolUseId → itemId`).
+  This mirrors how all three clients already render (siblings), so selectors are ~1:1
+  and migration is low-risk. (A message-with-`parts` model à la the Vercel AI SDK is the
+  cleaner long-term alternative.)
+- **Reducer API** in a new core module `src/transcript/`: `initialState()`,
+  `reduce(state, event)` (pure; covers the whole `StreamEvent` union),
+  `fromHistory(messages)` (folds synthetic events → **unifies the live and
+  `parseHistory` paths through one core**), `selectFlat(state)`.
+- **Deterministic ids** (subtle but required for server-portability + fixtures): derive
+  ids from the wire (tool item id = `tool_use_id`; message id = turn index / backend
+  index) instead of `Date.now()+random`. Optimistic user-bubble ids are minted in the
+  client adapter, never in the pure core.
+- **Client binding via selector**: each client keeps its own store/hook and render
+  model, replaces its inline `switch(event.type)` with `state = reduce(state, event)`,
+  and adds a thin `toDisplayMessage` / `toSessionMessage` selector that layers on its
+  client-specific fields. All side-effects (throttled flush, `setAppBadge`, unread
+  counts, pagination) stay in the client adapter — the core never touches them.
+- **Home + wiring**: `src/transcript/index.ts`, exposed to web/web-ios via a new
+  `@hawky/transcript` alias (same mechanism as `@hawky/protocol`); TUI imports directly.
+
+**Plan.**
+
+*Phase 1 — TS core + bind the three TS clients (this is the ~1–2 week deliverable; unblocks #27).*
+1. Build `src/transcript/` (state, `reduce`, `fromHistory`, selector base) + full
+   transition tests.
+2. Bind **TUI**: replace the event `switch` with `reduce`; add `toDisplayMessage`.
+3. Bind **web**: route both the live `agent.*` handler and `parseHistoryMessages` through
+   the core; keep flush/badge/unread/pagination/`backendIndex` in the store adapter; add
+   `toSessionMessage`.
+4. Bind **web-ios** (the fourth copy) the same way.
+5. Delete the four TS transition implementations once differential tests are green.
+6. Emit golden fixtures (reused by Phases 2 and 3 — not throwaway).
+
+*Phase 2 — iOS parity (extra; not in the 1–2 weeks).* Keep `ChatEvent.swift` (decoder);
+add a Swift `TranscriptReducer` that must pass the **same golden fixtures**. Single
+source of truth = fixtures, not code (the language wall makes literal reuse impossible;
+"delete the duplicate" from fix #2 does not apply to iOS).
+
+*Phase 3 — server-side reduction (long-term "Plan B"; separate project).* Move the
+**same** `reduce` into the gateway; broadcast a canonical state snapshot on
+connect/resync and deltas on live (cf. LangGraph `values`/`updates` streaming modes).
+Clients degrade to `applyDelta` + render; the `parseHistory` path and the Swift reducer
+can then be **deleted outright**. This turns "single source of truth" from a convention
+into a structural fact (clients have no events to fold) and removes the iOS language wall
+entirely — but it changes the wire protocol and reshapes #27, so it is evaluated
+separately. The Phase-1 purity constraint is the only thing that keeps this door open.
+
+**Migration safety.** Before deleting any old copy, run the new reducer in parallel and
+assert (in tests over recorded real event logs, plus an optional dev-only runtime check)
+that `reduce`+selector output equals the old store's output on the same event stream.
+This catches drift-preserving bugs before the old code is removed.
+
+**Testing (fix #3 is the centerpiece, not an afterthought).** (a) Transition unit tests
+for every event type and the hard sequences (`text→tool_use_start` commit ordering,
+out-of-order `tool_result`, error/cancel mid-stream, reconnect gaps, `fromHistory` ==
+live for the same sequence). (b) Language-neutral **golden fixtures**
+(`{ events, expected: state }`, cf. CommonMark's `spec.txt`: one spec, many
+implementations, one conformance suite) — run by TS now, Swift in Phase 2, gateway
+regression in Phase 3. (c) Differential tests (old store vs new core+selector). (d)
+Web component snapshot parity.
+
+**Risks.** (1) Teasing the pure transition out of the 2793-line, side-effect-entangled
+`session-store.ts` is the real work and the main estimate risk — mitigate by extracting
+only the transition and leaving side-effects in the adapter, guarded by differential
+tests. (2) Deterministic ids replace `Date.now()+random`. (3) A copy's existing drift may
+be depended on by its UI — reconcile via differential tests. (4) `web` and `web-ios` may
+have diverged; unifying them onto one reducer surfaces the difference (fix it or push it
+into the selector). (5) Per-client throttling stays in the adapter, never in the core.
+
+**Definition of done (Phase 1).** `src/transcript/` is a pure, zero-framework module,
+tsc-clean, with full transition-test coverage of the event union; TUI/web/web-ios all
+consume it with their inline `switch` transitions deleted and rendering unchanged
+(differential + snapshot green); golden fixtures committed and Swift-ready; **#27 is
+unblocked**.
+
+**References to steal from.** Vercel AI SDK (`UIMessage.parts` + the framework-agnostic
+fold with per-framework bindings); matrix-js-sdk (timeline that merges live `/sync` with
+paginated `/messages` — the exact live+history unification problem); Redux Toolkit
+(`EntityAdapter` + the pure-core / side-effects-in-middleware discipline); LangGraph
+(state + reducer, and `values`/`updates`/`messages` streaming modes for Phase 3);
+libsignal / Automerge (Rust core shared across iOS/web via UniFFI/WASM — the ceiling
+option that replaces "fixtures + Swift port" with "one compiled core everywhere").
+
+**Effort.** Phase 1 ~1.5–2.5 weeks (reducer + tests ~2–3d; three client bindings +
+selectors + differential tests + deletion ~2d each; the untangling of `session-store.ts`
+side-effects is the swing factor). Phase 2 (iOS) ~1 week. Phase 3 multi-week, separate.
+**Dependencies:** none upstream; prerequisite for #27.
 
 ### #16 — Collapse the four byte-identical lib files and fix the socket-store drift
 
