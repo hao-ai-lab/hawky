@@ -17,6 +17,7 @@ import { byokParam } from "./byok";
 import { getUserMediaSafe, mediaUnavailableReason } from "./media";
 import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
+import { TOOL_MARKER, historyToTranscript } from "./transcript-view";
 import {
   PERSON_MODEL_TOOLS,
   type PersonModelToolName,
@@ -156,10 +157,6 @@ interface BrokerResponse {
   client_secret?: { value?: string } | string;
 }
 
-// Marker prefixing a persisted tool record (stored as an assistant turn so the
-// gateway accepts it; decoded back into a tool bubble on history load).
-const TOOL_MARKER = "⁣TOOL⁣"; // invisible separators — won't show if ever rendered raw
-
 function entryId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -238,70 +235,6 @@ function buildTurnDetection(
     create_response: !staySilent,
     interrupt_response: interrupt,
   };
-}
-
-function fmtTime(ts?: string): string {
-  if (!ts) return "";
-  const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
-}
-
-/**
- * Flatten session.history messages (role + content blocks) into transcript
- * entries for the Live view. Text blocks → user/assistant bubbles; tool_use →
- * a finished (ok) tool bubble; tool_result is folded into its tool entry's
- * detail. Internal/empty blocks are skipped.
- */
-/** Text that is backend/agent plumbing, not part of the user's conversation. */
-function isNoiseText(text: string): boolean {
-  const t = text.trim();
-  return (
-    t.startsWith("[From web-ios Live]") ||
-    t.startsWith("[From desktop Live") ||
-    t.startsWith("[No remote nodes") ||
-    t.startsWith("<system-reminder>") ||
-    t.includes("workspace/memory/") ||
-    t.startsWith("[After completing the task")
-  );
-}
-
-export function mapHistoryToTranscript(
-  messages: Array<{ role: string; content: unknown; timestamp?: string }>,
-): TranscriptEntry[] {
-  const out: TranscriptEntry[] = [];
-  for (const msg of messages) {
-    const at = fmtTime(msg.timestamp);
-    const blocks = Array.isArray(msg.content)
-      ? msg.content
-      : typeof msg.content === "string"
-        ? [{ type: "text", text: msg.content }]
-        : [];
-    for (const raw of blocks) {
-      const b = (raw ?? {}) as Record<string, any>;
-      if (b.type !== "text" || typeof b.text !== "string" || !b.text.trim()) continue;
-      const rawText = b.text.trim();
-
-      // A persisted tool record → restore the tool bubble (with its status, and
-      // its image if it carried one, e.g. a chart).
-      if (rawText.startsWith(TOOL_MARKER)) {
-        try {
-          const t = JSON.parse(rawText.slice(TOOL_MARKER.length)) as { label: string; status: ToolStatus; detail?: string; ms?: number; image?: string; imageTitle?: string };
-          out.push({ id: entryId(), kind: "tool", text: t.label, at, toolStatus: t.status, toolDetail: t.detail, toolMs: t.ms, imageData: t.image, imageTitle: t.imageTitle });
-        } catch { /* ignore a malformed marker */ }
-        continue;
-      }
-
-      // Plain user/assistant text. Drop bridge/system plumbing noise and any
-      // raw backend tool blocks (which only exist in the separate bridge
-      // channel, but guard anyway), plus consecutive duplicate turns.
-      if (isNoiseText(rawText)) continue;
-      const kind = msg.role === "user" ? "user" : "assistant";
-      const prev = out[out.length - 1];
-      if (prev && prev.kind === kind && prev.text === rawText) continue;
-      out.push({ id: entryId(), kind, text: rawText, at });
-    }
-  }
-  return out;
 }
 
 function clientSecretValue(r: BrokerResponse): string {
@@ -412,7 +345,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
 
   // Persist a tool-call record so it survives in history. The gateway only
   // accepts user/assistant turns, so we encode the tool as an assistant message
-  // with a marker that mapHistoryToTranscript decodes back into a tool bubble.
+  // with a marker that historyToTranscript decodes back into a tool bubble.
   const persistTool = useCallback((label: string, status: ToolStatus, detail: string, ms: number, imageData?: string, imageTitle?: string) => {
     // Charts persist into history by embedding the data: URL in the marker. Cap
     // the size so a huge image can't bloat the session (it still shows live).
@@ -545,7 +478,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         if (!active) return;
         // Artifacts are derived from the transcript, so loading history restores
         // the full chronological chart list automatically.
-        setTranscript(mapHistoryToTranscript(res.messages ?? []));
+        setTranscript(historyToTranscript(res.messages ?? []));
       } catch {
         if (active) setTranscript([]);
       } finally {

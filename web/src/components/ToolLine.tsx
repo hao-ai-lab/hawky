@@ -22,7 +22,7 @@ export interface ToolLineData {
   inputPreview: string;
   /** Pre-rendered display string for the expanded row. When present, shows
    *  the full command / path / pattern instead of the capped inputPreview.
-   *  Computed and bounded in session-store's buildFullInput — ToolLine
+   *  Computed and bounded in transcript-view's buildFullInput — ToolLine
    *  just renders whatever string it gets. */
   fullInput?: string;
   status: "running" | "success" | "error";

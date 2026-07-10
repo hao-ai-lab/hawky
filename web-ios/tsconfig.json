@@ -17,7 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vitest/globals", "@testing-library/jest-dom"],
     "paths": {
-      "@hawky/protocol": ["../src/gateway/protocol.ts"]
+      "@hawky/protocol": ["../src/gateway/protocol.ts"],
+      "@hawky/transcript": ["../src/transcript/index.ts"]
     }
   },
   "include": ["src", "tests"]

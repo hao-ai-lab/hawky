@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@hawky/protocol": path.resolve(__dirname, "../src/gateway/protocol.ts"),
+      "@hawky/transcript": path.resolve(__dirname, "../src/transcript/index.ts"),
     },
   },
   test: {

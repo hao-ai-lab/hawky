@@ -1,0 +1,42 @@
+{
+  "events": [
+    {
+      "type": "text",
+      "content": "draft answer"
+    },
+    {
+      "type": "text",
+      "content": "final answer",
+      "replace": true
+    },
+    {
+      "type": "text",
+      "content": " with more",
+      "replace": false
+    },
+    {
+      "type": "done"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "message",
+        "id": "msg-0",
+        "role": "assistant",
+        "text": "final answer with more",
+        "done": true
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 1,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

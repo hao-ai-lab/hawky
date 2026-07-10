@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mapHistoryToTranscript } from "../src/lib/useRealtime";
+import { historyToTranscript } from "../src/lib/transcript-view";
 import { sessionKeyFromId } from "../src/lib/session-store";
 
 describe("sessionKeyFromId", () => {
@@ -15,9 +15,9 @@ describe("sessionKeyFromId", () => {
   });
 });
 
-describe("mapHistoryToTranscript", () => {
+describe("historyToTranscript", () => {
   it("maps user/assistant text blocks to bubbles", () => {
-    const out = mapHistoryToTranscript([
+    const out = historyToTranscript([
       { role: "user", content: [{ type: "text", text: "hello" }], timestamp: "2026-06-21T10:00:00Z" },
       { role: "assistant", content: [{ type: "text", text: "hi there" }] },
     ]);
@@ -28,7 +28,7 @@ describe("mapHistoryToTranscript", () => {
   });
 
   it("keeps history a clean conversation: drops raw backend tool blocks + bridge/system noise", () => {
-    const out = mapHistoryToTranscript([
+    const out = historyToTranscript([
       { role: "user", content: [{ type: "text", text: "remind me to buy milk" }] },
       // backend agent noise that must NOT appear in the user's transcript:
       { role: "user", content: [{ type: "text", text: "[From web-ios Live]\nCreate a reminder…" }] },
@@ -45,7 +45,7 @@ describe("mapHistoryToTranscript", () => {
 
   it("restores a PERSISTED tool record into a tool bubble (with status)", () => {
     const marker = "⁣TOOL⁣";
-    const out = mapHistoryToTranscript([
+    const out = historyToTranscript([
       { role: "user", content: [{ type: "text", text: "remind me to buy milk" }] },
       { role: "assistant", content: [{ type: "text", text: `${marker}${JSON.stringify({ label: "Delegating: set reminder", status: "ok", detail: "Done.", ms: 420 })}` }] },
       { role: "assistant", content: [{ type: "text", text: "Reminder set!" }] },
@@ -58,7 +58,7 @@ describe("mapHistoryToTranscript", () => {
   });
 
   it("dedupes consecutive identical turns (legacy double-persist)", () => {
-    const out = mapHistoryToTranscript([
+    const out = historyToTranscript([
       { role: "assistant", content: [{ type: "text", text: "Doing well!" }] },
       { role: "assistant", content: [{ type: "text", text: "Doing well!" }] },
     ]);
@@ -66,7 +66,7 @@ describe("mapHistoryToTranscript", () => {
   });
 
   it("handles string content and skips empty/unknown blocks", () => {
-    const out = mapHistoryToTranscript([
+    const out = historyToTranscript([
       { role: "user", content: "plain string" },
       { role: "assistant", content: [{ type: "text", text: "   " }, { type: "thinking", thinking: "x" }] },
     ]);

@@ -1,0 +1,107 @@
+{
+  "events": [
+    {
+      "type": "tool_use_start",
+      "tool_use_id": "toolu_02",
+      "name": "edit_file",
+      "input": {
+        "file_path": "src/app.ts"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_02",
+      "name": "edit_file",
+      "content": "Edited src/app.ts",
+      "display_content": "src/app.ts updated\n\n+1 -1",
+      "is_error": false,
+      "metadata": {
+        "additions": 1,
+        "deletions": 1
+      }
+    },
+    {
+      "type": "tool_use_start",
+      "tool_use_id": "toolu_03",
+      "name": "bash",
+      "input": {
+        "command": "false"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_03",
+      "name": "bash",
+      "content": "exit code 1",
+      "is_error": true
+    },
+    {
+      "type": "done"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "tool",
+        "id": "toolu_02",
+        "toolUseId": "toolu_02",
+        "name": "edit_file",
+        "inputPreview": "src/app.ts",
+        "status": "ok",
+        "output": [
+          {
+            "type": "stdout",
+            "content": "src/app.ts updated"
+          },
+          {
+            "type": "stdout",
+            "content": "+1 -1"
+          }
+        ],
+        "meta": {
+          "input": {
+            "file_path": "src/app.ts"
+          },
+          "resultContent": "Edited src/app.ts",
+          "isError": false,
+          "displayContent": "src/app.ts updated\n\n+1 -1",
+          "metadata": {
+            "additions": 1,
+            "deletions": 1
+          }
+        }
+      },
+      {
+        "kind": "tool",
+        "id": "toolu_03",
+        "toolUseId": "toolu_03",
+        "name": "bash",
+        "inputPreview": "false",
+        "status": "error",
+        "output": [
+          {
+            "type": "stderr",
+            "content": "exit code 1"
+          }
+        ],
+        "meta": {
+          "input": {
+            "command": "false"
+          },
+          "resultContent": "exit code 1",
+          "isError": true
+        }
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 0,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}
