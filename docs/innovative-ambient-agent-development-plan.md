@@ -1002,6 +1002,48 @@ gateway receives vectors. The pragmatic first increment is the **server sidecar*
 on-device live scoring as the follow-on. Front-end parity must be validated
 against the reference implementation before trusting cross-device cosine scores.
 
+### Threshold & scoring calibration strategy
+
+First real-voice measurements (2026-07-10, CAM++ via the server sidecar): the
+owner self-matches at **~0.88** in the same recording session but only **~0.60**
+across a different recording (different mic/room/day); a *different real person*
+scores **~0.38**; a synthetic TTS voice **~0.10**. The default thresholds today
+are `ownerAccept: 0.82` / `ownerPossible: 0.72`.
+
+The tempting fix — lower the scalar `ownerAccept` to ~0.6 so the cross-recording
+owner passes — is **not** the right move: it is calibrated from 2–3 samples, and
+it collapses the genuine-vs-impostor margin from ~0.5 (0.88 vs 0.38) to ~0.22
+(0.60 vs 0.38), so a similar-sounding impostor on the same device could cross it.
+The variance (0.60 vs 0.88) is not noise — it is recording-condition dependence,
+and no single scalar threshold spans it well. Do **not** ship a threshold guessed
+from a handful of recordings; keep 0.82 as a documented *provisional/uncalibrated*
+default until the scoring below changes the distribution.
+
+The real levers are in *how we score*, not the threshold, in bang-for-buck order:
+
+1. **Multi-clip enrollment scored against the best-matching enrolled clip
+   (max / top-k), not a single mean centroid.** `scoreVoiceprintTurn`
+   (`turn-scoring.ts`) currently collapses the enrolled owner embeddings to a
+   `meanVector` centroid, which blurs across conditions; a query recorded in
+   condition X should be compared against the enrolled clip from condition X.
+   The data model already stores multiple owner embeddings — switching to a
+   max (or top-k mean) over per-clip cosines raises the genuine cross-recording
+   score without moving the threshold, preserving the margin. This is the
+   cheapest, highest-value change and is tracked as the first increment.
+2. **Score normalization (AS-Norm) against an impostor cohort** so cosine is
+   comparable across recording conditions and the same-speaker distribution
+   tightens — the principled fix for "one threshold can't span conditions".
+   Requires shipping a fixed background cohort.
+3. **Two-tier grey band + multi-turn evidence accumulation.** The
+   `possible_owner` band already exists; treat it as "provisional, gather more
+   turns" and decide across a conversation with hysteresis rather than betting
+   the call on a single turn's cosine.
+4. **Calibrate the threshold on a real cohort** (dozens of speakers) at a chosen
+   FAR/FRR operating point — only *after* (1)–(3) land, since they change the
+   score distribution and any number set earlier would be wrong afterward.
+   Enrollment quality (longer, multi-condition capture; the 30 s minimum is the
+   right direction) does more for the margin than threshold tuning.
+
 ## Target Shape
 
 The identity system should have four durable concepts:
