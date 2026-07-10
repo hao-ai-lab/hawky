@@ -9,6 +9,8 @@ export * from "./live-adapter.js";
 export * from "./live-client-embedding.js";
 export * from "./live-plan.js";
 export * from "./live-queue.js";
+export * from "./live-realtime-adapters.js";
+export * from "./live-realtime-canonical.js";
 export * from "./live-realtime-events.js";
 export * from "./live-sidecar-jobs.js";
 export * from "./live-sidecar-runner.js";

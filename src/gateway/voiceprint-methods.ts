@@ -89,6 +89,7 @@ import {
   type VoiceprintStorageCounts,
   type VoiceprintStorageSnapshot,
   type LiveVoiceRealtimeEvent,
+  type LiveVoiceRealtimeProviderHint,
   type LiveVoiceprintPlanItemInput,
   type LiveVoiceprintScoringBatchResult,
   type LiveVoiceprintScoringPlan,
@@ -780,6 +781,7 @@ export function registerVoiceprintMethods(
         sessionKey,
         event,
         includeMissingAudio: input.includeMissingAudio,
+        provider: input.provider,
       });
       log.info("identity.voiceprint.realtime_event", {
         session_key: sessionKey,
@@ -4357,11 +4359,13 @@ function parseRealtimeEventParams(params: unknown): {
   sessionKey?: string;
   event: LiveVoiceRealtimeEvent;
   includeMissingAudio?: boolean;
+  provider?: LiveVoiceRealtimeProviderHint;
 } {
   const p = params as {
     sessionKey?: unknown;
     event?: unknown;
     includeMissingAudio?: unknown;
+    provider?: unknown;
   } | undefined;
   if (!p || !p.event || typeof p.event !== "object" || Array.isArray(p.event)) {
     throw new MethodError("INVALID_REQUEST", "event is required.");
@@ -4370,10 +4374,20 @@ function parseRealtimeEventParams(params: unknown): {
   if (typeof event.type !== "string" || !event.type.trim()) {
     throw new MethodError("INVALID_REQUEST", "event.type is required.");
   }
+  // OPTIONAL provider hint. Accept it from the params or from the event body
+  // (`event.provider`). Defaults to `auto` downstream, so no required param is
+  // added and existing callers are unchanged.
+  const provider =
+    (typeof p.provider === "string" && p.provider.trim() ? p.provider.trim() : undefined) ??
+    (typeof (event as Record<string, unknown>).provider === "string" &&
+    ((event as Record<string, unknown>).provider as string).trim()
+      ? ((event as Record<string, unknown>).provider as string).trim()
+      : undefined);
   return {
     sessionKey: typeof p.sessionKey === "string" ? p.sessionKey : undefined,
     event: event as LiveVoiceRealtimeEvent,
     includeMissingAudio: p.includeMissingAudio === true,
+    provider,
   };
 }
 

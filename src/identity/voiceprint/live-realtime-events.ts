@@ -1,4 +1,14 @@
-import type { SpeechTurn } from "./contracts.js";
+import type {
+  CanonicalAudioArtifactEvent,
+  CanonicalLiveVoiceEvent,
+  CanonicalSpeechStartedEvent,
+  CanonicalSpeechStoppedEvent,
+  CanonicalTranscriptCompletedEvent,
+} from "./live-realtime-canonical.js";
+import {
+  canonicalizeLiveVoiceEvent,
+  type LiveVoiceRealtimeProviderHint,
+} from "./live-realtime-adapters.js";
 import {
   LiveVoiceTurnTracker,
   type LiveVoiceTurnAudioArtifact,
@@ -48,6 +58,12 @@ export type LiveVoiceRealtimeEventResult =
 
 export interface LiveVoiceRealtimeEventOptions {
   nowMs?: () => number;
+  /**
+   * OPTIONAL provider hint. Defaults to `auto`, which walks the adapter registry
+   * (OpenAI first) exactly as before — so existing callers are byte-for-byte
+   * unchanged. A known hint (e.g. "gemini", "native") selects that adapter.
+   */
+  provider?: LiveVoiceRealtimeProviderHint;
 }
 
 export function applyLiveVoiceRealtimeEvent(
@@ -55,160 +71,151 @@ export function applyLiveVoiceRealtimeEvent(
   event: LiveVoiceRealtimeEvent,
   options: LiveVoiceRealtimeEventOptions = {},
 ): LiveVoiceRealtimeEventResult {
-  switch (event.type) {
-    case "input_audio_buffer.speech_started": {
-      const atMs = eventTimeMs(event, ["audio_start_ms", "start_ms", "at_ms"]);
-      if (atMs === undefined) {
-        return missingRequiredField(event.type);
-      }
-      const speechWindow = tracker.recordSpeechStarted({
-        speechWindowId: realtimeSpeechWindowId(event),
-        atMs,
-        route: optionalRoute(event),
-      });
-      return { status: "recorded", kind: "speech_started", speechWindow };
-    }
-    case "input_audio_buffer.speech_stopped": {
-      const atMs = eventTimeMs(event, ["audio_end_ms", "end_ms", "at_ms"]);
-      if (atMs === undefined) {
-        return missingRequiredField(event.type);
-      }
-      const speechWindow = tracker.recordSpeechStopped({
-        speechWindowId: realtimeSpeechWindowId(event),
-        atMs,
-      });
-      return { status: "recorded", kind: "speech_stopped", speechWindow };
-    }
-    case "conversation.item.input_audio_transcription.completed": {
-      const transcriptItemId = optionalString(event, [
-        "item_id",
-        "itemId",
-        "transcript_item_id",
-        "transcriptItemId",
-      ]);
-      if (!transcriptItemId) {
-        return missingRequiredField(event.type);
-      }
-      if (!transcriptSpeechWindowJoinIsResolvable(tracker, event, transcriptItemId)) {
-        return missingRequiredField(event.type);
-      }
-      const transcript = tracker.recordTranscriptCompleted({
-        transcriptItemId,
-        role: "user",
-        text: optionalString(event, ["transcript", "text"]),
-        speechWindowId: realtimeTranscriptSpeechWindowId(tracker, event, transcriptItemId),
-      });
-      return { status: "recorded", kind: "transcript_completed", transcript };
-    }
-    case "response.audio_transcript.done":
-    case "response.output_audio_transcript.done": {
-      const transcriptItemId =
-        optionalString(event, ["item_id", "itemId", "transcript_item_id", "transcriptItemId"]) ||
-        optionalString(event, ["response_id", "responseId"]);
-      if (!transcriptItemId) {
-        return missingRequiredField(event.type);
-      }
-      const transcript = tracker.recordTranscriptCompleted({
-        transcriptItemId,
-        role: "assistant",
-        text: optionalString(event, ["transcript", "text"]),
-      });
-      return { status: "recorded", kind: "transcript_completed", transcript };
-    }
-    case "live_recording.audio_artifact": {
-      const audioArtifactId = optionalString(event, [
-        "audio_artifact_id",
-        "audioArtifactId",
-        "artifact_id",
-        "artifactId",
-      ]);
-      if (!audioArtifactId) {
-        return missingRequiredField(event.type);
-      }
-      if (!audioArtifactJoinIsResolvable(tracker, event)) {
-        return missingRequiredField(event.type);
-      }
-      const speechWindowId = realtimeAudioSpeechWindowId(tracker, event);
-      const transcriptItemId = realtimeAudioTranscriptItemId(tracker, event);
-      let audioArtifact: LiveVoiceTurnAudioArtifact;
-      try {
-        audioArtifact = tracker.attachAudioArtifact({
-          audioArtifactId,
-          audioPath: optionalString(event, ["audio_path", "audioPath", "path"]),
-          sampleRate: optionalFiniteNumber(event, ["sample_rate", "sampleRate"]),
-          route: optionalRoute(event),
-          speechWindowId,
-          transcriptItemId,
-        });
-      } catch {
-        return missingRequiredField(event.type);
-      }
-      return { status: "recorded", kind: "audio_artifact", audioArtifact };
-    }
-    default:
-      return { status: "ignored", reason: "unsupported_event", eventType: event.type };
+  const canonical = canonicalizeLiveVoiceEvent(
+    event as Record<string, unknown>,
+    options.provider ?? readProviderHint(event),
+  );
+  if (canonical === null) {
+    return { status: "ignored", reason: "unsupported_event", eventType: event.type };
+  }
+  if (canonical === "missing_required_field") {
+    return missingRequiredField(event.type);
+  }
+  return applyCanonicalLiveVoiceEvent(tracker, canonical);
+}
+
+/**
+ * Runs the tracker-facing join logic on a canonical event. This is the exact
+ * behavior the original OpenAI-shaped applier had; the OpenAI adapter simply
+ * produces the same extracted fields, so OpenAI results are unchanged.
+ */
+export function applyCanonicalLiveVoiceEvent(
+  tracker: LiveVoiceTurnTracker,
+  event: CanonicalLiveVoiceEvent,
+): LiveVoiceRealtimeEventResult {
+  switch (event.kind) {
+    case "speech_started":
+      return applySpeechStarted(tracker, event);
+    case "speech_stopped":
+      return applySpeechStopped(tracker, event);
+    case "transcript_completed":
+      return applyTranscriptCompleted(tracker, event);
+    case "audio_artifact":
+      return applyAudioArtifact(tracker, event);
   }
 }
 
-function eventTimeMs(
-  event: Record<string, unknown>,
-  keys: readonly string[],
-): number | undefined {
-  return optionalFiniteNumber(event, keys);
+function applySpeechStarted(
+  tracker: LiveVoiceTurnTracker,
+  event: CanonicalSpeechStartedEvent,
+): LiveVoiceRealtimeEventResult {
+  const speechWindow = tracker.recordSpeechStarted({
+    speechWindowId: realtimeSpeechWindowId(event),
+    atMs: event.atMs,
+    route: event.route,
+  });
+  return { status: "recorded", kind: "speech_started", speechWindow };
 }
 
-function optionalString(event: Record<string, unknown>, keys: readonly string[]): string | undefined {
-  for (const key of keys) {
-    const value = event[key];
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
+function applySpeechStopped(
+  tracker: LiveVoiceTurnTracker,
+  event: CanonicalSpeechStoppedEvent,
+): LiveVoiceRealtimeEventResult {
+  const speechWindow = tracker.recordSpeechStopped({
+    speechWindowId: realtimeSpeechWindowId(event),
+    atMs: event.atMs,
+  });
+  return { status: "recorded", kind: "speech_stopped", speechWindow };
+}
+
+function applyTranscriptCompleted(
+  tracker: LiveVoiceTurnTracker,
+  event: CanonicalTranscriptCompletedEvent,
+): LiveVoiceRealtimeEventResult {
+  if (event.role === "user") {
+    if (!transcriptSpeechWindowJoinIsResolvable(tracker, event)) {
+      return missingRequiredField(event.eventType);
     }
+    const transcript = tracker.recordTranscriptCompleted({
+      transcriptItemId: event.transcriptItemId,
+      role: "user",
+      text: event.text,
+      speechWindowId: realtimeTranscriptSpeechWindowId(tracker, event),
+    });
+    return { status: "recorded", kind: "transcript_completed", transcript };
   }
-  return undefined;
+
+  const transcript = tracker.recordTranscriptCompleted({
+    transcriptItemId: event.transcriptItemId,
+    role: event.role,
+    text: event.text,
+  });
+  return { status: "recorded", kind: "transcript_completed", transcript };
 }
 
-function optionalFiniteNumber(
-  event: Record<string, unknown>,
-  keys: readonly string[],
-): number | undefined {
-  for (const key of keys) {
-    const value = event[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
+function applyAudioArtifact(
+  tracker: LiveVoiceTurnTracker,
+  event: CanonicalAudioArtifactEvent,
+): LiveVoiceRealtimeEventResult {
+  if (!audioArtifactJoinIsResolvable(tracker, event)) {
+    return missingRequiredField(event.eventType);
+  }
+  const speechWindowId = realtimeAudioSpeechWindowId(tracker, event);
+  const transcriptItemId = realtimeAudioTranscriptItemId(tracker, event);
+  let audioArtifact: LiveVoiceTurnAudioArtifact;
+  try {
+    audioArtifact = tracker.attachAudioArtifact({
+      audioArtifactId: event.audioArtifactId,
+      audioPath: event.audioPath,
+      sampleRate: event.sampleRate,
+      route: event.route,
+      speechWindowId,
+      transcriptItemId,
+    });
+  } catch {
+    return missingRequiredField(event.eventType);
+  }
+  return { status: "recorded", kind: "audio_artifact", audioArtifact };
+}
+
+function readProviderHint(event: Record<string, unknown>): LiveVoiceRealtimeProviderHint | undefined {
+  const value = event.provider;
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
   }
   return undefined;
 }
 
-function optionalRoute(event: Record<string, unknown>): SpeechTurn["route"] | undefined {
-  return optionalString(event, ["route", "audio_route", "audioRoute"]);
-}
+// --- Tracker-facing join resolution (canonical fields) -----------------------
+//
+// These preserve the original OpenAI join semantics exactly. `speechWindowId` is
+// the explicit window id; `itemId` is the soft turn/item correlation id.
 
-function realtimeSpeechWindowId(event: Record<string, unknown>): string | undefined {
-  return explicitSpeechWindowId(event) ?? realtimeItemId(event);
+function realtimeSpeechWindowId(
+  event: CanonicalSpeechStartedEvent | CanonicalSpeechStoppedEvent,
+): string | undefined {
+  return event.speechWindowId ?? event.itemId;
 }
 
 function realtimeTranscriptSpeechWindowId(
   tracker: LiveVoiceTurnTracker,
-  event: Record<string, unknown>,
-  transcriptItemId: string,
+  event: CanonicalTranscriptCompletedEvent,
 ): string | undefined {
-  const explicit = explicitSpeechWindowId(event);
+  const explicit = event.speechWindowId;
   if (explicit) {
     return tracker.hasSpeechWindow(explicit) ? explicit : undefined;
   }
-  if (tracker.hasSpeechWindow(transcriptItemId)) {
-    return transcriptItemId;
+  if (tracker.hasSpeechWindow(event.transcriptItemId)) {
+    return event.transcriptItemId;
   }
   return undefined;
 }
 
 function transcriptSpeechWindowJoinIsResolvable(
   tracker: LiveVoiceTurnTracker,
-  event: Record<string, unknown>,
-  transcriptItemId: string,
+  event: CanonicalTranscriptCompletedEvent,
 ): boolean {
-  const explicit = explicitSpeechWindowId(event);
+  const explicit = event.speechWindowId;
   if (explicit) {
     return tracker.hasSpeechWindow(explicit);
   }
@@ -217,13 +224,13 @@ function transcriptSpeechWindowJoinIsResolvable(
 
 function realtimeAudioSpeechWindowId(
   tracker: LiveVoiceTurnTracker,
-  event: Record<string, unknown>,
+  event: CanonicalAudioArtifactEvent,
 ): string | undefined {
-  const explicit = explicitSpeechWindowId(event);
+  const explicit = event.speechWindowId;
   if (explicit) {
     return explicit;
   }
-  const itemId = realtimeItemId(event);
+  const itemId = event.itemId;
   if (itemId && tracker.hasSpeechWindow(itemId)) {
     return itemId;
   }
@@ -232,14 +239,9 @@ function realtimeAudioSpeechWindowId(
 
 function realtimeAudioTranscriptItemId(
   tracker: LiveVoiceTurnTracker,
-  event: Record<string, unknown>,
+  event: CanonicalAudioArtifactEvent,
 ): string | undefined {
-  const transcriptItemId = optionalString(event, [
-    "transcript_item_id",
-    "transcriptItemId",
-    "item_id",
-    "itemId",
-  ]);
+  const transcriptItemId = event.transcriptItemId ?? event.itemId;
   if (transcriptItemId && tracker.hasTranscript(transcriptItemId)) {
     return transcriptItemId;
   }
@@ -248,32 +250,24 @@ function realtimeAudioTranscriptItemId(
 
 function audioArtifactJoinIsResolvable(
   tracker: LiveVoiceTurnTracker,
-  event: Record<string, unknown>,
+  event: CanonicalAudioArtifactEvent,
 ): boolean {
-  const explicitSpeechWindow = explicitSpeechWindowId(event);
+  const explicitSpeechWindow = event.speechWindowId;
   if (explicitSpeechWindow && !tracker.hasSpeechWindow(explicitSpeechWindow)) {
     return false;
   }
 
-  const itemId = realtimeItemId(event);
+  const itemId = event.itemId;
   if (itemId && !tracker.hasSpeechWindow(itemId) && !tracker.hasTranscript(itemId)) {
     return false;
   }
 
-  const transcriptItemId = optionalString(event, ["transcript_item_id", "transcriptItemId"]);
+  const transcriptItemId = event.transcriptItemId;
   if (transcriptItemId && !tracker.hasTranscript(transcriptItemId)) {
     return false;
   }
 
   return true;
-}
-
-function explicitSpeechWindowId(event: Record<string, unknown>): string | undefined {
-  return optionalString(event, ["speech_window_id", "speechWindowId"]);
-}
-
-function realtimeItemId(event: Record<string, unknown>): string | undefined {
-  return optionalString(event, ["item_id", "itemId"]);
 }
 
 function missingRequiredField(eventType: string): LiveVoiceRealtimeEventResult {

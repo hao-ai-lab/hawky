@@ -893,6 +893,18 @@ What is already in place:
     `identity.voiceprint.apply_bundle`.
   - iOS can serialize Realtime transcript/audio-artifact events to the gateway
     behind the disabled-by-default `voiceprintRealtimeEnabled` flag.
+  - Realtime ingestion is provider-agnostic (A11): `applyLiveVoiceRealtimeEvent`
+    canonicalizes raw events through an ordered adapter registry
+    (`src/identity/voiceprint/live-realtime-adapters.ts`) into a small internal
+    vocabulary (`live-realtime-canonical.ts`: `speech_started` / `speech_stopped`
+    / `transcript_completed` / `audio_artifact`). The OpenAI adapter is a
+    byte-for-byte port of the original logic and stays first in the registry, so
+    `auto` dispatch is unchanged for existing callers. A Google Gemini / Vertex
+    "Live API" adapter (`activityStart` / `activityEnd` /
+    `inputTranscription` / `outputTranscription`) and a `native` canonical
+    pass-through (`voice.*`) prove genericity. An OPTIONAL `provider` hint on the
+    event or the `identity.voiceprint.realtime_event` RPC params selects an
+    adapter; unset/`auto` walks the registry.
 
 - `src/memory/*`
   - Session-end and scheduled memory distillation exist.
