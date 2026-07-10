@@ -24,6 +24,20 @@ import {
   createVoiceprintLivenessChallengeStore,
   type VoiceprintLivenessChallengeStore,
 } from "./voiceprint-liveness.js";
+import {
+  buildVoiceprintConsentGrant,
+  buildVoiceprintConsentWithdrawal,
+  effectiveConsentAllowsProcessing,
+  isVoiceprintConsentExpired,
+  type VoiceprintAuditOp,
+  type VoiceprintAuditRecord,
+  type VoiceprintConsentScope,
+  type VoiceprintEffectiveConsent,
+} from "../identity/voiceprint/index.js";
+import {
+  createInMemoryVoiceprintLifecycle,
+  type VoiceprintLifecycle,
+} from "./voiceprint-lifecycle.js";
 import type { VoiceprintLivenessRejectionReason } from "../identity/voiceprint/index.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import { getConfigDir } from "../storage/config.js";
@@ -44,6 +58,7 @@ import {
   emptyVoiceprintStorageSnapshot,
   formatVoiceprintModel,
   ownerEmbeddingsFromVoiceprintTemplateArtifact,
+  purgeVoiceprintSubjectFromSnapshot,
   readWavFile,
   readEncryptedVoiceprintTemplateArtifact,
   resolveVoiceprintConsent,
@@ -119,9 +134,23 @@ export interface VoiceprintStorageApplyResult {
   clearedTranscriptIdentity: number;
 }
 
+export interface VoiceprintSubjectPurgeApplyResult {
+  ok: true;
+  sessionKey: string;
+  removed: VoiceprintStorageCounts;
+}
+
 export interface VoiceprintStorageAdapter {
   applyBundle(bundle: VoiceprintStorageBundle): Promise<VoiceprintStorageApplyResult> | VoiceprintStorageApplyResult;
   snapshot?(): VoiceprintStorageSnapshot;
+  /**
+   * A4 right-to-erasure: remove EVERY derived voiceprint record for a subject
+   * (keyed by sessionKey). Optional so existing adapters remain compatible; the
+   * built-in in-memory and file adapters implement it.
+   */
+  purgeSubject?(
+    sessionKey: string,
+  ): Promise<VoiceprintSubjectPurgeApplyResult> | VoiceprintSubjectPurgeApplyResult;
 }
 
 export interface VoiceprintAudioArtifactRegistration {
@@ -469,6 +498,11 @@ export function createInMemoryVoiceprintStorage(
     snapshot() {
       return snapshot;
     },
+    purgeSubject(sessionKey) {
+      const result = purgeVoiceprintSubjectFromSnapshot({ snapshot, sessionKey });
+      snapshot = result.snapshot;
+      return { ok: true as const, sessionKey, removed: result.removed };
+    },
   };
 }
 
@@ -533,6 +567,12 @@ export function createFileVoiceprintStorage(
     snapshot() {
       return loadVoiceprintStorageSnapshot(filePath);
     },
+    purgeSubject(sessionKey) {
+      const snapshot = loadVoiceprintStorageSnapshot(filePath);
+      const result = purgeVoiceprintSubjectFromSnapshot({ snapshot, sessionKey });
+      writeVoiceprintStorageSnapshot(filePath, result.snapshot);
+      return { ok: true as const, sessionKey, removed: result.removed };
+    },
   };
 }
 
@@ -545,6 +585,10 @@ export function registerVoiceprintMethods(
   liveness: VoiceprintLivenessChallengeStore = createVoiceprintLivenessChallengeStore({
     ttlMs: scoring?.livenessNonceTtlMs,
   }),
+  // A4 consent/audit/retention lifecycle. Defaults to an in-memory, NON-enforcing
+  // lifecycle so wiring it changes nothing for existing call sites: it records +
+  // audits, but does not gate enroll/score unless `enforceConsentLedger` is set.
+  lifecycle: VoiceprintLifecycle = createInMemoryVoiceprintLifecycle(),
 ): void {
   server.registerMethod("identity.voiceprint.realtime_event", async (conn, params) => {
     const input = parseRealtimeEventParams(params);
@@ -658,6 +702,7 @@ export function registerVoiceprintMethods(
         scoring,
         audioArtifacts,
         liveness,
+        lifecycle,
       });
       const { run, storage: storageResult } = await runAndStoreLiveVoiceprintScoringPlan({
         storage,
@@ -676,6 +721,12 @@ export function registerVoiceprintMethods(
         storage_bundle_id: run.storageBundle?.id,
         duration_ms: Date.now() - started,
       });
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "score",
+        outcome: run.status === "error" ? "error" : "ok",
+        counts: { turns: turns.length, patches: run.patches.length },
+      });
       return serializeScoreTurnsResult({
         sessionKey,
         turns: turns.length,
@@ -683,6 +734,11 @@ export function registerVoiceprintMethods(
         storage: storageResult,
       });
     } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "score",
+        outcome: "error",
+      });
       throw voiceprintMethodError(error);
     }
   });
@@ -730,7 +786,19 @@ export function registerVoiceprintMethods(
     const input = parseEnrollOwnerParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     const config = requireEnrollmentScoringConfig(scoring);
-    assertEnrollmentConsent(config, input.consent);
+    // Consult the PERSISTED consent ledger (restrict-only) when enforcement is on.
+    // When off/inert (default), this returns the config+inline consent unchanged.
+    try {
+      assertEnrollmentConsent(config, input.consent, lifecycle, sessionKey);
+    } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "enroll",
+        outcome: "rejected",
+        reason: "consent_denied",
+      });
+      throw error;
+    }
 
     try {
       const embedded = await embedEnrollmentSources({
@@ -751,6 +819,12 @@ export function registerVoiceprintMethods(
           source_count: assessment.sourceCount,
           speech_ms: assessment.speechMs,
         });
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey: sessionKey,
+          op: "enroll",
+          outcome: "rejected",
+          counts: { sourceCount: assessment.sourceCount },
+        });
         return serializeEnrollmentRejection(sessionKey, assessment);
       }
 
@@ -767,8 +841,20 @@ export function registerVoiceprintMethods(
         source_count: assessment.sourceCount,
         speech_ms: assessment.speechMs,
       });
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "enroll",
+        outcome: "ok",
+        templateRef: stored.templateRef,
+        counts: { sourceCount: assessment.sourceCount },
+      });
       return serializeEnrollmentSuccess(sessionKey, assessment, stored);
     } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "enroll",
+        outcome: "error",
+      });
       throw voiceprintMethodError(error);
     }
   });
@@ -777,7 +863,17 @@ export function registerVoiceprintMethods(
     const input = parseAddEnrollmentClipParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     const config = requireEnrollmentScoringConfig(scoring);
-    assertEnrollmentConsent(config, input.consent);
+    try {
+      assertEnrollmentConsent(config, input.consent, lifecycle, sessionKey);
+    } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "enroll",
+        outcome: "rejected",
+        reason: "consent_denied",
+      });
+      throw error;
+    }
 
     try {
       const existing = readOwnerTemplateArtifactForEnrollment(config);
@@ -845,6 +941,13 @@ export function registerVoiceprintMethods(
         removed: removed.removed,
         template_ref: removed.templateRef,
       });
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "delete",
+        outcome: removed.removed ? "ok" : "noop",
+        ...(removed.templateRef !== undefined ? { templateRef: removed.templateRef } : {}),
+        counts: { templatesRemoved: removed.removed ? 1 : 0 },
+      });
       return {
         ok: true as const,
         sessionKey,
@@ -852,8 +955,226 @@ export function registerVoiceprintMethods(
         templateRef: removed.templateRef,
       };
     } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "delete",
+        outcome: "error",
+      });
       throw voiceprintMethodError(error);
     }
+  });
+
+  // ── A4 biometric consent + retention + audit lifecycle ───────────────────
+  registerVoiceprintLifecycleMethods(server, {
+    scoring,
+    storage,
+    realtime,
+    audioArtifacts,
+    lifecycle,
+  });
+}
+
+/**
+ * Register the A4 consent-ledger / withdrawal-purge / retention-sweep / audit RPCs.
+ * These are always registered; they operate against the provided `lifecycle`
+ * stores (in-memory + non-enforcing by default), so they are inert-by-default and
+ * additive: no existing RPC's behavior changes.
+ */
+function registerVoiceprintLifecycleMethods(
+  server: GatewayServer,
+  deps: {
+    scoring?: VoiceprintLiveScoringConfig;
+    storage: VoiceprintStorageAdapter;
+    realtime: VoiceprintRealtimeSessionStore;
+    audioArtifacts: VoiceprintAudioArtifactStore;
+    lifecycle: VoiceprintLifecycle;
+  },
+): void {
+  const { scoring, storage, realtime, audioArtifacts, lifecycle } = deps;
+
+  // Record (grant/update) the current consent for the subject/session. Appends a
+  // new grant record; the effective consent is the fold of the append-only history.
+  server.registerMethod("identity.voiceprint.record_consent", (conn, params) => {
+    const input = parseRecordConsentParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const now = input.now ?? new Date().toISOString();
+    const history = lifecycle.consentLedger.history(sessionKey);
+    const record = buildVoiceprintConsentGrant({
+      subjectKey: sessionKey,
+      scopes: input.scopes,
+      history,
+      grantedAt: input.grantedAt ?? now,
+      recordedAt: now,
+      ...(input.reason !== undefined ? { reason: input.reason } : {}),
+    });
+    lifecycle.consentLedger.append(record);
+    const effective = lifecycle.consentLedger.effective(sessionKey);
+    log.info("identity.voiceprint.record_consent", {
+      session_key: sessionKey,
+      scopes: input.scopes,
+      seq: record.seq,
+    });
+    return {
+      ok: true as const,
+      sessionKey,
+      consent: serializeEffectiveConsent(effective),
+    };
+  });
+
+  // Read current effective consent + full append-only history for the subject.
+  server.registerMethod("identity.voiceprint.get_consent", (conn, params) => {
+    const input = parseSessionOnlyParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const effective = lifecycle.consentLedger.effective(sessionKey);
+    return {
+      ok: true as const,
+      sessionKey,
+      consent: serializeEffectiveConsent(effective),
+      history: effective.history,
+    };
+  });
+
+  // Right-to-erasure: append a withdrawal record AND purge everything derived
+  // from the subject (encrypted owner template + derived storage states + cached
+  // artifacts). Idempotent. Writes a `withdraw` audit entry.
+  server.registerMethod("identity.voiceprint.withdraw_consent", async (conn, params) => {
+    const input = parseWithdrawConsentParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const now = input.now ?? new Date().toISOString();
+    try {
+      const outcome = await purgeVoiceprintSubject({
+        sessionKey,
+        scoring,
+        storage,
+        realtime,
+        audioArtifacts,
+        deletedAt: now,
+      });
+      // Append the withdrawal AFTER the purge so a failed purge does not record a
+      // withdrawal that never erased data. Append-only: prior grants are retained.
+      const history = lifecycle.consentLedger.history(sessionKey);
+      const record = buildVoiceprintConsentWithdrawal({
+        subjectKey: sessionKey,
+        history,
+        withdrawnAt: now,
+        recordedAt: now,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      });
+      lifecycle.consentLedger.append(record);
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "withdraw",
+        outcome: "ok",
+        ...(outcome.templateRef !== undefined ? { templateRef: outcome.templateRef } : {}),
+        counts: {
+          templatesRemoved: outcome.templateRemoved ? 1 : 0,
+          ...flattenPurgeCounts(outcome.storageRemoved),
+        },
+      });
+      log.info("identity.voiceprint.withdraw_consent", {
+        session_key: sessionKey,
+        template_removed: outcome.templateRemoved,
+        seq: record.seq,
+      });
+      return {
+        ok: true as const,
+        sessionKey,
+        templateRemoved: outcome.templateRemoved,
+        storageRemoved: outcome.storageRemoved,
+        consent: serializeEffectiveConsent(lifecycle.consentLedger.effective(sessionKey)),
+      };
+    } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "withdraw",
+        outcome: "error",
+      });
+      throw voiceprintMethodError(error);
+    }
+  });
+
+  // Retention sweep: destroy voiceprint data (template + derived states) for any
+  // subject whose effective consent's retention anchor is older than the window.
+  // Fresh subjects are untouched. Writes a `purge` audit entry per purged subject.
+  server.registerMethod("identity.voiceprint.purge_expired", async (conn, params) => {
+    // Unbound connections cannot drive an owner-template purge safely; require a
+    // bound session even though the sweep spans subjects (operator/self trigger).
+    sessionKeyForVoiceprintRequest(conn, undefined);
+    const input = parsePurgeExpiredParams(params);
+    const nowMs = input.nowMs ?? Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const retentionMs = input.retentionMs ?? lifecycle.retentionMs;
+
+    const expired: string[] = [];
+    for (const subjectKey of lifecycle.consentLedger.subjectKeys()) {
+      const effective = lifecycle.consentLedger.effective(subjectKey);
+      if (isVoiceprintConsentExpired({ effective, nowMs, retentionMs })) {
+        expired.push(subjectKey);
+      }
+    }
+
+    const purged: Array<{ sessionKey: string; templateRemoved: boolean }> = [];
+    for (const subjectKey of expired) {
+      const outcome = await purgeVoiceprintSubject({
+        sessionKey: subjectKey,
+        // The owner template is a per-gateway singleton; only purge it for the
+        // bound session's subject. For other expired subjects, purge only the
+        // derived storage states (their template, if any, is the same file and is
+        // handled when that subject is the connection's subject). This keeps the
+        // sweep from unexpectedly deleting the current owner's template.
+        scoring: subjectKey === conn.sessionKey ? scoring : undefined,
+        storage,
+        realtime,
+        audioArtifacts,
+        deletedAt: nowIso,
+      });
+      // A withdrawal record marks the subject as purged in the append-only ledger.
+      const history = lifecycle.consentLedger.history(subjectKey);
+      lifecycle.consentLedger.append(
+        buildVoiceprintConsentWithdrawal({
+          subjectKey,
+          history,
+          withdrawnAt: nowIso,
+          recordedAt: nowIso,
+          reason: "retention_expired",
+        }),
+      );
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey,
+        op: "purge",
+        outcome: "ok",
+        ...(outcome.templateRef !== undefined ? { templateRef: outcome.templateRef } : {}),
+        counts: {
+          templatesRemoved: outcome.templateRemoved ? 1 : 0,
+          ...flattenPurgeCounts(outcome.storageRemoved),
+        },
+      });
+      purged.push({ sessionKey: subjectKey, templateRemoved: outcome.templateRemoved });
+    }
+
+    log.info("identity.voiceprint.purge_expired", {
+      retention_ms: retentionMs,
+      expired: expired.length,
+      purged: purged.length,
+    });
+    return {
+      ok: true as const,
+      retentionMs,
+      purged,
+    };
+  });
+
+  // Read the append-only biometric-processing audit log (optionally per-subject).
+  server.registerMethod("identity.voiceprint.get_audit_log", (conn, params) => {
+    const input = parseSessionOnlyParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    // Default to the bound subject; a caller may not read another subject's log.
+    const records = lifecycle.auditLog.read(sessionKey);
+    return {
+      ok: true as const,
+      sessionKey,
+      records,
+    };
   });
 }
 
@@ -1178,9 +1499,15 @@ async function buildScorePlanTurns(input: {
   scoring: VoiceprintLiveScoringConfig;
   audioArtifacts: VoiceprintAudioArtifactStore;
   liveness: VoiceprintLivenessChallengeStore;
+  lifecycle: VoiceprintLifecycle;
 }): Promise<LiveVoiceprintPlanItemInput[]> {
   const turns: LiveVoiceprintPlanItemInput[] = [];
-  const policy = resolveScoreTurnsPolicy(input.scoring, input.input);
+  const policy = resolveScoreTurnsPolicy(
+    input.scoring,
+    input.input,
+    input.lifecycle,
+    input.sessionKey,
+  );
   for (const turn of input.input.turns) {
     if (turn.sessionKey !== undefined && turn.sessionKey !== input.sessionKey) {
       throw new MethodError(
@@ -1776,14 +2103,51 @@ function requireEnrollmentScoringConfig(
 function assertEnrollmentConsent(
   scoring: VoiceprintLiveScoringConfig,
   clientConsent: Partial<VoiceprintConsentSnapshot> | undefined,
+  lifecycle: VoiceprintLifecycle,
+  subjectKey: string,
 ): void {
-  const consent = restrictVoiceprintConsent(scoring.consent, clientConsent);
+  // The persisted ledger can only FURTHER-RESTRICT (never widen): fold the
+  // config+inline consent, then AND it with the persisted effective consent when
+  // enforcement is enabled. When enforcement is off, the ledger is inert here.
+  const consent = restrictVoiceprintConsentWithLedger(
+    scoring.consent,
+    clientConsent,
+    lifecycle,
+    subjectKey,
+  );
   if (!voiceprintConsentAllowsProcessing(consent)) {
     throw new MethodError(
       "FORBIDDEN",
       `Voiceprint enrollment requires capture and biometric consent (${consent.reason ?? "consent_denied"}).`,
     );
   }
+}
+
+/**
+ * Restrict-only merge of config consent, inline consent, AND (when enforcement is
+ * on) the persisted ledger's effective consent. The persisted ledger NEVER widens
+ * — a subject with no persisted grant, or a withdrawn subject, cannot process even
+ * if config+inline would allow it. When `enforceConsentLedger` is false, the
+ * ledger is ignored (existing behavior).
+ */
+function restrictVoiceprintConsentWithLedger(
+  serverConsent: Partial<VoiceprintConsentSnapshot> | undefined,
+  clientConsent: Partial<VoiceprintConsentSnapshot> | undefined,
+  lifecycle: VoiceprintLifecycle,
+  subjectKey: string,
+): VoiceprintConsentSnapshot {
+  const base = restrictVoiceprintConsent(serverConsent, clientConsent);
+  if (!lifecycle.enforceConsentLedger) {
+    return base;
+  }
+  const effective = lifecycle.consentLedger.effective(subjectKey);
+  return restrictVoiceprintConsent(base, {
+    captureAllowed: effective.scopes.capture && effective.active,
+    biometricAllowed: effective.scopes.biometric && effective.active,
+    memoryPromotionAllowed: effective.scopes.memoryPromotion && effective.active,
+    exportAllowed: effective.scopes.export && effective.active,
+    reason: effective.active ? undefined : "no_persisted_voiceprint_consent",
+  });
 }
 
 /**
@@ -2014,8 +2378,10 @@ function deleteOwnerTemplate(
   // contents to erase them. Resolve that path WITHOUT touching the encryption key so
   // erasure works even when the key file is missing/corrupt (right-to-erasure and
   // idempotency must not depend on a decryptable store). If the template file never
-  // existed, this is a no-op.
+  // existed, the ciphertext is already gone — but we still crypto-shred the key
+  // below so a stale key never survives to decrypt any un-erased copy/backup.
   if (!existsSync(source.filePath)) {
+    unlinkOwnerTemplateKey(source.keyPath);
     return { removed: false };
   }
   let templateRef: string | undefined;
@@ -2032,7 +2398,224 @@ function deleteOwnerTemplate(
     // removable so the owner cannot be resolved afterward; fall through to unlink.
   }
   unlinkSync(source.filePath);
+  // Crypto-shred: remove the AES-256-GCM key file too. Deleting the ciphertext while
+  // retaining its decryption key is an incomplete erasure — if any un-erased copy of
+  // the ciphertext survived elsewhere, the retained key would be the missing link. It
+  // is also reused on re-enrollment, so a post-withdrawal re-enroll must not silently
+  // rebind to the old key. Best-effort; tolerate a missing/already-removed key file.
+  unlinkOwnerTemplateKey(source.keyPath);
   return { removed: true, templateRef };
+}
+
+/** Best-effort unlink of the owner-template AES key file, tolerating ENOENT. */
+function unlinkOwnerTemplateKey(keyPath: string): void {
+  try {
+    unlinkSync(keyPath);
+  } catch {
+    // Missing/already-removed key file (ENOENT) or an unremovable one must never
+    // fail erasure — the ciphertext has already been unlinked at this point.
+  }
+}
+
+// ── A4 lifecycle helpers ────────────────────────────────────────────────────
+
+interface VoiceprintSubjectPurgeOutcome {
+  templateRemoved: boolean;
+  templateRef?: string;
+  storageRemoved: VoiceprintStorageCounts;
+}
+
+/**
+ * The right-to-erasure primitive shared by withdraw_consent and purge_expired:
+ * (1) delete the encrypted owner template (idempotent, reuses deleteOwnerTemplate),
+ * (2) purge ALL derived voiceprint storage states/bundles for the subject,
+ * (3) evict the in-memory realtime turn tracker (raw-audio pointers, speech-window
+ *     timing, transcript-identity joins) and the session-keyed audio-artifact cache
+ *     (raw-audio file references) for the subject. After this runs, no owner template
+ *     resolves, no derived state remains, and no in-memory biometric-derived artifact
+ *     is left resident. Idempotent: re-running on an already-purged subject is a
+ *     no-op with zero counts.
+ */
+async function purgeVoiceprintSubject(input: {
+  sessionKey: string;
+  scoring?: VoiceprintLiveScoringConfig;
+  storage: VoiceprintStorageAdapter;
+  realtime: VoiceprintRealtimeSessionStore;
+  audioArtifacts: VoiceprintAudioArtifactStore;
+  deletedAt: string;
+}): Promise<VoiceprintSubjectPurgeOutcome> {
+  let templateRemoved = false;
+  let templateRef: string | undefined;
+  if (input.scoring?.ownerTemplateFileSource) {
+    const removed = deleteOwnerTemplate(
+      input.scoring as VoiceprintLiveScoringConfig & {
+        ownerTemplateFileSource: VoiceprintTemplateFileSource;
+      },
+      input.deletedAt,
+    );
+    templateRemoved = removed.removed;
+    templateRef = removed.templateRef;
+  }
+
+  let storageRemoved: VoiceprintStorageCounts = {
+    transcriptIdentityStates: 0,
+    speakerTurnTags: 0,
+    identitySignals: 0,
+    transcriptSpeakerAnnotations: 0,
+    eventParticipations: 0,
+  };
+  if (input.storage.purgeSubject) {
+    const purge = await input.storage.purgeSubject(input.sessionKey);
+    storageRemoved = purge.removed;
+  }
+
+  // Evict in-memory biometric-derived artifacts for the subject: the realtime
+  // turn tracker (audioByWindow / audioByTranscript / speechWindows — raw-audio
+  // pointers, speech-window timing, transcript-identity join) and the session-keyed
+  // audio-artifact cache (raw-audio file references). Without this, withdrawal
+  // leaves these resident for the whole session lifetime.
+  input.realtime.reset(input.sessionKey);
+  input.audioArtifacts.reset?.(input.sessionKey);
+
+  return { templateRemoved, templateRef, storageRemoved };
+}
+
+function flattenPurgeCounts(counts: VoiceprintStorageCounts): Record<string, number> {
+  return {
+    statesCleared: counts.transcriptIdentityStates,
+    speakerTurnTagsCleared: counts.speakerTurnTags,
+    identitySignalsCleared: counts.identitySignals,
+    annotationsCleared: counts.transcriptSpeakerAnnotations,
+    eventParticipationsCleared: counts.eventParticipations,
+  };
+}
+
+/**
+ * Emit one metadata-only audit record. The record is scanned for secrets by the
+ * audit store's `append` (assertVoiceprintAuditRecordHasNoSecrets) before it is
+ * persisted; a bad record throws rather than leaking. Audit failures are isolated
+ * so a lifecycle store hiccup never takes down the primary operation.
+ */
+function emitVoiceprintAudit(
+  lifecycle: VoiceprintLifecycle,
+  entry: {
+    subjectKey: string;
+    op: VoiceprintAuditOp;
+    outcome: VoiceprintAuditRecord["outcome"];
+    counts?: Record<string, number>;
+    templateRef?: string;
+    reason?: string;
+    at?: string;
+  },
+): void {
+  try {
+    lifecycle.auditLog.append({
+      version: 1,
+      subjectKey: entry.subjectKey,
+      op: entry.op,
+      at: entry.at ?? new Date().toISOString(),
+      outcome: entry.outcome,
+      ...(entry.counts !== undefined ? { counts: entry.counts } : {}),
+      ...(entry.templateRef !== undefined ? { templateRef: entry.templateRef } : {}),
+      ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+    });
+  } catch (error) {
+    log.warn("identity.voiceprint.audit_append_failed", {
+      subject_key: entry.subjectKey,
+      op: entry.op,
+      error: errorMessage(error),
+    });
+  }
+}
+
+function serializeEffectiveConsent(effective: VoiceprintEffectiveConsent): {
+  subjectKey: string;
+  active: boolean;
+  scopes: VoiceprintEffectiveConsent["scopes"];
+  grantedAt?: string;
+  withdrawnAt?: string;
+} {
+  return {
+    subjectKey: effective.subjectKey,
+    active: effective.active,
+    scopes: effective.scopes,
+    ...(effective.grantedAt !== undefined ? { grantedAt: effective.grantedAt } : {}),
+    ...(effective.withdrawnAt !== undefined ? { withdrawnAt: effective.withdrawnAt } : {}),
+  };
+}
+
+interface RecordConsentParams {
+  sessionKey?: string;
+  scopes: VoiceprintConsentScope[];
+  grantedAt?: string;
+  now?: string;
+  reason?: string;
+}
+
+function parseRecordConsentParams(params: unknown): RecordConsentParams {
+  const p = objectOrUndefined(params);
+  if (!p || !Array.isArray(p.scopes)) {
+    throw new MethodError("INVALID_REQUEST", "record_consent requires a scopes array.");
+  }
+  const validScopes: VoiceprintConsentScope[] = ["capture", "biometric", "memoryPromotion", "export"];
+  const scopes = p.scopes.map((scope) => {
+    if (typeof scope !== "string" || !validScopes.includes(scope as VoiceprintConsentScope)) {
+      throw new MethodError("INVALID_REQUEST", `record_consent scope is invalid: ${String(scope)}.`);
+    }
+    return scope as VoiceprintConsentScope;
+  });
+  return {
+    sessionKey: typeof p.sessionKey === "string" ? p.sessionKey : undefined,
+    scopes,
+    grantedAt: optionalIsoTimeParam(p.grantedAt ?? p.granted_at, "grantedAt"),
+    now: optionalIsoTimeParam(p.now, "now"),
+    reason: optionalString(p.reason),
+  };
+}
+
+interface WithdrawConsentParams {
+  sessionKey?: string;
+  now?: string;
+  reason?: string;
+}
+
+function parseWithdrawConsentParams(params: unknown): WithdrawConsentParams {
+  const p = objectOrUndefined(params);
+  return {
+    sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
+    now: optionalIsoTimeParam(p?.now, "now"),
+    reason: optionalString(p?.reason),
+  };
+}
+
+interface PurgeExpiredParams {
+  nowMs?: number;
+  retentionMs?: number;
+}
+
+function parsePurgeExpiredParams(params: unknown): PurgeExpiredParams {
+  const p = objectOrUndefined(params);
+  return {
+    nowMs: optionalNonNegativeFiniteNumber(p?.nowMs ?? p?.now_ms, "nowMs"),
+    retentionMs: optionalPositiveFiniteNumber(p?.retentionMs ?? p?.retention_ms, "retentionMs"),
+  };
+}
+
+function parseSessionOnlyParams(params: unknown): { sessionKey?: string } {
+  const p = objectOrUndefined(params);
+  return {
+    sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
+  };
+}
+
+function optionalIsoTimeParam(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new MethodError("INVALID_REQUEST", `${field} must be an ISO timestamp.`);
+  }
+  return value;
 }
 
 function serializeEnrollmentSuccess(
@@ -2095,13 +2678,20 @@ function ownerTemplateRefForArtifact(
 function resolveScoreTurnsPolicy(
   scoring: VoiceprintLiveScoringConfig,
   input: ScoreTurnsParams,
+  lifecycle: VoiceprintLifecycle,
+  subjectKey: string,
 ): {
   consent: VoiceprintConsentSnapshot;
   qualityThresholds: VoiceprintAudioQualityThresholds;
   templateLearningReviewed: boolean;
 } {
   return {
-    consent: restrictVoiceprintConsent(scoring.consent, input.consent),
+    consent: restrictVoiceprintConsentWithLedger(
+      scoring.consent,
+      input.consent,
+      lifecycle,
+      subjectKey,
+    ),
     qualityThresholds: restrictVoiceprintQualityThresholds(
       scoring.qualityThresholds,
       input.qualityThresholds,

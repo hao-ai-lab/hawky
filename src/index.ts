@@ -30,6 +30,7 @@ import {
   registerVoiceprintMethods,
   resolveVoiceprintLiveScoringConfigFromConfig,
 } from "./gateway/voiceprint-methods.js";
+import { resolveVoiceprintLifecycleFromConfig } from "./gateway/voiceprint-lifecycle.js";
 import { MemoryScheduler } from "./memory/scheduler.js";
 import { registerFrontendBootContextMethods } from "./gateway/frontend-boot-context.js";
 import { MethodError } from "./gateway/methods.js";
@@ -1047,11 +1048,18 @@ async function main() {
 
       // Voiceprint identity annotations are applied as a session-scoped bundle.
       // Live scoring stays disabled unless explicitly configured server-side.
+      // A4 lifecycle: durable, file-backed consent ledger + audit log under the
+      // config root, with the retention window from config. NON-ENFORCING by
+      // default (records + audits but does not gate enroll/score), so this is
+      // additive and inert for existing call sites.
       registerVoiceprintMethods(
         gateway,
         undefined,
         undefined,
         resolveVoiceprintLiveScoringConfigFromConfig(gwConfig),
+        undefined,
+        undefined,
+        resolveVoiceprintLifecycleFromConfig(gwConfig),
       );
 
       // Memory feature (#653): consolidate daily → global every 6h, but only if
