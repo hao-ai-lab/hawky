@@ -3672,37 +3672,96 @@ final class LiveSessionStore {
         maybeAttachOnDeviceEmbeddings(finalizedTurns: result.finalizedTurns, sessionKey: result.sessionKey)
     }
 
-    /// B1: OFF-BY-DEFAULT hook. When the on-device embedding gate is on AND a
-    /// CoreML model is provisioned, produce score_turns params carrying an
-    /// on-device `sampleEmbedding` per turn. When the model is absent (the default
-    /// here), the embedder is nil and each turn stays markers-only — the existing
-    /// server-scored path is unchanged. The A8 `nonce` is intentionally omitted
-    /// (B2 populates it); without it the gateway will not score a client
-    /// embedding, so this path is inert until B2 lands. Never blocks the session.
+    /// B1/B2: OFF-BY-DEFAULT hook. When the on-device embedding gate is on AND a
+    /// CoreML model is provisioned, produce score_turns turns carrying an on-device
+    /// `sampleEmbedding` per turn, then submit them through the fail-closed liveness
+    /// coordinator (B2): request a FRESH single-use A8 nonce, attach it, and call
+    /// `identity.voiceprint.score_turns`.
+    ///
+    /// When the model is absent (the default here), `resolvedSpeakerEmbedder`
+    /// returns nil and this method returns immediately — NOTHING requests a
+    /// challenge or sends score_turns, and the existing marker path is byte-for-byte
+    /// unchanged. B1 follow-up folded in: `embed()` (CoreML inference) runs OFF the
+    /// @MainActor on a detached task so per-turn inference never blocks the store;
+    /// the submission then hops back to the main actor. Never blocks/crashes the
+    /// session.
     private func maybeAttachOnDeviceEmbeddings(
         finalizedTurns: [LiveVoiceprintFinalizedTurn],
         sessionKey: String
     ) {
         let cfg = activeConfig ?? config
-        guard let embedder = resolvedSpeakerEmbedder(config: cfg) else { return }
-        let scoreTurns = Self.buildVoiceprintScoreTurns(
-            sessionKey: sessionKey,
-            finalizedTurns: finalizedTurns,
-            embedder: embedder,
-            nonce: nil,
-            pcmForTurn: { _ in
-                // The finalized turn's PCM lives in the local WAV; extracting the
-                // exact [startMs, endMs] window is a device-only concern wired when
-                // the CAM++ model is provisioned. Until then the gate is closed
-                // (embedder unavailable), so this closure is never called in the
-                // default build and each turn degrades to markers-only.
-                nil
+        guard let embedder = resolvedSpeakerEmbedder(config: cfg),
+              let bridge = gatewayBridge else { return }
+        let modeRaw = cfg.mode.rawValue
+
+        // Run CoreML inference OFF the main actor so per-turn embedding never blocks
+        // @MainActor LiveSessionStore. `buildVoiceprintScoreTurns` is nonisolated and
+        // Sendable-safe; the finalized turns + embedder are value types / Sendable.
+        Task { [weak self, embedder, bridge, finalizedTurns, sessionKey, modeRaw] in
+            let scoreTurns = await Task.detached(priority: .utility) {
+                LiveSessionStore.buildVoiceprintScoreTurns(
+                    sessionKey: sessionKey,
+                    finalizedTurns: finalizedTurns,
+                    embedder: embedder,
+                    nonce: nil,
+                    pcmForTurn: { _ in
+                        // The finalized turn's PCM lives in the local WAV; extracting
+                        // the exact [startMs, endMs] window is a device-only concern
+                        // wired when the CAM++ model is provisioned. Until then the
+                        // gate is closed (embedder unavailable), so this closure is
+                        // never called in the default build and each turn degrades to
+                        // markers-only — nothing is submitted.
+                        nil
+                    }
+                )
+            }.value
+
+            let embedded = scoreTurns.filter { $0.embedding != nil }.count
+            // No embedding produced → do NOT open a challenge / send score_turns.
+            // The marker path (voiceprint.realtime_event) already covered these turns.
+            guard embedded > 0 else {
+                await MainActor.run { [weak self] in
+                    self?.appendVerbose(
+                        "Voiceprint on-device embeddings: 0/\(scoreTurns.count) turns — marker path"
+                    )
+                }
+                return
             }
-        )
-        let embedded = scoreTurns.filter { $0.embedding != nil }.count
-        appendVerbose(
-            "Voiceprint on-device embeddings: \(embedded)/\(scoreTurns.count) turns via \(embedder.modelInfo.provider.rawValue)"
-        )
+
+            // FAIL-CLOSED liveness binding: fresh single-use nonce → attach → submit.
+            let coordinator = VoiceprintLivenessCoordinator(gateway: bridge)
+            let submission = await coordinator.submit(
+                sessionKey: sessionKey,
+                mode: modeRaw,
+                turns: scoreTurns
+            )
+            await MainActor.run { [weak self] in
+                self?.appendVerbose(Self.voiceprintSubmissionLog(
+                    submission,
+                    embedded: embedded,
+                    total: scoreTurns.count,
+                    provider: embedder.modelInfo.provider.rawValue
+                ))
+            }
+        }
+    }
+
+    /// Human-readable summary of one liveness submission for the verbose event log.
+    nonisolated static func voiceprintSubmissionLog(
+        _ submission: VoiceprintLivenessSubmission,
+        embedded: Int,
+        total: Int,
+        provider: String
+    ) -> String {
+        switch submission {
+        case .submittedWithNonce:
+            return "Voiceprint on-device embeddings: \(embedded)/\(total) turns via \(provider) (nonce-bound)"
+        case .markersOnly(let reason):
+            let why = reason == .challengeExpired ? "nonce expired" : "no fresh nonce"
+            return "Voiceprint embeddings withheld (\(why)) — marker path already covered \(total) turns"
+        case .noEmbeddingTurns:
+            return "Voiceprint on-device embeddings: 0/\(total) turns — marker path"
+        }
     }
 
     // MARK: - B1 on-device speaker embedding

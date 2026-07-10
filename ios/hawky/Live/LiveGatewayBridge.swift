@@ -163,6 +163,64 @@ struct LiveVoiceprintFinalizedTurn: Equatable {
     }
 }
 
+/// Result of `identity.voiceprint.request_embedding_challenge` (A8 liveness).
+/// The gateway returns a single-use, session-bound nonce with a TTL. The server
+/// consumes a nonce per eligible turn, so B2 requests one fresh nonce PER
+/// embedding-carrying turn and attaches each to its own turn, treating every nonce as
+/// consumed afterwards (never reused across turns or submissions).
+struct LiveVoiceprintEmbeddingChallenge: Equatable {
+    var sessionKey: String
+    var nonce: String
+    var expiresAtMs: Double
+
+    init?(payload: JSONValue?) {
+        guard
+            case let .some(.object(root)) = payload,
+            case let .some(.bool(ok)) = root["ok"], ok,
+            case let .some(.string(sessionKey)) = root["sessionKey"],
+            case let .some(.string(nonce)) = root["nonce"], !nonce.isEmpty,
+            case let .some(.number(expiresAtMs)) = root["expiresAtMs"]
+        else {
+            return nil
+        }
+        self.sessionKey = sessionKey
+        self.nonce = nonce
+        self.expiresAtMs = expiresAtMs
+    }
+}
+
+/// Result of `identity.voiceprint.score_turns`. iOS only needs a typed
+/// success/failure signal (the server owns the actual scoring decision), so this
+/// captures `ok` plus the echoed session key and the reported turn count.
+struct LiveVoiceprintScoreTurnsResult: Equatable {
+    var ok: Bool
+    var sessionKey: String?
+    var turns: Int?
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        let ok: Bool
+        if case let .some(.bool(value)) = root["ok"] {
+            ok = value
+        } else {
+            // The server returns a structured result object without a top-level
+            // `ok` on the happy path; treat presence of a sessionKey/status as ok.
+            ok = root["sessionKey"] != nil || root["status"] != nil
+        }
+        self.ok = ok
+        if case let .some(.string(sessionKey)) = root["sessionKey"] {
+            self.sessionKey = sessionKey
+        } else {
+            self.sessionKey = nil
+        }
+        if case let .some(.number(turns)) = root["turns"] {
+            self.turns = Int(turns)
+        } else {
+            self.turns = nil
+        }
+    }
+}
+
 struct LiveVoiceprintRealtimeResult: Equatable {
     var ok: Bool
     var sessionKey: String
@@ -908,6 +966,45 @@ actor LiveGatewayBridge {
             return false
         }
         return ok
+    }
+
+    /// A8 liveness (B2). Request a fresh single-use, session-bound, TTL-limited
+    /// nonce that the client MUST attach to an embedding-carrying score_turns
+    /// submission. Returns nil on any failure (offline / no token / bad payload) so
+    /// the caller FAILS CLOSED and never submits a client embedding without a nonce.
+    func requestVoiceprintEmbeddingChallenge(
+        sessionKey: String,
+        mode: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async -> LiveVoiceprintEmbeddingChallenge? {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.request_embedding_challenge",
+            params: ["sessionKey": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEmbeddingChallenge(payload: payload)
+    }
+
+    /// Submit B1-serialized score_turns params (a batch of finalized turns, some of
+    /// which may carry an on-device `sampleEmbedding` + `sampleEmbeddingModel` +
+    /// A8 `nonce`). Returns nil on transport failure. Reuse
+    /// `LiveVoiceprintScoreTurn.scoreTurnsParams` to build `params`.
+    func sendVoiceprintScoreTurns(
+        sessionKey: String,
+        params: [String: JSONValue],
+        mode: String,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> LiveVoiceprintScoreTurnsResult? {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.score_turns",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintScoreTurnsResult(payload: payload)
     }
 
     /// Invoke an arbitrary gateway method over a short-lived connection and return

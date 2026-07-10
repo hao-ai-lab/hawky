@@ -905,6 +905,31 @@ What is already in place:
     pass-through (`voice.*`) prove genericity. An OPTIONAL `provider` hint on the
     event or the `identity.voiceprint.realtime_event` RPC params selects an
     adapter; unset/`auto` walks the registry.
+  - iOS on-device speaker embedding (B1/B2) is wired but OFF by default. B1 added
+    the `SpeakerEmbedder` seam (`ios/hawky/Voiceprint/`): a `CoreMLSpeakerEmbedder`
+    that reports itself unavailable when no CAM++ `.mlmodelc` is provisioned (the
+    binary is gitignored and never committed), a deterministic dev/test reference
+    embedder, and the `LiveVoiceprintScoreTurn` serialization for
+    `identity.voiceprint.score_turns` (`sampleEmbedding` / `sampleEmbeddingModel` /
+    optional `nonce`). B2 added the A8 liveness binding: `LiveGatewayBridge` now has
+    `requestVoiceprintEmbeddingChallenge` (calls
+    `identity.voiceprint.request_embedding_challenge`) and `sendVoiceprintScoreTurns`
+    (calls `identity.voiceprint.score_turns`), and
+    `ios/hawky/Voiceprint/VoiceprintLivenessCoordinator.swift` binds a FRESH,
+    single-use, TTL-bound nonce to each embedding-carrying TURN. The rule is
+    FAIL-CLOSED: an on-device embedding is never submitted without a fresh unexpired
+    nonce; the server consumes a nonce per eligible turn, so every embedding turn
+    requests its OWN nonce (never reused across turns or submissions); a nonce at/after
+    expiry (with a safety margin) is discarded; and any failure (challenge
+    unavailable / expired) for any turn drops the embedding for that batch WITHOUT
+    re-submitting the turns — they were already reported to the gateway by the `realtime_event`
+    marker path, so a markers-only `score_turns` would be redundant ingestion; the
+    fail-closed path is a clean no-op. It never crashes or blocks the session. CoreML
+    inference (`embed()`) runs off
+    the `@MainActor` on a detached task. The whole path stays gated behind
+    `voiceprintRealtimeEnabled` + `onDeviceEmbeddingEnabled` AND CoreML availability;
+    with the model absent (the repo default) NOTHING requests a challenge or sends
+    `score_turns` and the marker path is byte-for-byte unchanged.
 
 - `src/memory/*`
   - Session-end and scheduled memory distillation exist.
