@@ -1,5 +1,6 @@
 export * from "./audio-features.js";
 export * from "./contracts.js";
+export * from "./evidence.js";
 export * from "./manifest.js";
 export * from "./live-adapter.js";
 export * from "./live-client-embedding.js";
