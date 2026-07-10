@@ -21,6 +21,7 @@ import {
   formatVoiceprintModel,
   sameVoiceprintModel,
 } from "./model.js";
+import { isReferenceVoiceprintModel } from "./model-lifecycle.js";
 import type { VoiceprintConsentSnapshot } from "./policy.js";
 import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
 
@@ -130,6 +131,13 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
   eventId?: string;
   createdAt?: IsoTime;
   expectedModel?: VoiceprintModelInfo;
+  /**
+   * A5 production guard: when true, refuse ANY response whose returned model tag
+   * is the non-discriminative reference backend, independent of expectedModel.
+   * This is the definitive runtime check at the point the model tag exists — the
+   * declared sidecar env is only the REQUESTED backend, not proof of what ran.
+   */
+  requireDiscriminativeModel?: boolean;
   /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
   asNorm?: VoiceprintTurnAsNormOptions;
 }): LiveVoiceprintScoringJobResult {
@@ -137,6 +145,19 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
   if (input.response.id !== input.job.embeddingRequest.id) {
     throw new Error(
       `Live voiceprint sidecar response id ${input.response.id} does not match job request id ${input.job.embeddingRequest.id}.`,
+    );
+  }
+  // A5 PRODUCTION GUARD (runtime): the reference backend is non-discriminative,
+  // so a "score" it produces is meaningless for a real user. Refuse it based on
+  // the model the sidecar ACTUALLY returned — this holds even when expected_model
+  // is unset and even if a misconfigured/wrapper sidecar emitted a reference tag
+  // despite a non-reference declared env.
+  if (
+    input.requireDiscriminativeModel &&
+    isReferenceVoiceprintModel(input.response.model)
+  ) {
+    throw new Error(
+      `Live voiceprint sidecar returned the non-discriminative reference model ${formatVoiceprintModel(input.response.model)}; require_discriminative_model refuses to score it.`,
     );
   }
   if (

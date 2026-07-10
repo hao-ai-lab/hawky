@@ -43,6 +43,8 @@ export interface ClientEmbeddingScoreContext {
   sampleEmbeddingModel?: VoiceprintModelInfo;
   /** The owner template / expected model the client embedding must match. */
   expectedModel?: VoiceprintModelInfo;
+  /** A5 production guard: refuse a reference-tagged returned model at score time. */
+  requireDiscriminativeModel?: boolean;
   thresholds?: Partial<VoiceprintThresholds>;
   consent?: Partial<VoiceprintConsentSnapshot>;
   templateLearningReviewed?: boolean;
@@ -112,6 +114,7 @@ export function scoreClientEmbeddingForQueuedTurn(input: {
     // scoreLiveVoiceprintScoringJobResponse re-checks the response model against
     // expectedModel; we pass the same expected model to keep that guard active.
     expectedModel: context.expectedModel,
+    requireDiscriminativeModel: context.requireDiscriminativeModel,
     asNorm: context.asNorm,
   });
 
