@@ -219,6 +219,76 @@ export function applyVoiceprintStorageBundle(input: {
   };
 }
 
+export interface VoiceprintSubjectPurgeResult {
+  snapshot: VoiceprintStorageSnapshot;
+  removed: VoiceprintStorageCounts;
+}
+
+/**
+ * A4 right-to-erasure primitive: remove EVERY derived voiceprint record for a
+ * subject (keyed by `sessionKey`) from a snapshot. `transcriptIdentityStates`,
+ * `speakerTurnTags`, and `transcriptSpeakerAnnotations` carry `sessionKey`
+ * directly; `identitySignals` and `eventParticipations` do not, so they are
+ * cascaded out by the signal ids referenced from the removed tags/annotations.
+ * The result is a snapshot with no trace of the subject.
+ */
+export function purgeVoiceprintSubjectFromSnapshot(input: {
+  snapshot: VoiceprintStorageSnapshot;
+  sessionKey: string;
+}): VoiceprintSubjectPurgeResult {
+  const sessionKey = input.sessionKey;
+  const snapshot = {
+    ...emptyVoiceprintStorageSnapshot(),
+    ...input.snapshot,
+  };
+
+  const removedSignalIds = new Set<string>();
+  const keptStates = snapshot.transcriptIdentityStates.filter(
+    (state) => state.sessionKey !== sessionKey,
+  );
+  const keptTags = snapshot.speakerTurnTags.filter((tag) => {
+    if (tag.sessionKey === sessionKey) {
+      removedSignalIds.add(tag.identitySignalId);
+      return false;
+    }
+    return true;
+  });
+  const keptAnnotations = snapshot.transcriptSpeakerAnnotations.filter((annotation) => {
+    if (annotation.sessionKey === sessionKey) {
+      removedSignalIds.add(annotation.identitySignalId);
+      return false;
+    }
+    return true;
+  });
+  const keptSignals = snapshot.identitySignals.filter(
+    (signal) => !removedSignalIds.has(signal.id),
+  );
+  const keptEvents = snapshot.eventParticipations.filter(
+    (event) => !event.supportingSignalIds.some((id) => removedSignalIds.has(id)),
+  );
+
+  const next: VoiceprintStorageSnapshot = {
+    transcriptIdentityStates: keptStates,
+    speakerTurnTags: keptTags,
+    identitySignals: keptSignals,
+    transcriptSpeakerAnnotations: keptAnnotations,
+    eventParticipations: keptEvents,
+  };
+
+  return {
+    snapshot: next,
+    removed: {
+      transcriptIdentityStates:
+        snapshot.transcriptIdentityStates.length - keptStates.length,
+      speakerTurnTags: snapshot.speakerTurnTags.length - keptTags.length,
+      identitySignals: snapshot.identitySignals.length - keptSignals.length,
+      transcriptSpeakerAnnotations:
+        snapshot.transcriptSpeakerAnnotations.length - keptAnnotations.length,
+      eventParticipations: snapshot.eventParticipations.length - keptEvents.length,
+    },
+  };
+}
+
 function validateBundle(bundle: VoiceprintStorageBundle): void {
   if (bundle.version !== 1) {
     throw new Error("Voiceprint storage bundle version must be 1.");

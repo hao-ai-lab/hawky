@@ -771,6 +771,15 @@ export interface HawkyConfig {
   };
   /** Voiceprint identity configuration. Disabled unless explicitly enabled. */
   voiceprint?: {
+    /**
+     * A4 biometric retention window (BIPA/GDPR). Voiceprint data (templates +
+     * derived states) older than this window is destroyed by
+     * `identity.voiceprint.purge_expired`. Default 365 days. See the PUBLISHED
+     * DESTRUCTION SCHEDULE in `identity/voiceprint/consent-ledger.ts`. Provide
+     * `retention_ms` to override in milliseconds; otherwise `retention_days`.
+     */
+    retention_days?: number;
+    retention_ms?: number;
     live_scoring?: {
       enabled?: boolean;
       /**

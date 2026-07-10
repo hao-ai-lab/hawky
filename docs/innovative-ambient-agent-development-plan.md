@@ -1071,6 +1071,29 @@ deeper follow-up**. That attestation/capture-binding work MUST land before
 `accept_client_embeddings` is enabled in production; A8 alone is a prerequisite,
 not sufficient.
 
+**A4 — published retention/destruction schedule + audit-excludes-biometrics
+guarantee (shipped).** The consent/retention/deletion/audit lifecycle has a
+single operator-visible source of truth: the header of
+`src/identity/voiceprint/consent-ledger.ts` (referenced from
+`src/gateway/voiceprint-lifecycle.ts`). The **published destruction schedule** is:
+default retention window **365 days** (`DEFAULT_VOICEPRINT_RETENTION_MS`) from a
+subject's consent grant/last-refresh, configurable via `voiceprint.retention_days`
+(or `voiceprint.retention_ms`); on **withdrawal**, the subject's biometric data
+(encrypted owner template + all derived states/bundles/cached artifacts) is
+destroyed **immediately** (right-to-erasure) while the append-only consent ledger
+keeps the withdrawal record; on **expiry**, `identity.voiceprint.purge_expired`
+(or the internal sweep) destroys any subject past the window exactly as a
+withdrawal would. The **audit-excludes-biometrics guarantee** is enforced in code,
+not just documented: every audit record is metadata-only (subjectKey, op,
+timestamp, outcome, integer counts) and `assertVoiceprintAuditRecordHasNoSecrets`
+runs on every append (in-memory and file-backed) — it allow-lists a fixed set of
+top-level keys and hard-errors on anything else, so an embedding, raw audio, or
+encryption key can never be smuggled into the log (a tampered on-disk file is
+re-validated on read). The whole lifecycle is **additive and off by default**
+(`enforceConsentLedger: false`): wiring it records + audits but does not change any
+existing enroll/score gate. Covered by `tests/test-voiceprint-lifecycle.ts`
+(withdrawal purge + idempotence, retention-window purge, audit secret rejection).
+
 ### Threshold & scoring calibration strategy
 
 First real-voice measurements (2026-07-10, CAM++ via the server sidecar): the
