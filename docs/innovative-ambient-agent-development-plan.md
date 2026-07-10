@@ -1102,7 +1102,14 @@ The real levers are in *how we score*, not the threshold, in bang-for-buck order
 2. **Score normalization (AS-Norm) against an impostor cohort** so cosine is
    comparable across recording conditions and the same-speaker distribution
    tightens — the principled fix for "one threshold can't span conditions".
-   Requires shipping a fixed background cohort.
+   Requires shipping a fixed background cohort. *Status:* the symmetric AS-Norm
+   algorithm and an opt-in scoring path ship in
+   `src/identity/voiceprint/as-norm.ts` (wired through `turn-scoring.ts` via the
+   `asNorm` option). It is **OFF by default** and byte-for-byte inert when the
+   option is omitted. It stays gated until (a) a real cohort of hundreds of
+   diverse non-owner speakers is embedded with the *same* model as the owner
+   template and (b) its own z-score-scale thresholds are calibrated per (4) — the
+   defaults in code are illustrative placeholders, not shippable numbers.
 3. **Two-tier grey band + multi-turn evidence accumulation.** The
    `possible_owner` band already exists; treat it as "provisional, gather more
    turns" and decide across a conversation with hysteresis rather than betting

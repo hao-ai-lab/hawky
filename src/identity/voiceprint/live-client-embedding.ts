@@ -9,6 +9,7 @@ import type { VoiceprintEmbeddingResponse } from "./sidecar-protocol.js";
 import { voiceprintConsentAllowsProcessing } from "./policy.js";
 import type { VoiceprintConsentSnapshot } from "./policy.js";
 import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
+import type { VoiceprintTurnAsNormOptions } from "./turn-scoring.js";
 import type { IsoTime } from "./contracts.js";
 
 /**
@@ -47,6 +48,8 @@ export interface ClientEmbeddingScoreContext {
   templateLearningReviewed?: boolean;
   eventId?: string;
   createdAt?: IsoTime;
+  /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
+  asNorm?: VoiceprintTurnAsNormOptions;
 }
 
 export type ClientEmbeddingRejectionReason =
@@ -109,6 +112,7 @@ export function scoreClientEmbeddingForQueuedTurn(input: {
     // scoreLiveVoiceprintScoringJobResponse re-checks the response model against
     // expectedModel; we pass the same expected model to keep that guard active.
     expectedModel: context.expectedModel,
+    asNorm: context.asNorm,
   });
 
   return { ok: true, result };

@@ -16,6 +16,7 @@ import {
   type LiveVoiceprintReadyTurn,
   type LiveVoiceprintScoredTurn,
 } from "./live-adapter.js";
+import type { VoiceprintTurnAsNormOptions } from "./turn-scoring.js";
 import {
   formatVoiceprintModel,
   sameVoiceprintModel,
@@ -129,6 +130,8 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
   eventId?: string;
   createdAt?: IsoTime;
   expectedModel?: VoiceprintModelInfo;
+  /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
+  asNorm?: VoiceprintTurnAsNormOptions;
 }): LiveVoiceprintScoringJobResult {
   validateEmbeddingResponse(input.response);
   if (input.response.id !== input.job.embeddingRequest.id) {
@@ -155,6 +158,7 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
     templateLearningReviewed: input.templateLearningReviewed,
     eventId: input.eventId,
     createdAt: input.createdAt,
+    asNorm: input.asNorm,
   });
 
   return {

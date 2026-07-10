@@ -32,6 +32,7 @@ import {
   type VoiceprintConsentSnapshot,
 } from "./policy.js";
 import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
+import type { VoiceprintTurnAsNormOptions } from "./turn-scoring.js";
 
 export interface LiveVoiceprintScoringJobContext {
   job: LiveVoiceprintScoringJob;
@@ -42,6 +43,8 @@ export interface LiveVoiceprintScoringJobContext {
   eventId?: string;
   createdAt?: IsoTime;
   expectedModel?: VoiceprintModelInfo;
+  /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
+  asNorm?: VoiceprintTurnAsNormOptions;
 }
 
 export interface LiveVoiceprintScoringBatchResult {

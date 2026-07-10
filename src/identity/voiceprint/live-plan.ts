@@ -30,6 +30,7 @@ import type {
 import { runLiveVoiceprintScoringJobs } from "./live-sidecar-runner.js";
 import type { EmbeddingSidecarCommand } from "./sidecar-client.js";
 import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
+import type { VoiceprintTurnAsNormOptions } from "./turn-scoring.js";
 import type { IsoTime } from "./contracts.js";
 
 export interface LiveVoiceprintPlanItemInput extends LiveVoiceprintQueueInput {
@@ -56,6 +57,13 @@ export interface LiveVoiceprintPlanItemInput extends LiveVoiceprintQueueInput {
    * usable audio) — the server never silently trusts a client vector.
    */
   acceptClientEmbeddings?: boolean;
+  /**
+   * OPT-IN A3 AS-Norm normalization for this turn (default OFF). When present the
+   * per-turn score is AS-Norm normalized against the cohort and classified with
+   * the normalized thresholds; when absent, scoring is byte-for-byte the raw path.
+   * Applies to BOTH the sidecar and client-embedding scoring paths.
+   */
+  asNorm?: VoiceprintTurnAsNormOptions;
 }
 
 export interface LiveVoiceprintClientEmbeddingSkip {
@@ -146,6 +154,7 @@ export function buildLiveVoiceprintScoringPlan(input: {
           templateLearningReviewed: turn.templateLearningReviewed,
           eventId: turn.eventId,
           createdAt: turn.createdAt,
+          asNorm: turn.asNorm,
         },
       });
 
@@ -188,6 +197,7 @@ export function buildLiveVoiceprintScoringPlan(input: {
       eventId: turn.eventId,
       createdAt: turn.createdAt,
       expectedModel: turn.expectedModel,
+      asNorm: turn.asNorm,
     });
   }
 
