@@ -1,3 +1,4 @@
+export * from "./as-norm.js";
 export * from "./audio-features.js";
 export * from "./contracts.js";
 export * from "./evidence.js";

@@ -80,6 +80,7 @@ import {
   type VoiceprintTemplateStorageRef,
   type VoiceprintThresholds,
   type VoiceprintTranscriptIdentityState,
+  type VoiceprintCohort,
 } from "../identity/voiceprint/index.js";
 import type { EmbeddingSidecarCommand } from "../identity/voiceprint/index.js";
 
@@ -182,6 +183,18 @@ export interface VoiceprintLiveScoringConfig {
    * Defaults to DEFAULT_VOICEPRINT_LIVENESS_NONCE_TTL_MS when unset.
    */
   livenessNonceTtlMs?: number;
+  /**
+   * A3 AS-Norm normalization. Present ONLY when config `voiceprint.live_scoring.as_norm`
+   * is `enabled` AND a cohort is resolvable. When present, per-turn scoring
+   * normalizes the raw cosine against `cohort` and classifies with
+   * `normalizedThresholds` (a z-score-like scale). When absent (the default),
+   * scoring is byte-for-byte the raw-cosine path.
+   */
+  asNorm?: {
+    cohort: VoiceprintCohort;
+    normalizedThresholds: VoiceprintThresholds;
+    topN?: number;
+  };
 }
 
 export interface VoiceprintScoreTurnsResult {
@@ -233,7 +246,205 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
       raw.liveness_nonce_ttl_ms,
       "voiceprint.live_scoring.liveness_nonce_ttl_ms",
     ),
+    // A3 AS-Norm: OPT-IN, default OFF. Only resolved when `as_norm.enabled` is
+    // true AND a cohort is provided; otherwise undefined => raw-cosine scoring.
+    // The resolved expected_model is passed so the cohort model can be pinned to
+    // it at config load (see resolveConfiguredVoiceprintAsNorm).
+    asNorm: resolveConfiguredVoiceprintAsNorm(
+      raw.as_norm,
+      resolveConfiguredVoiceprintModel(raw.expected_model),
+    ),
   };
+}
+
+type ConfiguredVoiceprintAsNorm = VoiceprintLiveScoringConfigSection["as_norm"];
+
+function resolveConfiguredVoiceprintAsNorm(
+  asNorm: ConfiguredVoiceprintAsNorm,
+  expectedModel: VoiceprintModelInfo | undefined,
+): VoiceprintLiveScoringConfig["asNorm"] {
+  if (asNorm === undefined) {
+    return undefined;
+  }
+  if (!asNorm || typeof asNorm !== "object") {
+    throw new Error("voiceprint.live_scoring.as_norm must be an object.");
+  }
+  // Default OFF: an explicit `enabled: true` is required to activate AS-Norm.
+  if (asNorm.enabled !== true) {
+    return undefined;
+  }
+
+  // MODEL PINNING. AS-Norm cohort cosines are only comparable to owner<->sample
+  // cosines when both are produced by the same model+version. The runtime check
+  // only compares the cohort model against the *sample* (sidecar) model, so
+  // without a pinned expected_model a cohort tagged model X could silently
+  // normalize a model-Y owner template. Require expected_model whenever AS-Norm
+  // is enabled and pin the cohort model to it, closing the chain
+  // cohort == expected == owner-template (expected is separately checked against
+  // the template model at scoring time).
+  if (!expectedModel) {
+    throw new Error(
+      "voiceprint.live_scoring.expected_model is required when as_norm.enabled is true (the AS-Norm cohort must be pinned to the owner-template model).",
+    );
+  }
+
+  const cohortModel = resolveConfiguredVoiceprintAsNormCohortModel(asNorm.cohort_model);
+  if (!sameVoiceprintModel(cohortModel, expectedModel)) {
+    throw new Error(
+      "voiceprint.live_scoring.as_norm.cohort_model does not match voiceprint.live_scoring.expected_model; the cohort must be embedded with the same model as the owner template.",
+    );
+  }
+  const embeddings = resolveConfiguredVoiceprintAsNormEmbeddings(asNorm, cohortModel);
+
+  const normalizedThresholds = resolveConfiguredVoiceprintAsNormThresholds(
+    asNorm.normalized_thresholds,
+  );
+  if (!normalizedThresholds) {
+    throw new Error(
+      "voiceprint.live_scoring.as_norm.normalized_thresholds is required when as_norm.enabled is true (the AS-Norm output is a z-score-like scale and must NOT reuse the raw cosine thresholds).",
+    );
+  }
+
+  const topN = optionalPositiveNumber(
+    asNorm.top_n ?? asNorm.topN,
+    "voiceprint.live_scoring.as_norm.top_n",
+  );
+
+  return {
+    cohort: { model: cohortModel, embeddings },
+    normalizedThresholds,
+    ...(topN !== undefined ? { topN } : {}),
+  };
+}
+
+function resolveConfiguredVoiceprintAsNormCohortModel(
+  model: NonNullable<ConfiguredVoiceprintAsNorm>["cohort_model"],
+): VoiceprintModelInfo {
+  if (!model || typeof model !== "object") {
+    throw new Error("voiceprint.live_scoring.as_norm.cohort_model is required when as_norm.enabled is true.");
+  }
+  const provider = configString(model.provider, "voiceprint.live_scoring.as_norm.cohort_model.provider");
+  if (!["external-json", "signal-baseline", "speechbrain", "wespeaker", "picovoice", "sherpa-onnx", "reference", "custom"].includes(provider)) {
+    throw new Error("voiceprint.live_scoring.as_norm.cohort_model.provider is invalid.");
+  }
+  return {
+    provider: provider as VoiceprintModelInfo["provider"],
+    modelId: configString(
+      model.model_id ?? model.modelId,
+      "voiceprint.live_scoring.as_norm.cohort_model.model_id",
+    ),
+    version: optionalConfigString(model.version),
+    notes: optionalConfigString(model.notes),
+  };
+}
+
+function resolveConfiguredVoiceprintAsNormEmbeddings(
+  asNorm: NonNullable<ConfiguredVoiceprintAsNorm>,
+  cohortModel: VoiceprintModelInfo,
+): number[][] {
+  if (Array.isArray(asNorm.cohort_embeddings) && asNorm.cohort_embeddings.length > 0) {
+    return validateCohortEmbeddingList(
+      asNorm.cohort_embeddings,
+      "voiceprint.live_scoring.as_norm.cohort_embeddings",
+    );
+  }
+  if (asNorm.cohort_file) {
+    const filePath = configPath(asNorm.cohort_file, "voiceprint.live_scoring.as_norm.cohort_file");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(filePath, "utf8"));
+    } catch (error) {
+      throw new Error(
+        `voiceprint.live_scoring.as_norm.cohort_file could not be read as JSON (${filePath}): ${errorMessage(error)}`,
+      );
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("voiceprint.live_scoring.as_norm.cohort_file must contain a JSON object.");
+    }
+    const file = parsed as { model?: unknown; embeddings?: unknown };
+    // The file MAY carry its own model tag; if it does, it must match the
+    // configured cohort model so a mislabeled cohort file is rejected loudly.
+    if (file.model !== undefined) {
+      const fileModel = resolveConfiguredVoiceprintAsNormCohortModel(
+        file.model as NonNullable<ConfiguredVoiceprintAsNorm>["cohort_model"],
+      );
+      if (!sameVoiceprintModel(fileModel, cohortModel)) {
+        throw new Error(
+          "voiceprint.live_scoring.as_norm.cohort_file model does not match as_norm.cohort_model.",
+        );
+      }
+    }
+    return validateCohortEmbeddingList(
+      file.embeddings,
+      "voiceprint.live_scoring.as_norm.cohort_file.embeddings",
+    );
+  }
+  throw new Error(
+    "voiceprint.live_scoring.as_norm requires cohort_embeddings or cohort_file when as_norm.enabled is true.",
+  );
+}
+
+function validateCohortEmbeddingList(value: unknown, field: string): number[][] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${field} must be a non-empty array of embedding vectors.`);
+  }
+  let expectedDim: number | undefined;
+  return value.map((vector, index) => {
+    if (!Array.isArray(vector) || vector.length === 0) {
+      throw new Error(`${field}[${index}] must be a non-empty numeric vector.`);
+    }
+    // Intra-cohort dimension consistency is knowable at config load. A mixed-
+    // dimension cohort is guaranteed to hard-throw inside validateVoiceprintCohort
+    // at scoring time — after config load has succeeded — which would take down an
+    // entire live scoring batch per session. Reject it loudly here so the failure
+    // surfaces at startup instead of as a runtime availability outage.
+    if (expectedDim === undefined) {
+      expectedDim = vector.length;
+    } else if (vector.length !== expectedDim) {
+      throw new Error(
+        `${field}[${index}] has dimension ${vector.length}; every cohort vector must share the same dimension (expected ${expectedDim}).`,
+      );
+    }
+    return vector.map((component, componentIndex) => {
+      if (typeof component !== "number" || !Number.isFinite(component)) {
+        throw new Error(`${field}[${index}][${componentIndex}] must be a finite number.`);
+      }
+      return component;
+    });
+  });
+}
+
+function resolveConfiguredVoiceprintAsNormThresholds(
+  thresholds: NonNullable<ConfiguredVoiceprintAsNorm>["normalized_thresholds"],
+): VoiceprintThresholds | undefined {
+  if (thresholds === undefined) {
+    return undefined;
+  }
+  if (!thresholds || typeof thresholds !== "object") {
+    throw new Error("voiceprint.live_scoring.as_norm.normalized_thresholds must be an object.");
+  }
+  const ownerAccept = optionalNumber(
+    thresholds.owner_accept ?? thresholds.ownerAccept,
+    "voiceprint.live_scoring.as_norm.normalized_thresholds.owner_accept",
+  );
+  const ownerPossible = optionalNumber(
+    thresholds.owner_possible ?? thresholds.ownerPossible,
+    "voiceprint.live_scoring.as_norm.normalized_thresholds.owner_possible",
+  );
+  if (ownerAccept === undefined || ownerPossible === undefined) {
+    throw new Error(
+      "voiceprint.live_scoring.as_norm.normalized_thresholds requires both owner_accept and owner_possible.",
+    );
+  }
+  // The normalized score is a z-score-like scale, so the raw-cosine threshold
+  // validator (which clamps to [ -1, 1 ]-ish ranges) does NOT apply. We only
+  // require accept >= possible and both finite.
+  if (!(ownerAccept >= ownerPossible)) {
+    throw new Error(
+      "voiceprint.live_scoring.as_norm.normalized_thresholds.owner_accept must be >= owner_possible.",
+    );
+  }
+  return { ownerAccept, ownerPossible };
 }
 
 export function createInMemoryVoiceprintStorage(
@@ -1053,6 +1264,15 @@ async function buildScorePlanTurns(input: {
       eventId: input.input.eventId,
       createdAt: input.input.createdAt,
       updatedAt: input.input.updatedAt,
+      // A3 AS-Norm: OPT-IN, default OFF. Only set when config resolved an
+      // enabled cohort; otherwise undefined => raw-cosine scoring is unchanged.
+      asNorm: input.scoring.asNorm
+        ? {
+          cohort: input.scoring.asNorm.cohort,
+          thresholds: input.scoring.asNorm.normalizedThresholds,
+          ...(input.scoring.asNorm.topN !== undefined ? { topN: input.scoring.asNorm.topN } : {}),
+        }
+        : undefined,
     };
 
     if (scoresClientEmbedding) {

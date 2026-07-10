@@ -862,6 +862,44 @@ export interface HawkyConfig {
        * Only relevant when `accept_client_embeddings` is true.
        */
       liveness_nonce_ttl_ms?: number;
+      /**
+       * A3 AS-Norm (Adaptive Symmetric Normalization) score normalization.
+       * OPT-IN and ADDITIVE, default OFF. When enabled AND a cohort is present,
+       * the raw owner<->test cosine is normalized against an impostor cohort and
+       * classified with `normalized_thresholds` (a z-score-like scale — NOT cosine,
+       * so it must carry its own thresholds, never the raw 0.82/0.72). When OFF or
+       * no cohort, scoring is byte-for-byte the raw-cosine path.
+       *
+       * HONESTY: a real cohort needs HUNDREDS of diverse non-owner speakers
+       * embedded with the SAME model as the owner template, and the normalized
+       * thresholds must be calibrated on real data. DO NOT enable in production
+       * until a real cohort + calibrated normalized thresholds are provisioned.
+       */
+      as_norm?: {
+        enabled?: boolean;
+        /** Number of top cohort cosines to average. Defaults to min(300, cohort length). */
+        top_n?: number;
+        topN?: number;
+        /** Model that produced the cohort embeddings; MUST match the owner template model. */
+        cohort_model?: {
+          provider?: "external-json" | "signal-baseline" | "speechbrain" | "wespeaker" | "picovoice" | "sherpa-onnx" | "reference" | "custom";
+          model_id?: string;
+          modelId?: string;
+          version?: string;
+          notes?: string;
+        };
+        /** Inline cohort embeddings (impostor/non-owner vectors). */
+        cohort_embeddings?: number[][];
+        /** File reference to a JSON cohort ({ model, embeddings }). Loaded at resolve time. */
+        cohort_file?: string;
+        /** Normalized-scale thresholds. Required when enabled. Never the raw cosine 0.82/0.72. */
+        normalized_thresholds?: {
+          owner_accept?: number;
+          owner_possible?: number;
+          ownerAccept?: number;
+          ownerPossible?: number;
+        };
+      };
     };
   };
   /** Channel adapters for messaging app integration (Slack, iMessage, etc.). */

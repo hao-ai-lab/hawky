@@ -58,6 +58,231 @@ describe("voiceprint gateway methods", () => {
     } as any)).toBeUndefined();
   });
 
+  describe("AS-Norm config resolution (opt-in)", () => {
+    function baseLiveScoring(dir: string): any {
+      return {
+        enabled: true,
+        sidecar: { command: "/usr/bin/env", args: ["node", "s.js"], cwd: dir },
+        owner_template: {
+          file_path: join(dir, "owner-template.enc.json"),
+          key_path: join(dir, "owner-template.key.json"),
+        },
+        allowed_audio_roots: [dir],
+        consent: { capture_allowed: true, biometric_allowed: true },
+        expected_model: { provider: "custom", model_id: "cammpp", version: "1" },
+      };
+    }
+
+    test("stays OFF (asNorm undefined) when as_norm is absent or not enabled", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-off-"));
+      tempDirs.push(dir);
+      const withoutBlock = resolveVoiceprintLiveScoringConfigFromConfig({
+        voiceprint: { live_scoring: baseLiveScoring(dir) },
+      } as any);
+      expect(withoutBlock?.asNorm).toBeUndefined();
+
+      const disabled = resolveVoiceprintLiveScoringConfigFromConfig({
+        voiceprint: {
+          live_scoring: {
+            ...baseLiveScoring(dir),
+            as_norm: {
+              enabled: false,
+              cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+              cohort_embeddings: [[1, 0], [0, 1]],
+              normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+            },
+          },
+        },
+      } as any);
+      expect(disabled?.asNorm).toBeUndefined();
+    });
+
+    test("resolves an enabled inline cohort with normalized thresholds", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-on-"));
+      tempDirs.push(dir);
+      const scoring = resolveVoiceprintLiveScoringConfigFromConfig({
+        voiceprint: {
+          live_scoring: {
+            ...baseLiveScoring(dir),
+            as_norm: {
+              enabled: true,
+              cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+              cohort_embeddings: [[1, 0], [0, 1], [0.6, 0.8]],
+              normalized_thresholds: { owner_accept: 2.5, owner_possible: 1.5 },
+              top_n: 2,
+            },
+          },
+        },
+      } as any);
+      expect(scoring?.asNorm).toBeDefined();
+      expect(scoring?.asNorm?.cohort.model).toEqual({
+        provider: "custom",
+        modelId: "cammpp",
+        version: "1",
+        notes: undefined,
+      });
+      expect(scoring?.asNorm?.cohort.embeddings).toEqual([[1, 0], [0, 1], [0.6, 0.8]]);
+      expect(scoring?.asNorm?.normalizedThresholds).toEqual({ ownerAccept: 2.5, ownerPossible: 1.5 });
+      expect(scoring?.asNorm?.topN).toBe(2);
+    });
+
+    test("requires normalized thresholds when enabled (must not reuse raw cosine thresholds)", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-thr-"));
+      tempDirs.push(dir);
+      expect(() =>
+        resolveVoiceprintLiveScoringConfigFromConfig({
+          voiceprint: {
+            live_scoring: {
+              ...baseLiveScoring(dir),
+              as_norm: {
+                enabled: true,
+                cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+                cohort_embeddings: [[1, 0]],
+              },
+            },
+          },
+        } as any),
+      ).toThrow(/normalized_thresholds is required/);
+    });
+
+    test("requires a cohort (embeddings or file) when enabled", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-nocohort-"));
+      tempDirs.push(dir);
+      expect(() =>
+        resolveVoiceprintLiveScoringConfigFromConfig({
+          voiceprint: {
+            live_scoring: {
+              ...baseLiveScoring(dir),
+              as_norm: {
+                enabled: true,
+                cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+                normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+              },
+            },
+          },
+        } as any),
+      ).toThrow(/cohort_embeddings or cohort_file/);
+    });
+
+    test("rejects a cohort file whose model tag does not match cohort_model", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-file-"));
+      tempDirs.push(dir);
+      const cohortPath = join(dir, "cohort.json");
+      writeFileSync(
+        cohortPath,
+        JSON.stringify({
+          model: { provider: "custom", model_id: "cammpp", version: "2" },
+          embeddings: [[1, 0], [0, 1]],
+        }),
+      );
+      expect(() =>
+        resolveVoiceprintLiveScoringConfigFromConfig({
+          voiceprint: {
+            live_scoring: {
+              ...baseLiveScoring(dir),
+              as_norm: {
+                enabled: true,
+                cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+                cohort_file: cohortPath,
+                normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+              },
+            },
+          },
+        } as any),
+      ).toThrow(/does not match as_norm.cohort_model/);
+    });
+
+    test("loads a model-matched cohort file", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-file-ok-"));
+      tempDirs.push(dir);
+      const cohortPath = join(dir, "cohort.json");
+      writeFileSync(
+        cohortPath,
+        JSON.stringify({
+          model: { provider: "custom", model_id: "cammpp", version: "1" },
+          embeddings: [[1, 0], [0, 1], [0.6, 0.8]],
+        }),
+      );
+      const scoring = resolveVoiceprintLiveScoringConfigFromConfig({
+        voiceprint: {
+          live_scoring: {
+            ...baseLiveScoring(dir),
+            as_norm: {
+              enabled: true,
+              cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+              cohort_file: cohortPath,
+              normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+            },
+          },
+        },
+      } as any);
+      expect(scoring?.asNorm?.cohort.embeddings).toEqual([[1, 0], [0, 1], [0.6, 0.8]]);
+    });
+
+    test("requires expected_model when as_norm is enabled (pins cohort to owner-template model)", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-noexpected-"));
+      tempDirs.push(dir);
+      const base = baseLiveScoring(dir);
+      delete base.expected_model;
+      expect(() =>
+        resolveVoiceprintLiveScoringConfigFromConfig({
+          voiceprint: {
+            live_scoring: {
+              ...base,
+              as_norm: {
+                enabled: true,
+                cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+                cohort_embeddings: [[1, 0], [0, 1]],
+                normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+              },
+            },
+          },
+        } as any),
+      ).toThrow(/expected_model is required when as_norm/);
+    });
+
+    test("rejects a cohort_model that does not match expected_model", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-modelmismatch-"));
+      tempDirs.push(dir);
+      expect(() =>
+        resolveVoiceprintLiveScoringConfigFromConfig({
+          voiceprint: {
+            live_scoring: {
+              ...baseLiveScoring(dir),
+              as_norm: {
+                enabled: true,
+                // expected_model is cammpp v1; this cohort claims v2.
+                cohort_model: { provider: "custom", model_id: "cammpp", version: "2" },
+                cohort_embeddings: [[1, 0], [0, 1]],
+                normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+              },
+            },
+          },
+        } as any),
+      ).toThrow(/cohort_model does not match/);
+    });
+
+    test("rejects a cohort with mixed-dimension vectors at config load", () => {
+      const dir = mkdtempSync(join(tmpdir(), "voiceprint-asnorm-mixeddim-"));
+      tempDirs.push(dir);
+      expect(() =>
+        resolveVoiceprintLiveScoringConfigFromConfig({
+          voiceprint: {
+            live_scoring: {
+              ...baseLiveScoring(dir),
+              as_norm: {
+                enabled: true,
+                cohort_model: { provider: "custom", model_id: "cammpp", version: "1" },
+                cohort_embeddings: [[1, 0], [0, 1, 0]],
+                normalized_thresholds: { owner_accept: 2, owner_possible: 1 },
+              },
+            },
+          },
+        } as any),
+      ).toThrow(/every cohort vector must share the same dimension/);
+    });
+  });
+
   test("resolves live scoring from server config without client-provided keys", () => {
     const dir = mkdtempSync(join(tmpdir(), "voiceprint-methods-config-"));
     tempDirs.push(dir);

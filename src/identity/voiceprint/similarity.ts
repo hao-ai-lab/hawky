@@ -83,24 +83,40 @@ export function ownerSimilarity(
   ownerEmbeddings: readonly (readonly number[])[],
   sample: readonly number[],
 ): number {
+  return bestOwnerClip(ownerEmbeddings, sample)?.cosine ?? INVALID_VECTOR_SIMILARITY;
+}
+
+/**
+ * The enrolled clip that best matches `sample` (argmax of per-clip cosine),
+ * together with its cosine. This is the single source of truth for the
+ * "max over enrolled clips" aggregation: {@link ownerSimilarity} exposes just
+ * the cosine, while AS-Norm needs the argmax VECTOR to derive its owner-side
+ * cohort statistics from the exact clip that produced the raw score.
+ *
+ * Invalid/zero-norm enrolled vectors are skipped, and an unusable sample or the
+ * absence of any usable enrolled vector returns `undefined` — matching the
+ * not-a-match convention (callers map that to INVALID_VECTOR_SIMILARITY).
+ */
+export function bestOwnerClip(
+  ownerEmbeddings: readonly (readonly number[])[],
+  sample: readonly number[],
+): { clip: readonly number[]; cosine: number } | undefined {
   if (!isUsableEmbeddingVector(sample)) {
-    return INVALID_VECTOR_SIMILARITY;
+    return undefined;
   }
 
-  let best = INVALID_VECTOR_SIMILARITY;
-  let sawUsable = false;
+  let best: { clip: readonly number[]; cosine: number } | undefined;
   for (const enrolled of ownerEmbeddings) {
     if (!isUsableEmbeddingVector(enrolled)) {
       continue;
     }
-    sawUsable = true;
-    const similarity = safeCosineSimilarity(enrolled, sample);
-    if (similarity > best) {
-      best = similarity;
+    const cosine = safeCosineSimilarity(enrolled, sample);
+    if (best === undefined || cosine > best.cosine) {
+      best = { clip: enrolled, cosine };
     }
   }
 
-  return sawUsable ? best : INVALID_VECTOR_SIMILARITY;
+  return best;
 }
 
 export function meanVector(vectors: readonly (readonly number[])[]): number[] {
@@ -134,12 +150,27 @@ export function classifyOwnerSimilarity(
   thresholds: Partial<VoiceprintThresholds> = {},
 ): VoiceprintDecision {
   const resolved = resolveVoiceprintThresholds(thresholds);
+  return classifyOwnerSimilarityWithResolvedThresholds(similarity, resolved);
+}
 
-  if (similarity >= resolved.ownerAccept) {
+/**
+ * Classify a score against ALREADY-RESOLVED thresholds, WITHOUT re-running the
+ * raw-cosine {@link resolveVoiceprintThresholds} validator.
+ *
+ * This exists for AS-Norm: the normalized score is a z-score-like value and its
+ * thresholds routinely exceed the cosine range [0.5, 1] that the raw validator
+ * enforces. The raw-cosine path still goes through {@link classifyOwnerSimilarity}
+ * (which validates), so its behavior is unchanged.
+ */
+export function classifyOwnerSimilarityWithResolvedThresholds(
+  similarity: number,
+  thresholds: VoiceprintThresholds,
+): VoiceprintDecision {
+  if (similarity >= thresholds.ownerAccept) {
     return "owner_speaking";
   }
 
-  if (similarity >= resolved.ownerPossible) {
+  if (similarity >= thresholds.ownerPossible) {
     return "possible_owner";
   }
 
