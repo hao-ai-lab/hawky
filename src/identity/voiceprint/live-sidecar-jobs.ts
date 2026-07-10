@@ -49,6 +49,23 @@ export interface LiveVoiceprintScoringJobResult {
   result: LiveVoiceprintScoredTurn;
 }
 
+/**
+ * FAIL-CLOSED marker: a single sidecar RESPONSE carried a per-turn embedding that
+ * is unusable for scoring (empty / NaN / infinite / zero-norm / wrong dimension).
+ * This is a DATA-QUALITY fault isolated to ONE turn — never a batch-integrity or
+ * security-guard fault — so the batch scorer catches it and marks ONLY that turn
+ * skipped (fail-closed: skipped never resolves) instead of throwing out and losing
+ * the good turns. Structural faults (id/model mismatch, reference-model guard,
+ * duplicate ids) are NOT this error and still throw as clean typed precondition
+ * failures.
+ */
+export class UnusableVoiceprintEmbeddingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnusableVoiceprintEmbeddingError";
+  }
+}
+
 export function buildLiveVoiceprintScoringJob(input: {
   prepared: LiveVoiceprintReadyTurn;
   audioPath: string;
@@ -141,7 +158,16 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
   /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
   asNorm?: VoiceprintTurnAsNormOptions;
 }): LiveVoiceprintScoringJobResult {
-  validateEmbeddingResponse(input.response);
+  // A per-turn UNUSABLE embedding (empty / NaN / infinite / zero-norm) is a
+  // data-quality fault isolated to THIS turn — surface it as the fail-closed
+  // marker so the batch scorer can skip only this turn (never resolve it) instead
+  // of throwing out of the whole batch and losing the good turns. Other response
+  // faults (missing id/model) stay hard throws (batch-integrity precondition).
+  try {
+    validateEmbeddingResponse(input.response);
+  } catch (error) {
+    throw reclassifyUnusableEmbeddingError(error);
+  }
   if (input.response.id !== input.job.embeddingRequest.id) {
     throw new Error(
       `Live voiceprint sidecar response id ${input.response.id} does not match job request id ${input.job.embeddingRequest.id}.`,
@@ -169,18 +195,27 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
     );
   }
 
-  const result = scorePreparedLiveVoiceprintTurn({
-    prepared: input.job.prepared,
-    ownerEmbeddings: input.ownerEmbeddings,
-    sampleEmbedding: input.response.embedding,
-    model: input.response.model,
-    thresholds: input.thresholds,
-    consent: input.consent,
-    templateLearningReviewed: input.templateLearningReviewed,
-    eventId: input.eventId,
-    createdAt: input.createdAt,
-    asNorm: input.asNorm,
-  });
+  let result: LiveVoiceprintScoredTurn;
+  try {
+    result = scorePreparedLiveVoiceprintTurn({
+      prepared: input.job.prepared,
+      ownerEmbeddings: input.ownerEmbeddings,
+      sampleEmbedding: input.response.embedding,
+      model: input.response.model,
+      thresholds: input.thresholds,
+      consent: input.consent,
+      templateLearningReviewed: input.templateLearningReviewed,
+      eventId: input.eventId,
+      createdAt: input.createdAt,
+      asNorm: input.asNorm,
+    });
+  } catch (error) {
+    // A wrong-dimension / unusable SAMPLE embedding (the sidecar-returned vector)
+    // is a per-turn data fault: reclassify so the batch scorer skips only this
+    // turn. Owner-template / consent / quality faults are NOT reclassified — they
+    // are configuration or precondition faults and keep throwing.
+    throw reclassifyUnusableSampleEmbeddingError(error);
+  }
 
   return {
     status: "scored",
@@ -190,6 +225,35 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
     response: input.response,
     result,
   };
+}
+
+/**
+ * Reclassify a {@link validateEmbeddingResponse} failure: only the "finite
+ * non-empty embedding" fault is an unusable-embedding (per-turn) fault. Missing
+ * id/model faults are batch-integrity preconditions and keep throwing as-is.
+ */
+function reclassifyUnusableEmbeddingError(error: unknown): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("finite non-empty embedding")) {
+    return new UnusableVoiceprintEmbeddingError(message);
+  }
+  return error instanceof Error ? error : new Error(message);
+}
+
+/**
+ * Reclassify a scoring failure: only an unusable/wrong-dimension SAMPLE embedding
+ * (the sidecar-returned vector) is a per-turn data fault. Owner-embedding, consent,
+ * and quality faults are configuration/precondition faults and keep throwing.
+ */
+function reclassifyUnusableSampleEmbeddingError(error: unknown): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.includes("sample embedding is invalid") ||
+    message.includes("sample embedding has dimension")
+  ) {
+    return new UnusableVoiceprintEmbeddingError(message);
+  }
+  return error instanceof Error ? error : new Error(message);
 }
 
 function validateJobOptions(input: {

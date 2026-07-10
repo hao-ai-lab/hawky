@@ -65,6 +65,7 @@ import {
   resolveVoiceprintThresholds,
   runEmbeddingSidecar,
   runLiveVoiceprintScoringJobs,
+  VoiceprintSidecarError,
   sameVoiceprintModel,
   sliceWavAudio,
   tombstoneVoiceprintTemplate,
@@ -114,6 +115,21 @@ class VoiceprintStoragePersistenceError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "VoiceprintStoragePersistenceError";
+  }
+}
+
+/**
+ * A fault reading the persisted (file-backed) consent ledger — corrupt/tampered
+ * file, partial write, or an fs fault whose message carries an on-disk path. This
+ * is a SERVER-SIDE storage fault, not a client-request fault and not a consent
+ * denial. Raising a distinct type lets the handler classifiers report it as a
+ * sanitized INTERNAL_ERROR (retryable) rather than mislabeling it INVALID_REQUEST
+ * or auditing the subject as consent_denied.
+ */
+class VoiceprintConsentLedgerStoreError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "VoiceprintConsentLedgerStoreError";
   }
 }
 
@@ -726,14 +742,17 @@ export function registerVoiceprintMethods(
   server.registerMethod("identity.voiceprint.realtime_event", async (conn, params) => {
     const input = parseRealtimeEventParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
-    const event = resolveRealtimeVoiceprintAudioArtifactEvent({
-      sessionKey,
-      event: input.event,
-      audioArtifacts,
-      allowedAudioRoots: scoring?.allowedAudioRoots,
-    });
 
     try {
+      // Resolve the audio artifact INSIDE the try so an artifact-store or
+      // allowed-root resolution fault surfaces as the handler's typed
+      // INVALID_REQUEST, not a raw INTERNAL_ERROR that leaks resolution/path detail.
+      const event = resolveRealtimeVoiceprintAudioArtifactEvent({
+        sessionKey,
+        event: input.event,
+        audioArtifacts,
+        allowedAudioRoots: scoring?.allowedAudioRoots,
+      });
       const result = realtime.applyEvent({
         sessionKey,
         event,
@@ -747,7 +766,12 @@ export function registerVoiceprintMethods(
       });
       return result;
     } catch (error) {
-      throw new MethodError("INVALID_REQUEST", errorMessage(error));
+      // Classify by fault type: a sidecar/artifact-store/lifecycle infra fault is a
+      // retryable INTERNAL_ERROR (sanitized), NOT the client's bad request. Only a
+      // genuine request fault falls through to INVALID_REQUEST. This avoids both
+      // (1) telling the caller it sent a bad request when the server faulted and
+      // (2) leaking a raw on-disk path in the INTERNAL_ERROR case.
+      throw voiceprintMethodError(error);
     }
   });
 
@@ -790,31 +814,39 @@ export function registerVoiceprintMethods(
         "Voiceprint audio artifact registration requires configured audio roots.",
       );
     }
-    const resolved = resolveVoiceprintMediaArtifactPath({
-      mediaId: input.mediaId,
-      allowedAudioRoots: scoring.allowedAudioRoots,
-    });
-    const registered = audioArtifacts.register({
-      sessionKey,
-      audioArtifactId: input.audioArtifactId,
-      mediaId: input.mediaId,
-      audioPath: resolved.audioPath,
-      sampleRate: input.sampleRate ?? resolved.sampleRate,
-      recordingStartMs: input.recordingStartMs,
-      recordingEndMs: input.recordingEndMs,
-      route: input.route,
-      registeredAt: input.registeredAt ?? new Date().toISOString(),
-    });
-    log.info("identity.voiceprint.audio_artifact.register", {
-      session_key: sessionKey,
-      audio_artifact_id: registered.audioArtifactId,
-      media_id: registered.mediaId,
-    });
-    return {
-      ok: true,
-      sessionKey,
-      audioArtifact: registered,
-    };
+    try {
+      // Path resolution + registration touch the filesystem (allowed-root checks,
+      // sidecar reads). Keep any non-MethodError fault (e.g. a corrupt sidecar file)
+      // from escaping as a raw INTERNAL_ERROR that leaks the on-disk path: it maps
+      // to a typed INVALID_REQUEST, consistent with the other request-fault paths.
+      const resolved = resolveVoiceprintMediaArtifactPath({
+        mediaId: input.mediaId,
+        allowedAudioRoots: scoring.allowedAudioRoots,
+      });
+      const registered = audioArtifacts.register({
+        sessionKey,
+        audioArtifactId: input.audioArtifactId,
+        mediaId: input.mediaId,
+        audioPath: resolved.audioPath,
+        sampleRate: input.sampleRate ?? resolved.sampleRate,
+        recordingStartMs: input.recordingStartMs,
+        recordingEndMs: input.recordingEndMs,
+        route: input.route,
+        registeredAt: input.registeredAt ?? new Date().toISOString(),
+      });
+      log.info("identity.voiceprint.audio_artifact.register", {
+        session_key: sessionKey,
+        audio_artifact_id: registered.audioArtifactId,
+        media_id: registered.mediaId,
+      });
+      return {
+        ok: true,
+        sessionKey,
+        audioArtifact: registered,
+      };
+    } catch (error) {
+      throw voiceprintMethodError(error);
+    }
   });
 
   server.registerMethod("identity.voiceprint.score_turns", async (conn, params) => {
@@ -828,6 +860,12 @@ export function registerVoiceprintMethods(
     }
     const started = Date.now();
 
+    // FAIL-CLOSED boundary for the whole scoring path. Any throw below (bad audio
+    // path, corrupt owner template, storage fault) is converted to a typed
+    // MethodError by `voiceprintMethodError` and audited as an error — it NEVER
+    // escapes as an unhandled crash and NEVER yields an owner-resolving result.
+    // Sidecar/embedding faults degrade to a structured `error`/`skipped` run
+    // (see runAndStoreLiveVoiceprintScoringPlan), not a false-accept.
     try {
       const turns = await buildScorePlanTurns({
         sessionKey,
@@ -921,17 +959,7 @@ export function registerVoiceprintMethods(
     const config = requireEnrollmentScoringConfig(scoring);
     // Consult the PERSISTED consent ledger (restrict-only) when enforcement is on.
     // When off/inert (default), this returns the config+inline consent unchanged.
-    try {
-      assertEnrollmentConsent(config, input.consent, lifecycle, sessionKey);
-    } catch (error) {
-      emitVoiceprintAudit(lifecycle, {
-        subjectKey: sessionKey,
-        op: "enroll",
-        outcome: "rejected",
-        reason: "consent_denied",
-      });
-      throw error;
-    }
+    assertEnrollmentConsentAudited(config, input.consent, lifecycle, sessionKey);
 
     try {
       const embedded = await embedEnrollmentSources({
@@ -996,17 +1024,7 @@ export function registerVoiceprintMethods(
     const input = parseAddEnrollmentClipParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     const config = requireEnrollmentScoringConfig(scoring);
-    try {
-      assertEnrollmentConsent(config, input.consent, lifecycle, sessionKey);
-    } catch (error) {
-      emitVoiceprintAudit(lifecycle, {
-        subjectKey: sessionKey,
-        op: "enroll",
-        outcome: "rejected",
-        reason: "consent_denied",
-      });
-      throw error;
-    }
+    assertEnrollmentConsentAudited(config, input.consent, lifecycle, sessionKey);
 
     try {
       const existing = readOwnerTemplateArtifactForEnrollment(config);
@@ -1254,40 +1272,48 @@ function registerVoiceprintLifecycleMethods(
     const input = parseRecordConsentParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     const now = input.now ?? new Date().toISOString();
-    const history = lifecycle.consentLedger.history(sessionKey);
-    const record = buildVoiceprintConsentGrant({
-      subjectKey: sessionKey,
-      scopes: input.scopes,
-      history,
-      grantedAt: input.grantedAt ?? now,
-      recordedAt: now,
-      ...(input.reason !== undefined ? { reason: input.reason } : {}),
-    });
-    lifecycle.consentLedger.append(record);
-    const effective = lifecycle.consentLedger.effective(sessionKey);
-    log.info("identity.voiceprint.record_consent", {
-      session_key: sessionKey,
-      scopes: input.scopes,
-      seq: record.seq,
-    });
-    return {
-      ok: true as const,
-      sessionKey,
-      consent: serializeEffectiveConsent(effective),
-    };
+    try {
+      const history = lifecycle.consentLedger.history(sessionKey);
+      const record = buildVoiceprintConsentGrant({
+        subjectKey: sessionKey,
+        scopes: input.scopes,
+        history,
+        grantedAt: input.grantedAt ?? now,
+        recordedAt: now,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      });
+      lifecycle.consentLedger.append(record);
+      const effective = lifecycle.consentLedger.effective(sessionKey);
+      log.info("identity.voiceprint.record_consent", {
+        session_key: sessionKey,
+        scopes: input.scopes,
+        seq: record.seq,
+      });
+      return {
+        ok: true as const,
+        sessionKey,
+        consent: serializeEffectiveConsent(effective),
+      };
+    } catch (error) {
+      throw voiceprintLifecycleMethodError(error);
+    }
   });
 
   // Read current effective consent + full append-only history for the subject.
   server.registerMethod("identity.voiceprint.get_consent", (conn, params) => {
     const input = parseSessionOnlyParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
-    const effective = lifecycle.consentLedger.effective(sessionKey);
-    return {
-      ok: true as const,
-      sessionKey,
-      consent: serializeEffectiveConsent(effective),
-      history: effective.history,
-    };
+    try {
+      const effective = lifecycle.consentLedger.effective(sessionKey);
+      return {
+        ok: true as const,
+        sessionKey,
+        consent: serializeEffectiveConsent(effective),
+        history: effective.history,
+      };
+    } catch (error) {
+      throw voiceprintLifecycleMethodError(error);
+    }
   });
 
   // Right-to-erasure: append a withdrawal record AND purge everything derived
@@ -1297,8 +1323,13 @@ function registerVoiceprintLifecycleMethods(
     const input = parseWithdrawConsentParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     const now = input.now ?? new Date().toISOString();
+
+    // PHASE 1 — DESTRUCTION. If this throws, data may NOT have been erased: fail
+    // CLOSED (throw, no ledger record) so the caller retries and no withdrawal is
+    // recorded for an erasure that never happened.
+    let outcome: Awaited<ReturnType<typeof purgeVoiceprintSubject>>;
     try {
-      const outcome = await purgeVoiceprintSubject({
+      outcome = await purgeVoiceprintSubject({
         sessionKey,
         scoring,
         storage,
@@ -1306,8 +1337,25 @@ function registerVoiceprintLifecycleMethods(
         audioArtifacts,
         deletedAt: now,
       });
-      // Append the withdrawal AFTER the purge so a failed purge does not record a
-      // withdrawal that never erased data. Append-only: prior grants are retained.
+    } catch (error) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey: sessionKey,
+        op: "withdraw",
+        outcome: "error",
+      });
+      throw voiceprintMethodError(error);
+    }
+
+    // PHASE 2 — RECORD-KEEPING. The data is already irreversibly erased. Appending
+    // the withdrawal record (or re-reading effective consent) can still throw on a
+    // corrupt/unwritable ledger. We MUST NOT report the whole withdrawal as failed
+    // in that case — that would tell the caller their data survived when it did
+    // not, and a retry cannot un-erase it. Instead surface success with the erasure
+    // counts and an explicit `recordPersisted: false` so the caller/operator sees
+    // the ledger is out of sync and can reconcile, without misrepresenting reality.
+    // Append the withdrawal AFTER the purge so a failed purge does not record a
+    // withdrawal that never erased data. Append-only: prior grants are retained.
+    try {
       const history = lifecycle.consentLedger.history(sessionKey);
       const record = buildVoiceprintConsentWithdrawal({
         subjectKey: sessionKey,
@@ -1340,12 +1388,24 @@ function registerVoiceprintLifecycleMethods(
         consent: serializeEffectiveConsent(lifecycle.consentLedger.effective(sessionKey)),
       };
     } catch (error) {
+      log.warn("identity.voiceprint.withdraw_consent.record_failed", {
+        session_key: sessionKey,
+        template_removed: outcome.templateRemoved,
+        error: errorMessage(error),
+      });
       emitVoiceprintAudit(lifecycle, {
         subjectKey: sessionKey,
         op: "withdraw",
         outcome: "error",
+        reason: "withdrawal_record_failed",
       });
-      throw voiceprintMethodError(error);
+      return {
+        ok: true as const,
+        sessionKey,
+        templateRemoved: outcome.templateRemoved,
+        storageRemoved: outcome.storageRemoved,
+        recordPersisted: false as const,
+      };
     }
   });
 
@@ -1361,50 +1421,108 @@ function registerVoiceprintLifecycleMethods(
     const nowIso = new Date(nowMs).toISOString();
     const retentionMs = input.retentionMs ?? lifecycle.retentionMs;
 
+    // Reading the ledger to enumerate expired subjects can throw if the file-backed
+    // store is corrupt/tampered. Fail CLOSED and typed: refuse the sweep (purging
+    // nothing) rather than escaping as a raw INTERNAL_ERROR that leaks the on-disk
+    // path. Never proceed to destroy data off a ledger we could not read.
     const expired: string[] = [];
-    for (const subjectKey of lifecycle.consentLedger.subjectKeys()) {
-      const effective = lifecycle.consentLedger.effective(subjectKey);
-      if (isVoiceprintConsentExpired({ effective, nowMs, retentionMs })) {
-        expired.push(subjectKey);
+    try {
+      for (const subjectKey of lifecycle.consentLedger.subjectKeys()) {
+        const effective = lifecycle.consentLedger.effective(subjectKey);
+        if (isVoiceprintConsentExpired({ effective, nowMs, retentionMs })) {
+          expired.push(subjectKey);
+        }
       }
+    } catch (error) {
+      throw voiceprintLifecycleMethodError(error);
     }
 
     const purged: Array<{ sessionKey: string; templateRemoved: boolean }> = [];
+    // Subjects whose data WAS erased but whose withdrawal record could not be
+    // persisted (ledger write failed). Data erasure is the mandatory outcome, so we
+    // do NOT abort the sweep on such a failure — that would leave the remaining
+    // expired subjects un-swept with their biometric data intact. Instead we record
+    // the inconsistency (audit `error` entry + surface a count) and keep going so
+    // every expired subject is purged; an operator can re-run to reconcile records.
+    const recordFailures: string[] = [];
+    // Subjects whose ERASURE itself faulted (unlink EACCES/EPERM/EBUSY, storage
+    // read/write fault). The per-subject purge is wrapped so one subject's failure
+    // does NOT abort the sweep and strand later expired subjects with their
+    // biometric data intact — the whole point of the retention job. A purge fault
+    // is audited (typed `error`) and surfaced as a count; an operator can re-run.
+    const purgeFailures: string[] = [];
     for (const subjectKey of expired) {
-      const outcome = await purgeVoiceprintSubject({
-        sessionKey: subjectKey,
-        // The owner template is a per-gateway singleton; only purge it for the
-        // bound session's subject. For other expired subjects, purge only the
-        // derived storage states (their template, if any, is the same file and is
-        // handled when that subject is the connection's subject). This keeps the
-        // sweep from unexpectedly deleting the current owner's template.
-        scoring: subjectKey === conn.sessionKey ? scoring : undefined,
-        storage,
-        realtime,
-        audioArtifacts,
-        deletedAt: nowIso,
-      });
-      // A withdrawal record marks the subject as purged in the append-only ledger.
-      const history = lifecycle.consentLedger.history(subjectKey);
-      lifecycle.consentLedger.append(
-        buildVoiceprintConsentWithdrawal({
+      let outcome: VoiceprintSubjectPurgeOutcome;
+      try {
+        outcome = await purgeVoiceprintSubject({
+          sessionKey: subjectKey,
+          // The owner template is a per-gateway singleton; only purge it for the
+          // bound session's subject. For other expired subjects, purge only the
+          // derived storage states (their template, if any, is the same file and is
+          // handled when that subject is the connection's subject). This keeps the
+          // sweep from unexpectedly deleting the current owner's template.
+          scoring: subjectKey === conn.sessionKey ? scoring : undefined,
+          storage,
+          realtime,
+          audioArtifacts,
+          deletedAt: nowIso,
+        });
+      } catch (error) {
+        // Do NOT throw: a raw purge fault would (1) escape as an untyped
+        // INTERNAL_ERROR that leaks the on-disk template/storage path and (2)
+        // abort the sweep, leaving later expired subjects un-erased. Record it,
+        // audit a sanitized error, and continue.
+        purgeFailures.push(subjectKey);
+        log.warn("identity.voiceprint.purge_expired.purge_failed", {
+          subject_key: subjectKey,
+          error: errorMessage(error),
+        });
+        emitVoiceprintAudit(lifecycle, {
           subjectKey,
-          history,
-          withdrawnAt: nowIso,
-          recordedAt: nowIso,
-          reason: "retention_expired",
-        }),
-      );
-      emitVoiceprintAudit(lifecycle, {
-        subjectKey,
-        op: "purge",
-        outcome: "ok",
-        ...(outcome.templateRef !== undefined ? { templateRef: outcome.templateRef } : {}),
-        counts: {
-          templatesRemoved: outcome.templateRemoved ? 1 : 0,
-          ...flattenPurgeCounts(outcome.storageRemoved),
-        },
-      });
+          op: "purge",
+          outcome: "error",
+          reason: "purge_failed",
+        });
+        continue;
+      }
+      // A withdrawal record marks the subject as purged in the append-only ledger.
+      // The purge above already erased the data; if the ledger append now fails we
+      // must not throw out of the sweep (that would strand later expired subjects).
+      try {
+        const history = lifecycle.consentLedger.history(subjectKey);
+        lifecycle.consentLedger.append(
+          buildVoiceprintConsentWithdrawal({
+            subjectKey,
+            history,
+            withdrawnAt: nowIso,
+            recordedAt: nowIso,
+            reason: "retention_expired",
+          }),
+        );
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey,
+          op: "purge",
+          outcome: "ok",
+          ...(outcome.templateRef !== undefined ? { templateRef: outcome.templateRef } : {}),
+          counts: {
+            templatesRemoved: outcome.templateRemoved ? 1 : 0,
+            ...flattenPurgeCounts(outcome.storageRemoved),
+          },
+        });
+      } catch (error) {
+        recordFailures.push(subjectKey);
+        log.warn("identity.voiceprint.purge_expired.record_failed", {
+          subject_key: subjectKey,
+          error: errorMessage(error),
+        });
+        // Best-effort audit of the erased-but-unrecorded state (also swallows).
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey,
+          op: "purge",
+          outcome: "error",
+          reason: "withdrawal_record_failed",
+        });
+      }
       purged.push({ sessionKey: subjectKey, templateRemoved: outcome.templateRemoved });
     }
 
@@ -1412,11 +1530,15 @@ function registerVoiceprintLifecycleMethods(
       retention_ms: retentionMs,
       expired: expired.length,
       purged: purged.length,
+      record_failures: recordFailures.length,
+      purge_failures: purgeFailures.length,
     });
     return {
       ok: true as const,
       retentionMs,
       purged,
+      ...(recordFailures.length > 0 ? { recordFailures } : {}),
+      ...(purgeFailures.length > 0 ? { purgeFailures } : {}),
     };
   });
 
@@ -1424,13 +1546,17 @@ function registerVoiceprintLifecycleMethods(
   server.registerMethod("identity.voiceprint.get_audit_log", (conn, params) => {
     const input = parseSessionOnlyParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
-    // Default to the bound subject; a caller may not read another subject's log.
-    const records = lifecycle.auditLog.read(sessionKey);
-    return {
-      ok: true as const,
-      sessionKey,
-      records,
-    };
+    try {
+      // Default to the bound subject; a caller may not read another subject's log.
+      const records = lifecycle.auditLog.read(sessionKey);
+      return {
+        ok: true as const,
+        sessionKey,
+        records,
+      };
+    } catch (error) {
+      throw voiceprintLifecycleMethodError(error);
+    }
   });
 }
 
@@ -2069,6 +2195,9 @@ async function runAndStoreLiveVoiceprintScoringPlan(input: {
       plan,
     );
   } catch (error) {
+    // FAIL-CLOSED: a sidecar fault degrades this batch to a structured `error`
+    // run instead of throwing. Every sidecar-bound turn is marked errored (never
+    // resolved), so no speaker is falsely accepted on a scoring failure.
     const message = errorMessage(error);
     const currentStates = currentTranscriptStatesForPlan(
       requireVoiceprintStorageSnapshot(input.storage),
@@ -2301,6 +2430,27 @@ function transcriptJoinKey(input: { sessionKey: string; transcriptItemId: string
   return JSON.stringify([input.sessionKey, input.transcriptItemId]);
 }
 
+/**
+ * FAIL-CLOSED wrapper for the two owner-template load/extract steps. Runs `load`
+ * and relabels any RAW fault (decrypt failure, corrupt JSON, no usable embeddings)
+ * as a typed FAILED_PRECONDITION so the RPC refuses to score rather than falling
+ * through to a resolve. A MethodError thrown by an intentional guard is re-thrown
+ * unchanged so its specific code/message survives.
+ */
+function useOwnerTemplate<T>(load: () => T): T {
+  try {
+    return load();
+  } catch (error) {
+    if (error instanceof MethodError) {
+      throw error;
+    }
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      `Voiceprint live scorer owner template is not usable: ${errorMessage(error)}`,
+    );
+  }
+}
+
 function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
   ownerEmbeddings: number[][];
   ownerTemplateRef?: string;
@@ -2324,20 +2474,18 @@ function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
     scoring.ownerTemplateFile ||
     scoring.ownerTemplateFileSource
   ) {
-    let artifact: VoiceprintTemplateArtifact;
-    try {
+    // FAIL-CLOSED: a template that cannot be loaded/decrypted (corrupt file, wrong
+    // key, missing ref) must never fall through to a score. `useOwnerTemplate`
+    // relabels any raw fault as a typed FAILED_PRECONDITION so the RPC refuses
+    // rather than resolving an owner. (Genuine typed guards below re-throw as-is.)
+    const artifact = useOwnerTemplate(() => {
       const fileRef = scoring.ownerTemplateFile
         ?? (scoring.ownerTemplateFileSource
           ? voiceprintTemplateFileRefFromSource(scoring.ownerTemplateFileSource)
           : undefined);
-      artifact = scoring.ownerTemplateArtifact
+      return scoring.ownerTemplateArtifact
         ?? readEncryptedVoiceprintTemplateArtifact(fileRef!);
-    } catch (error) {
-      throw new MethodError(
-        "FAILED_PRECONDITION",
-        `Voiceprint live scorer owner template is not usable: ${errorMessage(error)}`,
-      );
-    }
+    });
 
     const templateModel = artifact.template.model;
     // A5 PRODUCTION GUARD: refuse to score against a reference-tagged owner template
@@ -2363,19 +2511,13 @@ function resolveOwnerVoiceprintTemplate(scoring: VoiceprintLiveScoringConfig): {
       );
     }
 
-    try {
-      const ownerTemplateRef = ownerTemplateRefForArtifact(scoring, artifact);
-      return {
-        ownerEmbeddings: ownerEmbeddingsFromVoiceprintTemplateArtifact(artifact),
-        ownerTemplateRef,
-        ownerTemplateModel: templateModel,
-      };
-    } catch (error) {
-      throw new MethodError(
-        "FAILED_PRECONDITION",
-        `Voiceprint live scorer owner template is not usable: ${errorMessage(error)}`,
-      );
-    }
+    // Same FAIL-CLOSED relabeling for the embedding-extraction step: a template
+    // that parses but has no usable owner embeddings must refuse, not resolve.
+    return useOwnerTemplate(() => ({
+      ownerEmbeddings: ownerEmbeddingsFromVoiceprintTemplateArtifact(artifact),
+      ownerTemplateRef: ownerTemplateRefForArtifact(scoring, artifact),
+      ownerTemplateModel: templateModel,
+    }));
   }
 
   if (scoring.ownerEmbeddings?.length) {
@@ -2452,6 +2594,45 @@ function assertEnrollmentConsent(
 }
 
 /**
+ * Run the enrollment consent gate and audit its outcome, DISTINGUISHING a real
+ * consent denial (a typed `FORBIDDEN` MethodError) from a persisted-ledger store
+ * fault (a raw Error carrying an on-disk path from a corrupt/tampered ledger).
+ *
+ * A denial is audited `rejected`/`consent_denied` and re-thrown untouched. A store
+ * fault is audited `error`/`consent_store_unavailable` (NOT `consent_denied`, which
+ * would falsely record the subject as denied) and re-thrown as the SANITIZED
+ * lifecycle MethodError so the caller never sees the raw path-leaking message.
+ */
+function assertEnrollmentConsentAudited(
+  scoring: VoiceprintLiveScoringConfig,
+  clientConsent: Partial<VoiceprintConsentSnapshot> | undefined,
+  lifecycle: VoiceprintLifecycle,
+  subjectKey: string,
+): void {
+  try {
+    assertEnrollmentConsent(scoring, clientConsent, lifecycle, subjectKey);
+  } catch (error) {
+    if (error instanceof MethodError) {
+      emitVoiceprintAudit(lifecycle, {
+        subjectKey,
+        op: "enroll",
+        outcome: "rejected",
+        reason: "consent_denied",
+      });
+      throw error;
+    }
+    // Not a denial: the persisted ledger read itself faulted (corrupt/unreadable).
+    emitVoiceprintAudit(lifecycle, {
+      subjectKey,
+      op: "enroll",
+      outcome: "error",
+      reason: "consent_store_unavailable",
+    });
+    throw voiceprintLifecycleMethodError(error);
+  }
+}
+
+/**
  * Restrict-only merge of config consent, inline consent, AND (when enforcement is
  * on) the persisted ledger's effective consent. The persisted ledger NEVER widens
  * — a subject with no persisted grant, or a withdrawn subject, cannot process even
@@ -2468,7 +2649,17 @@ function restrictVoiceprintConsentWithLedger(
   if (!lifecycle.enforceConsentLedger) {
     return base;
   }
-  const effective = lifecycle.consentLedger.effective(subjectKey);
+  // A file-backed ledger's `effective()` can throw a raw path-leaking Error when
+  // the store is corrupt/unreadable. Re-type it so downstream handler classifiers
+  // treat it as a sanitized server storage fault, never a client bad-request or a
+  // consent denial. (Fail-closed is preserved: the throw propagates, it never
+  // widens consent.)
+  let effective: ReturnType<typeof lifecycle.consentLedger.effective>;
+  try {
+    effective = lifecycle.consentLedger.effective(subjectKey);
+  } catch (error) {
+    throw new VoiceprintConsentLedgerStoreError(errorMessage(error));
+  }
   return restrictVoiceprintConsent(base, {
     captureAllowed: effective.scopes.capture && effective.active,
     biometricAllowed: effective.scopes.biometric && effective.active,
@@ -3960,7 +4151,42 @@ function voiceprintMethodError(error: unknown): MethodError {
   if (error instanceof VoiceprintStoragePersistenceError) {
     return new MethodError("INTERNAL_ERROR", error.message);
   }
+  // A corrupt/unreadable persisted consent ledger is a SERVER storage fault, not a
+  // client bad-request. Report it as a retryable INTERNAL_ERROR with a SANITIZED
+  // message (never the raw ledger path) — mirrors voiceprintLifecycleMethodError so
+  // score_turns does not mislabel a server fault as INVALID_REQUEST and leak paths.
+  if (error instanceof VoiceprintConsentLedgerStoreError) {
+    return new MethodError(
+      "INTERNAL_ERROR",
+      "Voiceprint lifecycle store is unavailable or corrupt.",
+    );
+  }
+  // A sidecar/host fault (spawn ENOENT, timeout, non-zero exit, output overflow,
+  // unparseable output) is a transient SERVER/infrastructure failure, not a
+  // client-request fault. Report it as INTERNAL_ERROR so client retry/backoff
+  // engages, instead of INVALID_REQUEST which would tell the caller (wrongly) that
+  // it sent a bad request and defeat retry.
+  if (error instanceof VoiceprintSidecarError) {
+    return new MethodError("INTERNAL_ERROR", error.message);
+  }
   return new MethodError("INVALID_REQUEST", errorMessage(error));
+}
+
+// Consent-ledger / audit-log reads and writes touch a file-backed store whose
+// loaders throw bare `Error`s (corrupt/tampered/partially-written file, fs faults
+// with an on-disk path in the message). Those are INTERNAL storage faults, not
+// client-request faults: map them to a typed INTERNAL_ERROR with a SANITIZED
+// message so the caller never sees a raw INTERNAL_ERROR that leaks the on-disk
+// path or internal parse detail. A MethodError raised deliberately (e.g. a bad
+// request the handler already classified) is passed through untouched.
+function voiceprintLifecycleMethodError(error: unknown): MethodError {
+  if (error instanceof MethodError) {
+    return error;
+  }
+  return new MethodError(
+    "INTERNAL_ERROR",
+    "Voiceprint lifecycle store is unavailable or corrupt.",
+  );
 }
 
 function loadVoiceprintStorageSnapshot(filePath: string): VoiceprintStorageSnapshot {

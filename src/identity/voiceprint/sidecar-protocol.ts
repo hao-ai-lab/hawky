@@ -102,14 +102,23 @@ export function validateEmbeddingRequest(request: VoiceprintEmbeddingRequest): v
   }
 }
 
-export function validateEmbeddingResponse(response: VoiceprintEmbeddingResponse): void {
+export function validateEmbeddingResponse(
+  response: VoiceprintEmbeddingResponse,
+  options: { skipEmbeddingUsability?: boolean } = {},
+): void {
   if (!response.id.trim()) {
     throw new Error("Voiceprint embedding response requires id.");
   }
   if (!response.model?.provider || !response.model.modelId) {
     throw new Error("Voiceprint embedding response requires model provider and modelId.");
   }
-  if (!isUsableEmbeddingVector(response.embedding)) {
+  // `skipEmbeddingUsability` defers the embedding-VECTOR usability check
+  // (empty / NaN / infinite / zero-norm) to a per-turn scoring boundary so a
+  // single garbage embedding can be isolated to ONE turn (fail-closed skip)
+  // rather than failing the whole batch. Structural checks (id, model, speechMs)
+  // still hard-fail because they break the id-based join / batch integrity. The
+  // transport parser (parseEmbeddingBatchResponseJson) keeps the strict default.
+  if (!options.skipEmbeddingUsability && !isUsableEmbeddingVector(response.embedding)) {
     throw new Error("Voiceprint embedding response requires a finite non-empty embedding.");
   }
   if (
@@ -123,6 +132,7 @@ export function validateEmbeddingResponse(response: VoiceprintEmbeddingResponse)
 export function validateEmbeddingBatchResponse(
   batch: VoiceprintEmbeddingBatchResponse,
   requestIds?: readonly string[],
+  options: { skipEmbeddingUsability?: boolean } = {},
 ): void {
   if (batch.version !== 1) {
     throw new Error(`Unsupported voiceprint embedding response version: ${String(batch.version)}.`);
@@ -132,7 +142,7 @@ export function validateEmbeddingBatchResponse(
   }
   const seen = new Set<string>();
   for (const response of batch.responses) {
-    validateEmbeddingResponse(response);
+    validateEmbeddingResponse(response, options);
     if (seen.has(response.id)) {
       throw new Error(`Duplicate voiceprint embedding response id: ${response.id}.`);
     }
