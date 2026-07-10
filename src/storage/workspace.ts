@@ -10,7 +10,8 @@
 // Existing files are NEVER overwritten (idempotent init).
 // =============================================================================
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfigDir } from "./config.js";
@@ -50,6 +51,14 @@ export const EXTRA_TEMPLATE_FILES = ["SETUP.md"] as const;
 
 export type WorkspaceFileName = (typeof WORKSPACE_FILES)[number];
 
+/**
+ * Injection cap for curated long-term memory (MEMORY.md). Higher than the
+ * generic per-file cap so a grown MEMORY.md is injected whole rather than
+ * middle-clipped by the head/tail truncator. The overall system-prompt size is
+ * still bounded by maxCharsTotal in loadBootstrapFiles.
+ */
+export const MEMORY_MD_INJECTION_CAP = 60_000;
+
 // -----------------------------------------------------------------------------
 // Configuration
 // -----------------------------------------------------------------------------
@@ -84,6 +93,27 @@ function readTemplate(filename: string): string | null {
   const templatePath = join(getTemplatesDir(), filename);
   if (!existsSync(templatePath)) return null;
   return readFileSync(templatePath, "utf-8");
+}
+
+/**
+ * Atomically write `content` to the absolute path `dest`: stream into a sibling
+ * temp file, then `renameSync` over the target (atomic on the same filesystem),
+ * so a reader never sees a partial file and a crash mid-write leaves the prior
+ * content intact. Best-effort temp cleanup on failure.
+ */
+function atomicWrite(dest: string, content: string): void {
+  const tmp = `${dest}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, content, "utf-8");
+    renameSync(tmp, dest);
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // Best-effort cleanup after a failed atomic write.
+    }
+    throw error;
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -236,6 +266,19 @@ export class WorkspaceManager {
   }
 
   /**
+   * Atomically write a workspace file: stream into a sibling temp file, then
+   * renameSync over the target (atomic on the same filesystem). Guarantees a
+   * reader never sees a truncated/partial file, and a crash mid-write leaves the
+   * previous content intact rather than a zero/partial-length file. Used for
+   * MEMORY.md, whose whole purpose is data-loss safety.
+   * @param filename - File name or relative path
+   * @param content - File content
+   */
+  writeFileAtomic(filename: string, content: string): void {
+    atomicWrite(this.prepareWritableWorkspacePath(filename), content);
+  }
+
+  /**
    * Append a timestamped entry to today's daily log.
    * Creates the file and memory/ directory if needed.
    * @param content - Text to append
@@ -280,6 +323,55 @@ export class WorkspaceManager {
   }
 
   /**
+   * Snapshot a workspace file into memory/.backups/ before it is overwritten,
+   * then prune old snapshots down to `keep`. Non-destructive: the original file
+   * is left untouched. Reuses the house atomic temp-file + renameSync pattern.
+   *
+   * @param filename - File to snapshot (e.g. "MEMORY.md").
+   * @param opts.keep - How many snapshots to retain (default 20).
+   * @param opts.now - Clock override (tests); used to name the snapshot.
+   * @returns Absolute path of the snapshot written, or null when there is
+   *          nothing to snapshot (missing or empty file).
+   */
+  snapshotAndPrune(filename: string, opts?: { keep?: number; now?: Date }): string | null {
+    const source = this.resolveReadableWorkspacePath(filename);
+    if (!existsSync(source)) return null;
+    const content = readFileSync(source, "utf-8");
+    if (content.trim() === "") return null;
+
+    const keep = opts?.keep ?? 20;
+    const now = opts?.now ?? new Date();
+
+    const backupsDir = this.resolveWorkspacePath("memory/.backups");
+    mkdirSync(backupsDir, { recursive: true });
+
+    // ISO timestamp made filesystem-safe (no ':' or '.'), plus a short random
+    // suffix so two snapshots in the same millisecond (or an injected fixed
+    // test clock) never collide and silently clobber an earlier backup.
+    const stamp = now.toISOString().replace(/[:.]/g, "-");
+    const suffix = randomBytes(3).toString("hex");
+    const backupPath = join(backupsDir, `MEMORY-${stamp}-${suffix}.md`);
+
+    atomicWrite(backupPath, content);
+
+    // Prune oldest snapshots (ISO names sort chronologically).
+    const snapshots = readdirSync(backupsDir)
+      .filter((f) => /^MEMORY-.*\.md$/.test(f))
+      .sort();
+    while (snapshots.length > keep) {
+      const oldest = snapshots.shift();
+      if (!oldest) break;
+      try {
+        unlinkSync(join(backupsDir, oldest));
+      } catch {
+        // Ignore; a vanished snapshot is fine.
+      }
+    }
+
+    return backupPath;
+  }
+
+  /**
    * List daily log files in the memory/ directory.
    * @returns Sorted array of filenames (e.g., ["2026-03-12.md", "2026-03-13.md", "2026-03-14.md"])
    */
@@ -307,7 +399,8 @@ export class WorkspaceManager {
     maxCharsTotal?: number;
     mainSession?: boolean;
   }): BootstrapFile[] {
-    const maxPerFile = options?.maxCharsPerFile ?? 20_000;
+    const explicitPerFile = options?.maxCharsPerFile;
+    const maxPerFile = explicitPerFile ?? 20_000;
     const maxTotal = options?.maxCharsTotal ?? 150_000;
     const mainSession = options?.mainSession ?? true;
 
@@ -321,8 +414,20 @@ export class WorkspaceManager {
       const content = this.readFile(filename);
       if (content === null || content.trim().length === 0) continue;
 
+      // MEMORY.md is curated long-term memory whose input-side truncation was
+      // removed on purpose; letting the default 20k head/tail clip drop its
+      // MIDDLE would silently lose curated facts from the system prompt. When the
+      // caller did NOT pin an explicit per-file cap (i.e. the full-agent context,
+      // not the intentionally-light heartbeat budget), inject MEMORY.md whole up
+      // to a much higher bound. The total-budget guard below still protects the
+      // overall prompt size.
+      const perFileCap =
+        filename === "MEMORY.md" && explicitPerFile === undefined
+          ? MEMORY_MD_INJECTION_CAP
+          : maxPerFile;
+
       // Per-file truncation
-      const truncated = truncateBootstrapContent(content, filename, maxPerFile);
+      const truncated = truncateBootstrapContent(content, filename, perFileCap);
 
       // Check total budget
       if (totalChars + truncated.content.length > maxTotal) {
