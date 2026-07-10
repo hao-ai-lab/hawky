@@ -101,13 +101,17 @@ describe("voiceprint threshold report", () => {
     await expect(scoreVoiceprintManifest(manifest)).rejects.toThrow(/zero_owner.*invalid embedding/);
   });
 
-  test("rejects owner enrollment vectors that cancel to a zero centroid", async () => {
+  test("rejects degenerate (zero-norm) owner enrollment vectors", async () => {
+    // Under best-matching-enrolled-clip scoring, [[1,0],[-1,0]] is a legitimate
+    // two-condition enrollment rather than a zero-norm centroid, so the old
+    // mean-centroid "zero norm" error no longer applies to it. A zero-norm clip,
+    // however, is still degenerate and must be rejected per-vector.
     const manifest: VoiceprintManifest = {
       version: 1,
       owner: {
         enrollment: [
           { id: "owner_a", embedding: [1, 0] },
-          { id: "owner_b", embedding: [-1, 0] },
+          { id: "owner_b", embedding: [0, 0] },
         ],
       },
       samples: [
@@ -116,7 +120,39 @@ describe("voiceprint threshold report", () => {
       ],
     };
 
-    await expect(scoreVoiceprintManifest(manifest)).rejects.toThrow(/zero norm/);
+    await expect(scoreVoiceprintManifest(manifest)).rejects.toThrow(/owner_b.*invalid embedding/);
+  });
+
+  test("scores samples against the best-matching enrolled clip, not the centroid", async () => {
+    // e1/e2 are two enrollment conditions 90 degrees apart; the sample sits 8
+    // degrees off e1 (near it) but ~37 degrees off the centroid. The old
+    // mean-centroid path scored ~0.799 (possible_owner) at a 0.82 accept
+    // threshold; best-matching-clip recovers ~0.990 (owner_speaking), matching
+    // the live turn-scoring path.
+    const angle = (8 * Math.PI) / 180;
+    const manifest: VoiceprintManifest = {
+      version: 1,
+      thresholds: { ownerAccept: 0.82, ownerPossible: 0.72 },
+      owner: {
+        enrollment: [
+          { id: "cond_a", embedding: [1, 0] },
+          { id: "cond_b", embedding: [0, 1] },
+        ],
+      },
+      samples: [
+        {
+          id: "owner_cross_condition",
+          expected: "owner",
+          embedding: [Math.cos(angle), Math.sin(angle)],
+        },
+      ],
+    };
+
+    const report = await scoreVoiceprintManifest(manifest);
+    const row = report.rows.find((r) => r.id === "owner_cross_condition");
+    expect(row?.similarity).toBeCloseTo(0.99027, 4);
+    expect(row?.decision).toBe("owner_speaking");
+    expect(row?.passed).toBe(true);
   });
 
   test("rejects sample embeddings with a different dimension than enrollment", async () => {

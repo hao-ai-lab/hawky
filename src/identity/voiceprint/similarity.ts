@@ -60,6 +60,49 @@ export function safeCosineDistance(
   return 1 - similarity;
 }
 
+/**
+ * Score a sample against enrolled owner clips using the BEST-MATCHING enrolled
+ * clip (max over per-clip cosine similarity) rather than a single mean-centroid.
+ *
+ * Rationale: an owner recorded in one condition (mic/room/day) still matches the
+ * enrolled clip captured under a similar condition, even if the mean centroid of
+ * all conditions sits "between" them and matches no single query well.
+ *
+ * Invalid/zero-norm enrolled vectors are skipped. Returns INVALID_VECTOR_SIMILARITY
+ * when there is no usable enrolled vector or when the sample itself is unusable —
+ * matching the not-a-match convention of safeCosineSimilarity.
+ *
+ * SECURITY NOTE: max over enrolled clips can raise an impostor score slightly, since
+ * it picks the LEAST-far enrolled clip. A single low-quality/outlier enrolled clip is
+ * therefore a liability: it can manufacture a spurious near-match. Enrollment quality
+ * gating matters here. The planned refinements are top-k mean or AS-Norm score
+ * normalization (see the plan's scoring-calibration section); neither is implemented
+ * here — this helper's scope is only the max aggregation.
+ */
+export function ownerSimilarity(
+  ownerEmbeddings: readonly (readonly number[])[],
+  sample: readonly number[],
+): number {
+  if (!isUsableEmbeddingVector(sample)) {
+    return INVALID_VECTOR_SIMILARITY;
+  }
+
+  let best = INVALID_VECTOR_SIMILARITY;
+  let sawUsable = false;
+  for (const enrolled of ownerEmbeddings) {
+    if (!isUsableEmbeddingVector(enrolled)) {
+      continue;
+    }
+    sawUsable = true;
+    const similarity = safeCosineSimilarity(enrolled, sample);
+    if (similarity > best) {
+      best = similarity;
+    }
+  }
+
+  return sawUsable ? best : INVALID_VECTOR_SIMILARITY;
+}
+
 export function meanVector(vectors: readonly (readonly number[])[]): number[] {
   const valid = vectors.filter(isFiniteVector);
   if (valid.length === 0) {
