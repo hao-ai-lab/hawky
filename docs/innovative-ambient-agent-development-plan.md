@@ -995,6 +995,14 @@ behind the `acceptClientEmbeddings` opt-in (default off), enforcing a
 model+version match against the owner template before it accepts the vector — see
 "Protocol extension shipped" below.
 
+Because the phone emits a vector rather than audio, the server can no longer
+re-derive the embedding from the capture. Replay resistance (A8, below) and the
+model/consent validation bound *some* of that trust, but the on-device path is
+only safe in production once **device attestation + capture-binding** ties the
+vector to a live capture on an attested device — see the "HONESTY — A8 is replay
+resistance, NOT capture-binding" note below. That follow-up MUST land before
+`accept_client_embeddings` is enabled in production.
+
 **Deployment fork / first increment.** The two paths share one model+version:
 (a) **server sidecar only** (`services/voiceprint`, CAM++ via onnxruntime) is the
 fastest way to make the whole built pipeline functional and testable end-to-end —
@@ -1031,6 +1039,37 @@ spurious accept). Consent gating and thresholds are unchanged; live scoring stay
 off by default. Implementation:
 `src/identity/voiceprint/live-client-embedding.ts`, `.../live-plan.ts`,
 `src/gateway/voiceprint-methods.ts`.
+
+**A8 — liveness nonce (replay resistance for client embeddings; server half
+shipped).** A leaked/captured owner vector could otherwise be **replayed** and
+accepted as the owner every time, because nothing in the protocol above ties a
+submission to a fresh request. A8 closes the *naive replay* hole: a new RPC
+`identity.voiceprint.request_embedding_challenge` issues a short-lived
+(default 60s, `config.voiceprint.live_scoring.liveness_nonce_ttl_ms`),
+single-use, session-bound **nonce**, and — when `accept_client_embeddings` is on
+— every turn carrying a `sampleEmbedding` MUST also carry a `nonce` that the
+gateway **verifies and consumes** before the vector is trusted. Any nonce failure
+(missing / unknown / expired / wrong-session / already-used) **rejects the turn**;
+it does not fall through to accepting the vector and does not silently score it.
+Consuming the nonce burns it, so an identical resubmission fails
+(`already_used`). The nonce is an **additional** gate — the b5c327c consent /
+model-match / vector validation still all apply. Implementation: the pure,
+time-injectable store `src/identity/voiceprint/liveness-nonce.ts`
+(`VoiceprintLivenessNonceStore.issueChallenge` / `verifyAndConsume`, bounded:
+lazily evicts expired, caps live nonces per session) + the gateway holder
+`src/gateway/voiceprint-liveness.ts`.
+
+**HONESTY — A8 is replay resistance, NOT capture-binding.** The nonce stops an
+attacker from resending a previously observed `(nonce, embedding)` pair and stops
+them minting their own nonce, but it does **not** bind the nonce to the actual
+on-device capture. A **compromised or malicious client that legitimately requests
+a fresh nonce and then submits an arbitrary vector** is *not* stopped by A8.
+Defeating that requires **device attestation + true capture-binding** (mixing the
+issued nonce into the on-device capture/signature so the server can prove the
+vector came from a live capture on an attested device) — the **iOS half plus a
+deeper follow-up**. That attestation/capture-binding work MUST land before
+`accept_client_embeddings` is enabled in production; A8 alone is a prerequisite,
+not sufficient.
 
 ### Threshold & scoring calibration strategy
 

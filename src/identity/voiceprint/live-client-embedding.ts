@@ -24,6 +24,16 @@ import type { IsoTime } from "./contracts.js";
  * route a client embedding here unless that flag is on. The value here is
  * privacy: on-device iOS can send an embedding instead of shipping raw
  * biometric audio to the server.
+ *
+ * REPLAY vs CAPTURE-BINDING. Model+dimension+consent validation here does NOT
+ * make a client vector fresh: a captured owner vector could be resubmitted. The
+ * single-use liveness nonce (see liveness-nonce.ts, enforced in
+ * voiceprint-methods.ts) closes NAIVE REPLAY, and is a separate, additive layer
+ * on top of the validation below. Neither this validation nor the nonce binds
+ * the vector to a live on-device capture — that is device attestation +
+ * capture-binding, an explicit follow-up (see the A8 HONESTY note in
+ * liveness-nonce.ts) that MUST land before `acceptClientEmbeddings` ships in
+ * production.
  */
 
 export interface ClientEmbeddingScoreContext {
