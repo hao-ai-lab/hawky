@@ -19,6 +19,12 @@ import {
   type VoiceprintConsentSnapshot,
 } from "./policy.js";
 import type { VoiceprintAudioQualityAssessment } from "./quality.js";
+import {
+  initialSpeakerEvidenceState,
+  reduceSpeakerEvidence,
+  type SpeakerEvidenceConfig,
+  type SpeakerEvidenceState,
+} from "./evidence.js";
 
 export interface VoiceprintTurnScoreInput {
   turn: SpeechTurn;
@@ -39,6 +45,37 @@ export interface VoiceprintTurnScoreResult {
   decision: VoiceprintDecision;
   thresholdUsed: number;
   records: VoiceprintTurnRecords;
+}
+
+/**
+ * Fold a single scored turn into a session-level speaker-evidence accumulator
+ * (see {@link reduceSpeakerEvidence}) and return the advanced state alongside the
+ * per-turn result. This is a PURE, OPT-IN layer on top of the per-turn scorer:
+ * per-turn semantics/thresholds are untouched, and existing callers that never
+ * pass an evidence state keep the exact previous behavior.
+ *
+ * Callers thread the returned `evidence` back in as `priorEvidence` on the next
+ * turn to accumulate a STABILIZED verdict across a session.
+ */
+export function scoreVoiceprintTurnWithEvidence(
+  input: VoiceprintTurnScoreInput & {
+    priorEvidence?: SpeakerEvidenceState;
+    evidenceConfig?: Partial<SpeakerEvidenceConfig>;
+    atMs?: number;
+  },
+): VoiceprintTurnScoreResult & { evidence: SpeakerEvidenceState } {
+  const result = scoreVoiceprintTurnFromEmbedding(input);
+  const priorEvidence = input.priorEvidence ?? initialSpeakerEvidenceState();
+  const evidence = reduceSpeakerEvidence(
+    priorEvidence,
+    {
+      decision: result.decision,
+      score: result.similarity,
+      ...(input.atMs !== undefined ? { atMs: input.atMs } : {}),
+    },
+    input.evidenceConfig,
+  );
+  return { ...result, evidence };
 }
 
 export function scoreVoiceprintTurnFromEmbedding(
