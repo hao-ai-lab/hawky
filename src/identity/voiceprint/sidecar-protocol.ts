@@ -75,10 +75,10 @@ export function validateEmbeddingBatchRequest(batch: VoiceprintEmbeddingBatchReq
 }
 
 export function validateEmbeddingRequest(request: VoiceprintEmbeddingRequest): void {
-  if (!request.id.trim()) {
+  if (typeof request.id !== "string" || !request.id.trim()) {
     throw new Error("Voiceprint embedding request requires id.");
   }
-  if (!request.audioPath.trim()) {
+  if (typeof request.audioPath !== "string" || !request.audioPath.trim()) {
     throw new Error("Voiceprint embedding request requires audioPath.");
   }
   if (request.startMs !== undefined && (!Number.isFinite(request.startMs) || request.startMs < 0)) {

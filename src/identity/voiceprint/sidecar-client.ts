@@ -87,7 +87,7 @@ export async function runEmbeddingSidecar(input: {
         if (code !== 0) {
           reject(
             new Error(
-              `Voiceprint sidecar exited with code ${String(code)}${signal ? ` signal ${signal}` : ""}: ${stderr.trim()}`,
+              `Voiceprint sidecar exited with code ${String(code)}${signal ? ` signal ${signal}` : ""}: ${sidecarFailureDetail(stdout, stderr)}`,
             ),
           );
           return;
@@ -113,4 +113,26 @@ export async function runEmbeddingSidecar(input: {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * On a non-zero exit the sidecar writes its JSON `{ "error": ... }` body to
+ * STDOUT (per the protocol in services/voiceprint/embed.py), leaving stderr
+ * empty. Prefer that parsed reason, then fall back to raw stdout, then stderr,
+ * so the rejection surfaced to callers is diagnosable rather than a bare colon.
+ */
+function sidecarFailureDetail(stdout: string, stderr: string): string {
+  const trimmedStdout = stdout.trim();
+  if (trimmedStdout) {
+    try {
+      const parsed = JSON.parse(trimmedStdout) as { error?: unknown };
+      if (parsed && typeof parsed.error === "string" && parsed.error.trim()) {
+        return parsed.error.trim();
+      }
+    } catch {
+      // Not JSON; fall through to the raw stdout/stderr below.
+    }
+    return trimmedStdout;
+  }
+  return stderr.trim();
 }

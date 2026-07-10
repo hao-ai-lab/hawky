@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { GatewayConnection } from "./connection.js";
 import type { GatewayServer } from "./server.js";
 import { MethodError } from "./methods.js";
@@ -175,7 +176,7 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     return undefined;
   }
 
-  const sidecar = resolveConfiguredVoiceprintSidecar(raw.sidecar);
+  const sidecar = resolveConfiguredVoiceprintSidecar(raw.sidecar, raw.dev_reference_backend === true);
   const ownerTemplate = resolveConfiguredOwnerTemplateSource(raw.owner_template);
   const allowedAudioRoots = resolveConfiguredAudioRoots(raw.allowed_audio_roots);
   const consent = resolveConfiguredVoiceprintConsent(raw.consent);
@@ -1233,7 +1234,17 @@ function voiceprintAudioArtifactStoreKey(input: {
 
 function resolveConfiguredVoiceprintSidecar(
   sidecar: ConfiguredVoiceprintSidecar,
+  devReferenceBackend: boolean,
 ): EmbeddingSidecarCommand {
+  // Local/dev opt-in: with `dev_reference_backend: true` and no explicit sidecar
+  // command, default to the bundled Python reference backend. It is deterministic
+  // and dependency-free but NON-DISCRIMINATIVE — never real identity, dev only.
+  const commandProvided = Boolean(
+    sidecar && typeof sidecar === "object" && typeof sidecar.command === "string" && sidecar.command.trim(),
+  );
+  if (devReferenceBackend && !commandProvided) {
+    return buildReferenceBackendSidecar(sidecar);
+  }
   if (!sidecar || typeof sidecar !== "object") {
     throw new Error("voiceprint.live_scoring.sidecar is required when voiceprint live scoring is enabled.");
   }
@@ -1255,6 +1266,46 @@ function resolveConfiguredVoiceprintSidecar(
       "voiceprint.live_scoring.sidecar.max_stderr_bytes",
     ),
   };
+}
+
+function buildReferenceBackendSidecar(
+  sidecar: ConfiguredVoiceprintSidecar,
+): EmbeddingSidecarCommand {
+  const embedScript = defaultVoiceprintReferenceEmbedScript();
+  if (!existsSync(embedScript)) {
+    throw new Error(
+      `voiceprint.live_scoring.dev_reference_backend is set but the bundled sidecar was not found at ${embedScript}.`,
+    );
+  }
+  const overrideEnv = sidecar && typeof sidecar === "object"
+    ? optionalStringRecord(sidecar.env, "voiceprint.live_scoring.sidecar.env")
+    : undefined;
+  const configuredCommand = sidecar && typeof sidecar === "object"
+    ? optionalConfigString(sidecar.command)
+    : undefined;
+  const command = configuredCommand ?? process.env.VOICEPRINT_PYTHON ?? "python3";
+  return {
+    command,
+    args: [embedScript],
+    cwd: sidecar && typeof sidecar === "object" ? optionalConfigPath(sidecar.cwd) : undefined,
+    env: { VOICEPRINT_BACKEND: "reference", ...overrideEnv },
+    timeoutMs: sidecar && typeof sidecar === "object"
+      ? optionalPositiveNumber(sidecar.timeout_ms, "voiceprint.live_scoring.sidecar.timeout_ms")
+      : undefined,
+    maxStdoutBytes: sidecar && typeof sidecar === "object"
+      ? optionalPositiveNumber(sidecar.max_stdout_bytes, "voiceprint.live_scoring.sidecar.max_stdout_bytes")
+      : undefined,
+    maxStderrBytes: sidecar && typeof sidecar === "object"
+      ? optionalPositiveNumber(sidecar.max_stderr_bytes, "voiceprint.live_scoring.sidecar.max_stderr_bytes")
+      : undefined,
+  };
+}
+
+/** Absolute path to the bundled Python reference embedding sidecar. */
+export function defaultVoiceprintReferenceEmbedScript(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // src/gateway/voiceprint-methods.ts -> repo services/voiceprint/embed.py
+  return resolve(here, "..", "..", "services", "voiceprint", "embed.py");
 }
 
 function resolveConfiguredOwnerTemplateSource(
@@ -1332,7 +1383,7 @@ function resolveConfiguredVoiceprintModel(
     throw new Error("voiceprint.live_scoring.expected_model must be an object.");
   }
   const provider = configString(model.provider, "voiceprint.live_scoring.expected_model.provider");
-  if (!["external-json", "signal-baseline", "speechbrain", "wespeaker", "picovoice", "custom"].includes(provider)) {
+  if (!["external-json", "signal-baseline", "speechbrain", "wespeaker", "picovoice", "sherpa-onnx", "reference", "custom"].includes(provider)) {
     throw new Error("voiceprint.live_scoring.expected_model.provider is invalid.");
   }
   return {
