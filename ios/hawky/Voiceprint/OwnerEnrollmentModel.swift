@@ -20,6 +20,20 @@ import Foundation
 /// consent gate / param-assembly / state logic is unit-testable with a fake,
 /// without a live `LiveGatewayBridge` actor. `LiveGatewayBridge` conforms below.
 protocol VoiceprintEnrollmentGateway: Sendable {
+    /// Upload a locally-recorded enrollment WAV to the gateway's media ingest so a
+    /// subsequent `registerVoiceprintAudioArtifact(mediaID:)` with the SAME id can
+    /// resolve it. Returns true when the upload was finalized on the gateway.
+    ///
+    /// Defaulted to a no-op (returns false) so gateways that cannot upload (the
+    /// inert/offline gateway and unit-test fakes) do not need to implement it; the
+    /// recorder then falls back to the local-path enrollment source.
+    func uploadVoiceprintEnrollmentAudio(
+        sessionKey: String,
+        mediaID: String,
+        wavPath: String,
+        timeoutSeconds: TimeInterval
+    ) async -> Bool
+
     /// Register a locally-recorded WAV so it can be referenced by `audioArtifactId`.
     func registerVoiceprintAudioArtifact(
         sessionKey: String,
@@ -46,6 +60,18 @@ protocol VoiceprintEnrollmentGateway: Sendable {
 }
 
 extension LiveGatewayBridge: VoiceprintEnrollmentGateway {}
+
+extension VoiceprintEnrollmentGateway {
+    /// Default: no upload capability. Conformers that cannot deliver media to the
+    /// gateway (inert/offline gateway, unit-test fakes) inherit this no-op so the
+    /// recorder falls back to a local-path enrollment source.
+    func uploadVoiceprintEnrollmentAudio(
+        sessionKey: String,
+        mediaID: String,
+        wavPath: String,
+        timeoutSeconds: TimeInterval
+    ) async -> Bool { false }
+}
 
 /// The biometric-consent snapshot for enrollment. All four keys are surfaced to
 /// the server with the EXACT wire names it expects. `captureAllowed` and
@@ -203,7 +229,7 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// ~74% of clip length, so a >= 30s voiced target means guiding the user to
     /// record MORE than 30s of wall-clock audio. We use a small margin above 30s so
     /// a clip that just clears the client estimate still clears the server floor.
-    static let guidedVoicedFloorMs: Double = 32_000
+    nonisolated static let guidedVoicedFloorMs: Double = 32_000
 
     @Published private(set) var state: OwnerEnrollmentState = .idle
     @Published private(set) var sources: [OwnerEnrollmentSource] = []

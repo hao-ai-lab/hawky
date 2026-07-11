@@ -1742,7 +1742,7 @@ final class LiveSessionStore {
                 return try await summarize(scope)
             }
             rtProvider.silenceSummaryHook = { [weak self] in
-                await self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
+                self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
             }
             rtProvider.cocktailPartyActiveHook = { [weak self] in self?.cocktailPartyActive ?? false }
             rtProvider.identifyOnCameraHook = { [weak self] in
@@ -1771,7 +1771,7 @@ final class LiveSessionStore {
                 return try await summarize(scope)
             }
             rtcProvider.silenceSummaryHook = { [weak self] in
-                await self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
+                self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
             }
             rtcProvider.cocktailPartyActiveHook = { [weak self] in self?.cocktailPartyActive ?? false }
             rtcProvider.identifyOnCameraHook = { [weak self] in
@@ -5520,7 +5520,7 @@ final class LiveSessionStore {
         sessionMetadataSaveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
-            await self?.saveCurrentSession()
+            self?.saveCurrentSession()
         }
     }
 
