@@ -3,13 +3,22 @@ import { readWavFile, resampleLinear, sliceWavAudio } from "./wav.js";
 
 const BASELINE_SAMPLE_RATE = 16000;
 
+// Minimum analyzable clip: at least 160 samples AND at least 50 ms of audio.
+// Shorter clips carry too little signal for stable band/energy features.
+const MIN_ANALYSIS_SAMPLES = 160;
+const MIN_ANALYSIS_SECONDS = 0.05;
+
+// Goertzel probe frequencies (Hz) spanning the voice band, from fundamental
+// pitch through the upper formants/fricative energy.
+const VOICE_BAND_FREQUENCIES_HZ = [120, 220, 440, 880, 1760, 3200] as const;
+
 export const SIGNAL_BASELINE_MODEL = {
   provider: "signal-baseline",
   modelId: "signal-baseline-v0",
 } as const;
 
 export function signalBaselineEmbedding(samples: Float32Array, sampleRate: number): number[] {
-  if (samples.length < Math.max(160, sampleRate * 0.05)) {
+  if (samples.length < Math.max(MIN_ANALYSIS_SAMPLES, sampleRate * MIN_ANALYSIS_SECONDS)) {
     return [];
   }
 
@@ -36,14 +45,9 @@ export function signalBaselineEmbedding(samples: Float32Array, sampleRate: numbe
   }
 
   const frameStats = frameRmsStats(samples, sampleRate);
-  const bandPowers = [
-    goertzelPower(samples, sampleRate, 120),
-    goertzelPower(samples, sampleRate, 220),
-    goertzelPower(samples, sampleRate, 440),
-    goertzelPower(samples, sampleRate, 880),
-    goertzelPower(samples, sampleRate, 1760),
-    goertzelPower(samples, sampleRate, 3200),
-  ];
+  const bandPowers = VOICE_BAND_FREQUENCIES_HZ.map((freqHz) =>
+    goertzelPower(samples, sampleRate, freqHz),
+  );
   const totalBandPower = bandPowers.reduce((sum, value) => sum + value, 0) || 1;
 
   return [

@@ -1,5 +1,15 @@
 import { readFile } from "node:fs/promises";
 
+const BITS_PER_BYTE = 8;
+
+// Full-scale divisors that map each signed PCM bit depth into [-1, 1). For an
+// N-bit signed sample the most-negative value is -2^(N-1), so dividing by 2^(N-1)
+// normalizes to the [-1, 1) range.
+const PCM8_HALF_SCALE = 128; // 2^7   (8-bit is unsigned; centered by subtracting 128)
+const PCM16_HALF_SCALE = 32768; // 2^15
+const PCM24_HALF_SCALE = 8388608; // 2^23
+const PCM32_HALF_SCALE = 2147483648; // 2^31
+
 export interface WavAudio {
   sampleRate: number;
   channels: number;
@@ -67,7 +77,7 @@ export function parseWavPcm(buf: Buffer): WavAudio {
     throw new Error("WAV file has invalid audio format metadata.");
   }
 
-  const bytesPerSample = fmt.bitsPerSample / 8;
+  const bytesPerSample = fmt.bitsPerSample / BITS_PER_BYTE;
   if (!Number.isInteger(bytesPerSample) || bytesPerSample <= 0) {
     throw new Error(`Unsupported WAV bit depth: ${fmt.bitsPerSample}.`);
   }
@@ -103,13 +113,13 @@ function readSample(
   if (formatCode === 1) {
     switch (bitsPerSample) {
       case 8:
-        return (buf.readUInt8(offset) - 128) / 128;
+        return (buf.readUInt8(offset) - PCM8_HALF_SCALE) / PCM8_HALF_SCALE;
       case 16:
-        return buf.readInt16LE(offset) / 32768;
+        return buf.readInt16LE(offset) / PCM16_HALF_SCALE;
       case 24:
-        return buf.readIntLE(offset, 3) / 8388608;
+        return buf.readIntLE(offset, 3) / PCM24_HALF_SCALE;
       case 32:
-        return buf.readInt32LE(offset) / 2147483648;
+        return buf.readInt32LE(offset) / PCM32_HALF_SCALE;
       default:
         throw new Error(`Unsupported PCM WAV bit depth: ${bitsPerSample}.`);
     }
