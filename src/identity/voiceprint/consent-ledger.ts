@@ -124,6 +124,20 @@ export const DEFAULT_VOICEPRINT_RETENTION_MS =
   DEFAULT_VOICEPRINT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 /**
+ * The all-false consent-scopes map. A fresh object is returned on every call so
+ * callers can own/mutate their copy without aliasing (both the initial effective
+ * state and a withdrawal reset need an independent, all-false scope map).
+ */
+function emptyConsentScopes(): VoiceprintEffectiveConsent["scopes"] {
+  return {
+    capture: false,
+    biometric: false,
+    memoryPromotion: false,
+    export: false,
+  };
+}
+
+/**
  * Fold an append-only consent history into the effective consent for a subject.
  * The last record wins for active/withdrawn; a withdrawal revokes all scopes.
  */
@@ -135,24 +149,14 @@ export function foldVoiceprintConsentHistory(
   const effective: VoiceprintEffectiveConsent = {
     subjectKey,
     active: false,
-    scopes: {
-      capture: false,
-      biometric: false,
-      memoryPromotion: false,
-      export: false,
-    },
+    scopes: emptyConsentScopes(),
     history: ordered,
   };
 
   for (const record of ordered) {
     if (record.kind === "withdrawal") {
       effective.active = false;
-      effective.scopes = {
-        capture: false,
-        biometric: false,
-        memoryPromotion: false,
-        export: false,
-      };
+      effective.scopes = emptyConsentScopes();
       effective.grantedAt = undefined;
       effective.withdrawnAt = record.withdrawnAt ?? record.recordedAt;
       continue;

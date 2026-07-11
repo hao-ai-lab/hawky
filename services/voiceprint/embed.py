@@ -226,7 +226,6 @@ def _decode_wav(raw: bytes) -> Tuple[List[float], int]:
         chunk_id = raw[offset:offset + 4]
         size = struct.unpack_from("<I", raw, offset + 4)[0]
         payload_start = offset + 8
-        payload_end = min(payload_start + size, n)
         if chunk_id == b"fmt ":
             if size < 16:
                 raise EmbeddingError("invalid WAV fmt chunk")
@@ -241,7 +240,10 @@ def _decode_wav(raw: bytes) -> Tuple[List[float], int]:
             }
         elif chunk_id == b"data":
             data_start = payload_start
-            data_size = payload_end - payload_start
+            # Clamp to the buffer end only here, where the payload span is used —
+            # no other chunk needs payload_end, so this avoids recomputing it for
+            # every fmt/aux chunk while yielding the identical data_size.
+            data_size = min(payload_start + size, n) - payload_start
             break
         offset = payload_start + size + (size % 2)
 
@@ -493,10 +495,14 @@ class OnnxBackend:
 
     def __init__(self) -> None:
         self._extractor = None
+        # Read VOICEPRINT_MODEL exactly once at construction; both the version tag
+        # and the lazy engine build reuse this snapshot (env is fixed for the life
+        # of the process, so this is behavior-identical to reading it twice).
+        self._model_path = os.environ.get("VOICEPRINT_MODEL")
         self._version = self._resolve_version()
 
     def _resolve_version(self) -> Optional[str]:
-        model_path = os.environ.get("VOICEPRINT_MODEL")
+        model_path = self._model_path
         if not model_path:
             return None
         # Use the model file's basename (minus extension) as the version tag so a
@@ -516,7 +522,7 @@ class OnnxBackend:
     def _engine(self):
         if self._extractor is not None:
             return self._extractor
-        model_path = os.environ.get("VOICEPRINT_MODEL")
+        model_path = self._model_path
         if not model_path:
             raise EmbeddingError(
                 "VOICEPRINT_MODEL is required for the onnx backend "
