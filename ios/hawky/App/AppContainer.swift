@@ -758,7 +758,7 @@ final class AppContainer {
                 case .systemMessage(let s):
                     chatStore.appendSystem(s)
                 case .toolStart, .toolResult, .permissionRequest, .intentionSurface, .regionsUpdate,
-                     .whenArmed, .whenDisarmed:
+                     .whenArmed, .whenDisarmed, .voiceprintIdentity:
                     continue
                 }
             }

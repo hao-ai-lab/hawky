@@ -318,6 +318,15 @@ final class LiveSessionStore {
     private var voiceprintOpenSpeechWindowID: String?
     private var voiceprintClosedSpeechWindowIDs: [String] = []
     private var voiceprintSpeechWindowCounter = 0
+    /// WS2 edge-triggered owner-identity state machine. Holds the last-applied
+    /// verdict so the two push channels (realtime_event piggyback + `voiceprint.identity`
+    /// broadcast) inject/relabel at most ONCE per genuine establish/flip and de-dupe
+    /// against each other. Reset per session in `resetVoiceprintRealtimeState`.
+    private var voiceprintIdentityMachine = LiveVoiceprintIdentityMachine()
+    /// WS2 UI indicator: the current owner/speaker label, surfaced when recognition
+    /// establishes/flips. nil until the first identity edge. OFF-BY-DEFAULT: stays nil
+    /// unless `voiceprintRealtimeEnabled` is on and the gateway pushes an identity.
+    private(set) var voiceprintIdentityLabel: String?
     /// Last VAD timestamp (ms) handed to the server voiceprint turn tracker, in the
     /// recording-offset time base. The tracker requires speech_stopped strictly after
     /// speech_started (`endMs > startMs`) and a finite time; the WebRTC transport emits
@@ -1128,6 +1137,14 @@ final class LiveSessionStore {
               effectiveConfig.mediaPersistenceMode == .liveUpload else {
             return (effectiveConfig, false)
         }
+        // WS2 (closes #12): the realtime fast path normally DEFERS live upload to keep
+        // voice latency stable — but that defers the turn audio past the gateway's
+        // auto-score window, which is exactly what broke live recognition. When live
+        // owner recognition is on, KEEP liveUpload so the gateway has the turn audio in
+        // time. OFF-BY-DEFAULT: with recognition off the fast-path defer is unchanged.
+        if effectiveConfig.voiceprintRealtimeEnabled {
+            return (effectiveConfig, false)
+        }
         effectiveConfig.mediaPersistenceMode = .deferredUpload
         return (effectiveConfig, true)
     }
@@ -1633,6 +1650,23 @@ final class LiveSessionStore {
         let realtimeFastPath = Self.realtimeFastPathConfig(effectiveConfig)
         effectiveConfig = realtimeFastPath.config
         let realtimeFastPathDeferredLiveUpload = realtimeFastPath.deferredLiveUpload
+        // WS2 (closes #12): live owner recognition needs the turn audio streamed to the
+        // gateway DURING the session so the gateway auto-score sees it in time. Coerce
+        // media persistence to liveUpload whenever recognition is on — .off/.local/
+        // .deferredUpload all become .liveUpload. Applied to `effectiveConfig` (which
+        // becomes `activeConfig`) so the parallel-mic gate and the voiceprint runtime
+        // target — both of which require mediaPersistenceMode != .off — agree. This
+        // "just works" instead of surfacing a disabled hint. OFF-BY-DEFAULT: gated on
+        // `voiceprintRealtimeEnabled`, so flag off leaves the mode byte-for-byte
+        // unchanged.
+        if effectiveConfig.voiceprintRealtimeEnabled,
+           effectiveConfig.mediaPersistenceMode != .liveUpload {
+            appendSystemMessage(
+                "Live owner recognition on — media set to live upload",
+                detail: "Turn audio streams to your Hawky machine during the session so it can recognize the speaker."
+            )
+            effectiveConfig.mediaPersistenceMode = .liveUpload
+        }
         effectiveConfig.bridgeAvailability = effectiveConfig.gatewayBridgeEnabled ? .available : .disabled
         phase = .connecting
         bridgeStatus = .idle
@@ -2289,6 +2323,11 @@ final class LiveSessionStore {
         transportProvider: GatewayTransportResolver?,
         config: LiveSessionConfig
     ) async {
+        // WS2 (closes #12): when live owner recognition is on, `config` has already
+        // been coerced to .liveUpload upstream (in `start`, right after the realtime
+        // fast path) so the parallel-mic gate and the voiceprint runtime target agree.
+        // This switch therefore records with the live transport for the recognition
+        // path without a second coercion here.
         switch config.mediaPersistenceMode {
         case .off:
             break
@@ -3819,9 +3858,32 @@ final class LiveSessionStore {
         // Drop any cached embedder so a config change (flags off, or a newly
         // provisioned model) is re-resolved on the next finalized turn.
         speakerEmbedder = nil
+        // WS2: reset the edge-triggered identity machine + UI indicator so a new
+        // session starts from `unknown` and re-establishes cleanly.
+        voiceprintIdentityMachine = LiveVoiceprintIdentityMachine()
+        voiceprintIdentityLabel = nil
     }
 
     private func handleVoiceprintRealtimeResult(_ result: LiveVoiceprintRealtimeResult) {
+        // WS2 PRIMARY identity channel: apply the piggybacked identity summary (if any)
+        // through the edge-triggered state machine BEFORE the finalized-turn gate, so
+        // an identity that arrives on a response carrying no NEW finalized turns still
+        // establishes/flips. A nil summary is a no-op (fail-safe).
+        if let identity = result.identity {
+            handleVoiceprintIdentitySummary(identity)
+        }
+        // WS2: render the gateway's piggybacked per-turn recognition states as verbose
+        // lines. These replace the old marker-path score_turns lines (that path is gone
+        // — the gateway auto-scores now) with the SAME renderer, so per-turn recognition
+        // still surfaces in the verbose log. Empty scoredStates → nothing logged.
+        if !result.scoredStates.isEmpty {
+            for line in Self.voiceprintRecognitionLines(
+                states: result.scoredStates,
+                total: result.scoredStates.count
+            ) {
+                appendVerbose(line)
+            }
+        }
         guard !result.finalizedTurns.isEmpty else { return }
         appendVerbose(
             "Voiceprint finalized \(result.finalizedTurns.count) turn\(result.finalizedTurns.count == 1 ? "" : "s")",
@@ -3832,30 +3894,78 @@ final class LiveSessionStore {
         maybeAttachOnDeviceEmbeddings(finalizedTurns: result.finalizedTurns, sessionKey: result.sessionKey)
     }
 
+    /// WS2 identity apply: the SINGLE place both push channels (realtime_event
+    /// piggyback + `voiceprint.identity` broadcast) funnel through. The edge-trigger
+    /// + de-dupe live entirely in `LiveVoiceprintIdentityMachine`, so this method just
+    /// routes the machine's decision to the two side effects on an establish/flip:
+    /// (1) UI — surface the owner/unknown indicator (retro-label), and (2) AGENT
+    /// INJECTION — one no-response system context item so the answering Hawky knows who
+    /// is speaking.
+    ///
+    /// OFF-BY-DEFAULT: gated on `voiceprintRealtimeEnabled` — flag off is a hard no-op.
+    /// FAIL-SAFE: `.none` (de-dupe / below the edge / garbled verdict) does nothing; the
+    /// injection is best-effort (`try?`) and never triggers a response or blocks the
+    /// data channel, so an injection failure degrades quietly and never surfaces a
+    /// false owner.
+    private func handleVoiceprintIdentitySummary(_ summary: LiveVoiceprintIdentitySummary) {
+        guard (activeConfig ?? config).voiceprintRealtimeEnabled else { return }
+        let action = voiceprintIdentityMachine.ingest(summary)
+        guard case let .apply(_, injection, label) = action else { return }
+
+        // (1) UI retro-label / owner indicator.
+        voiceprintIdentityLabel = label
+        appendSystemMessage(
+            "Speaker: \(label)",
+            detail: summary.confidence.map { String(format: "confidence %.2f", $0) },
+            eventType: "voiceprint.identity"
+        )
+
+        // (2) AGENT INJECTION: exactly ONE no-response context item. Never
+        // `response.create`; best-effort so a send failure cannot stall the session.
+        guard let provider else { return }
+        Task { [weak self] in
+            do {
+                try await provider.sendContext(injection, createResponse: false)
+            } catch {
+                await MainActor.run {
+                    self?.append("Voiceprint identity injection failed", level: .warning, detail: error.localizedDescription)
+                }
+            }
+        }
+    }
+
     /// B1/B2: OFF-BY-DEFAULT hook. When the on-device embedding gate is on AND a
     /// CoreML model is provisioned, produce score_turns turns carrying an on-device
     /// `sampleEmbedding` per turn, then submit them through the fail-closed liveness
     /// coordinator (B2): request a FRESH single-use A8 nonce, attach it, and call
     /// `identity.voiceprint.score_turns`.
     ///
-    /// When the model is absent (the default here), `resolvedSpeakerEmbedder`
-    /// returns nil and this method returns immediately — NOTHING requests a
-    /// challenge or sends score_turns, and the existing marker path is byte-for-byte
-    /// unchanged. B1 follow-up folded in: `embed()` (CoreML inference) runs OFF the
-    /// @MainActor on a detached task so per-turn inference never blocks the store;
-    /// the submission then hops back to the main actor. Never blocks/crashes the
-    /// session.
+    /// WS2: the gateway now AUTO-SCORES finalized turns server-side (config
+    /// `voiceprint.live_scoring.auto_score_finalized`) and PUSHES identity back — so
+    /// iOS no longer boomerangs marker-only score_turns for the server path (that
+    /// would double-score). The safe rule: iOS submits score_turns ONLY when it has a
+    /// REAL on-device embedding (embedded > 0); otherwise it relies on the gateway
+    /// auto-score. Because the on-device embedder is inert in this open build
+    /// (`resolvedSpeakerEmbedder` returns nil — no CoreML model), every turn produces
+    /// zero embeddings today and NOTHING is submitted; the identity arrives via the
+    /// pushed channels (`handleVoiceprintIdentitySummary`).
+    ///
+    /// When the model is absent (the default here), `resolvedSpeakerEmbedder` returns
+    /// nil and this method returns after building markers-only turns — NOTHING requests
+    /// a challenge or sends score_turns. B1 follow-up folded in: `embed()` (CoreML
+    /// inference) runs OFF the @MainActor on a detached task so per-turn inference never
+    /// blocks the store; the submission then hops back to the main actor. Never
+    /// blocks/crashes the session.
     private func maybeAttachOnDeviceEmbeddings(
         finalizedTurns: [LiveVoiceprintFinalizedTurn],
         sessionKey: String
     ) {
         let cfg = activeConfig ?? config
-        // The server-side (marker-only) recognition path only needs the realtime gate
-        // + a bridge — NOT a provisioned CoreML embedder. So gate on
-        // `voiceprintRealtimeEnabled` + `gatewayBridge` here, and resolve the embedder
-        // OPTIONALLY: when it is nil (the default, no CoreML model) every turn degrades
-        // to markers-only and is scored server-side; when it is present, the turns that
-        // produce an embedding take the fail-closed client-embedding (B2) path instead.
+        // Gate on `voiceprintRealtimeEnabled` + `gatewayBridge`. The embedder is
+        // resolved OPTIONALLY: when it is nil (the default, no CoreML model) every turn
+        // degrades to markers-only and iOS submits NOTHING — the gateway auto-scores.
+        // When it is present, the turns that produce an embedding take the fail-closed
+        // client-embedding (B2) path.
         guard cfg.voiceprintRealtimeEnabled, let bridge = gatewayBridge else { return }
         let embedder = resolvedSpeakerEmbedder(config: cfg)
         let modeRaw = cfg.mode.rawValue
@@ -3883,25 +3993,14 @@ final class LiveSessionStore {
             }.value
 
             let embedded = scoreTurns.filter { $0.embedding != nil }.count
-            // No on-device embedding produced → SERVER-SIDE recognition path.
-            // The finalized turns already uploaded their audio (recordingSink uses a
-            // non-nil transport), so each turn's audioArtifactId already resolves on
-            // the gateway. Submit MARKER-ONLY score_turns (no sampleEmbedding, no
-            // nonce): the sidecar scores the turn audio against the owner template and
-            // returns per-turn `states`. This is DISTINCT from the client-embedding
-            // (B2) path below, and runs on EXACTLY the turns that produced no embedding
-            // — so every turn is scored on exactly one path (marker XOR embedding).
-            guard embedded > 0 else {
-                await self?.scoreFinalizedTurnsServerSide(
-                    scoreTurns: scoreTurns,
-                    sessionKey: sessionKey,
-                    mode: modeRaw,
-                    bridge: bridge
-                )
-                return
-            }
+            // WS2: NO on-device embedding produced → do NOT submit score_turns. The
+            // gateway auto-scores the finalized turns itself (it already has the
+            // liveUpload audio) and pushes identity back. Submitting here would
+            // double-score. This is the default path in the open build (embedder inert).
+            guard embedded > 0 else { return }
 
             // FAIL-CLOSED liveness binding: fresh single-use nonce → attach → submit.
+            // Runs ONLY on turns that produced a real on-device embedding (Phase 2).
             let coordinator = VoiceprintLivenessCoordinator(gateway: bridge)
             let submission = await coordinator.submit(
                 sessionKey: sessionKey,
@@ -3920,49 +4019,34 @@ final class LiveSessionStore {
         }
     }
 
-    /// SERVER-SIDE owner recognition for finalized turns that carry NO on-device
-    /// embedding (the default marker path). Submits MARKER-ONLY score_turns — the
-    /// existing `LiveVoiceprintScoreTurn` serialization emits neither `sampleEmbedding`
-    /// nor `nonce` when both are nil, which is exactly the marker-only shape the gateway
-    /// resolves against the already-uploaded turn audio. Reuses
-    /// `sendVoiceprintScoreTurns` (no second RPC helper) and deliberately does NOT route
-    /// through `VoiceprintLivenessCoordinator`: that path fails closed without a nonce,
-    /// but server-side sidecar scoring needs neither embedding nor nonce.
-    ///
-    /// FAIL-SAFE: a nil result / empty states / transport error degrades quietly (a
-    /// verbose log, then continue). Never surfaces a false "owner" on error.
-    nonisolated private func scoreFinalizedTurnsServerSide(
-        scoreTurns: [LiveVoiceprintScoreTurn],
-        sessionKey: String,
-        mode: String,
-        bridge: LiveGatewayBridge
-    ) async {
-        guard !scoreTurns.isEmpty else { return }
-        let params = LiveVoiceprintScoreTurn.scoreTurnsParams(sessionKey: sessionKey, turns: scoreTurns)
-        let result = await bridge.sendVoiceprintScoreTurns(
-            sessionKey: sessionKey,
-            params: params,
-            mode: mode,
-            timeoutSeconds: 15
-        )
-        let lines = Self.voiceprintRecognitionLines(result: result, total: scoreTurns.count)
-        await MainActor.run { [weak self] in
-            for line in lines { self?.appendVerbose(line) }
-        }
-    }
-
     /// Build the per-turn verbose recognition lines from a server-side score_turns
     /// result. Pure/static so it is unit-testable without a live session. FAIL-SAFE:
     /// a nil result or empty `states` yields a single neutral "no result" line and
     /// NEVER an owner line, so a transport error can never surface a false "owner".
+    ///
+    /// WS2: kept as a thin wrapper over `voiceprintRecognitionLines(states:total:)`
+    /// so the score_turns-result shape (used by the on-device / B2 path and the test
+    /// suite) and the piggybacked `scoredStates` shape (rendered from
+    /// `handleVoiceprintRealtimeResult`) share one renderer.
     nonisolated static func voiceprintRecognitionLines(  // testable
         result: LiveVoiceprintScoreTurnsResult?,
         total: Int
     ) -> [String] {
-        guard let result, !result.states.isEmpty else {
+        voiceprintRecognitionLines(states: result?.states ?? [], total: total)
+    }
+
+    /// Render per-turn verbose recognition lines from the pushed/scored states.
+    /// Shared by both the score_turns-result wrapper above and the WS2 piggyback
+    /// (`result.scoredStates`) path. FAIL-SAFE: empty `states` yields a single
+    /// neutral "no result" line and NEVER an owner line.
+    nonisolated static func voiceprintRecognitionLines(  // testable
+        states: [LiveVoiceprintScoreTurnState],
+        total: Int
+    ) -> [String] {
+        guard !states.isEmpty else {
             return ["Voiceprint recognition: no result for \(total) turn\(total == 1 ? "" : "s") — marker path"]
         }
-        return result.states.map { state in
+        return states.map { state in
             let score = state.confidence.map { String(format: "%.2f", $0) }
             switch state.result {
             case "owner_speaking":
@@ -4934,6 +5018,24 @@ final class LiveSessionStore {
                         }
                         continue
                     }
+                    // WS2 live owner recognition (SECONDARY channel): the edge-triggered
+                    // `voiceprint.identity` broadcast. Route into the SAME identity state
+                    // machine as the realtime_event piggyback (de-duped there) in any feed
+                    // mode. FAIL-SAFE: handled behind the recognition flag; a garbled
+                    // verdict never yields owner.
+                    if case .voiceprintIdentity(_, let verdict, let decision, let confidence, let at) = event {
+                        await MainActor.run {
+                            self?.handleVoiceprintIdentitySummary(
+                                LiveVoiceprintIdentitySummary(
+                                    verdict: verdict,
+                                    decision: decision,
+                                    confidence: confidence,
+                                    at: at
+                                )
+                            )
+                        }
+                        continue
+                    }
                     // Surface intention deliveries (M6) are injected in any feed mode.
                     if case .intentionSurface(let intentionId, let text, let speak, let whenBusy, let cautious) = event {
                         let policy: SurfaceBusyPolicy
@@ -5002,6 +5104,8 @@ final class LiveSessionStore {
                         break // handled before the feed gate above (#482)
                     case .whenDisarmed:
                         break // handled before the feed gate above (#482)
+                    case .voiceprintIdentity:
+                        break // handled before the feed gate above (WS2)
                     case .error(let message):
                         await flush(reason: "before error")
                         await MainActor.run {
