@@ -25,6 +25,11 @@ import {
   type VoiceprintLivenessChallengeStore,
 } from "./voiceprint-liveness.js";
 import {
+  createVoiceprintAutoScorer,
+  type VoiceprintAutoScorer,
+  type VoiceprintAutoScoreTuning,
+} from "./voiceprint-auto-score.js";
+import {
   buildVoiceprintConsentGrant,
   buildVoiceprintConsentWithdrawal,
   effectiveConsentAllowsProcessing,
@@ -279,6 +284,25 @@ export interface VoiceprintLiveScoringConfig {
    */
   acceptClientEmbeddings?: boolean;
   /**
+   * WS1 live owner recognition (Phase 1) opt-in, DEFAULT FALSE. When true, the
+   * gateway itself fire-and-forget background-scores each batch of finalized
+   * realtime turns through the SAME internal path `score_turns` runs, folds the
+   * scored states into the A2 speaker-evidence reducer keyed by sessionKey, and
+   * on an identity establish/flip emits an edge-triggered `voiceprint.identity`
+   * broadcast plus piggybacks the scored states on the session's next
+   * `identity.voiceprint.realtime_event` response. When false (the default) the
+   * realtime handlers are byte-for-byte unchanged. See
+   * `auto_score_finalized` in config and gateway/voiceprint-auto-score.ts.
+   */
+  autoScoreFinalized?: boolean;
+  /**
+   * Tuning for the WS1 auto-scorer (wait-for-audio retry pacing, evidence
+   * config, buffer bound, test settle hook). NOT file-config surface; only
+   * relevant when `autoScoreFinalized` is true. Defaults match production
+   * (~3 retries with ~2s spacing).
+   */
+  autoScoreTuning?: VoiceprintAutoScoreTuning;
+  /**
    * A8 replay resistance: TTL (ms) for the single-use liveness nonce a client
    * embedding submission must carry (see identity/voiceprint/liveness-nonce.ts).
    * Defaults to DEFAULT_VOICEPRINT_LIVENESS_NONCE_TTL_MS when unset.
@@ -368,6 +392,10 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     // no biometric audio). See identity/voiceprint/live-client-embedding.ts.
     acceptClientEmbeddings:
       optionalBoolean(raw.accept_client_embeddings) ?? false,
+    // WS1 live owner recognition opt-in, default false: the gateway auto-scores
+    // finalized realtime turns itself. False => realtime handlers byte-for-byte
+    // unchanged (no auto-scorer is even constructed).
+    autoScoreFinalized: optionalBoolean(raw.auto_score_finalized) ?? false,
     livenessNonceTtlMs: optionalPositiveNumber(
       raw.liveness_nonce_ttl_ms,
       "voiceprint.live_scoring.liveness_nonce_ttl_ms",
@@ -779,6 +807,83 @@ export function registerVoiceprintMethods(
   // the default distillation / person-snapshot path is byte-for-byte unchanged.
   memoryBridge: VoiceprintMemoryBridgeGatewayConfig = { enabled: false },
 ): void {
+  // WS1 live owner recognition (Phase 1): OPT-IN gateway auto-scoring of
+  // finalized realtime turns. `autoScorer` exists ONLY when config sets
+  // `voiceprint.live_scoring.auto_score_finalized: true`; when it is undefined
+  // (the default) every handler below is byte-for-byte unchanged.
+  const autoScorer =
+    scoring?.autoScoreFinalized === true
+      ? createVoiceprintAutoScorer({
+        ...(scoring.autoScoreTuning ?? {}),
+        // REUSE, never duplicate: the auto-scorer scores through the exact
+        // internal seam `identity.voiceprint.score_turns` runs, so plan build,
+        // allowed-root enforcement, fail-closed sidecar handling, storage
+        // bundles, A4 audit, and A7 telemetry are all identical.
+        scoreTurns: (sessionKey, turns) => {
+          const at = new Date().toISOString();
+          return scoreVoiceprintTurnsForSession({
+            sessionKey,
+            input: {
+              // Whitelisted turn fields only. Deliberately NO audioPath: audio
+              // resolves strictly via the registered artifact store + allowed
+              // roots inside buildScorePlanTurns, exactly as score_turns does.
+              turns: turns.map((turn) => ({
+                transcriptItemId: turn.transcriptItemId,
+                role: turn.role,
+                text: turn.text,
+                startMs: turn.startMs,
+                endMs: turn.endMs,
+                audioArtifactId: turn.audioArtifactId,
+                route: turn.route,
+              })),
+              createdAt: at,
+              updatedAt: at,
+            },
+            scoring,
+            storage,
+            audioArtifacts,
+            liveness,
+            lifecycle,
+            logLabel: "identity.voiceprint.auto_score_finalized",
+          });
+        },
+        // WAIT-FOR-AUDIO readiness probe: the live-session WAV may still be
+        // uploading when a turn finalizes. Ready means the artifact is
+        // registered for the session AND its allowed-root-resolved WAV is on
+        // disk (mid-write WAVs are readable by design). A turn with no artifact
+        // id has nothing to wait for — the scoring plan skips it fail-safe.
+        isTurnAudioReady: (sessionKey, turn) => {
+          if (!turn.audioArtifactId) {
+            return true;
+          }
+          const resolved = audioArtifacts.resolve({
+            sessionKey,
+            audioArtifactId: turn.audioArtifactId,
+            startMs: turn.startMs,
+            endMs: turn.endMs,
+          });
+          if (!resolved) {
+            return false;
+          }
+          try {
+            return existsSync(
+              resolveAllowedAudioPath(resolved.audioPath, scoring.allowedAudioRoots),
+            );
+          } catch {
+            return false;
+          }
+        },
+        // Defensive: test harnesses register onto a mock server without a
+        // broadcast; production GatewayServer has one (src/gateway/server.ts).
+        broadcast: (event, payload) => {
+          const candidate = (server as { broadcast?: unknown }).broadcast;
+          if (typeof candidate === "function") {
+            (candidate as (event: string, payload: unknown) => void).call(server, event, payload);
+          }
+        },
+      })
+      : undefined;
+
   server.registerMethod("identity.voiceprint.realtime_event", async (conn, params) => {
     const input = parseRealtimeEventParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
@@ -805,6 +910,26 @@ export function registerVoiceprintMethods(
         event_status: result.event.status,
         finalized_turns: result.finalizedTurns.length,
       });
+      // WS1 auto-score hook (opt-in; `autoScorer` is undefined by default, so
+      // this whole block is skipped and the response is byte-for-byte unchanged).
+      if (autoScorer) {
+        if (result.finalizedTurns.length > 0) {
+          // Fire-and-forget: NEVER awaited and internally fully guarded, so
+          // background scoring can never delay or fail this realtime response.
+          autoScorer.enqueue(sessionKey, result.finalizedTurns);
+        }
+        // Piggyback (belt + suspenders next to the voiceprint.identity push):
+        // drain any states scored since the session's previous realtime_event.
+        // ADDITIVE only — when nothing is buffered the response is unchanged.
+        const pending = autoScorer.takePending(sessionKey);
+        if (pending) {
+          return {
+            ...result,
+            scoredStates: pending.scoredStates,
+            identity: pending.identity,
+          };
+        }
+      }
       return result;
     } catch (error) {
       // Classify by fault type: a sidecar/artifact-store/lifecycle infra fault is a
@@ -820,6 +945,10 @@ export function registerVoiceprintMethods(
     const input = parseRealtimeResetParams(params);
     const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
     audioArtifacts.reset?.(sessionKey);
+    // WS1: per-session evidence + pending piggyback states share the turn
+    // tracker's lifecycle, so a realtime_reset clears them too (no-op when the
+    // auto-score flag is off).
+    autoScorer?.reset(sessionKey);
     return realtime.reset(sessionKey);
   });
 
@@ -899,72 +1028,17 @@ export function registerVoiceprintMethods(
         "Voiceprint live scorer is not configured on this gateway.",
       );
     }
-    const started = Date.now();
-
-    // FAIL-CLOSED boundary for the whole scoring path. Any throw below (bad audio
-    // path, corrupt owner template, storage fault) is converted to a typed
-    // MethodError by `voiceprintMethodError` and audited as an error — it NEVER
-    // escapes as an unhandled crash and NEVER yields an owner-resolving result.
-    // Sidecar/embedding faults degrade to a structured `error`/`skipped` run
-    // (see runAndStoreLiveVoiceprintScoringPlan), not a false-accept.
-    try {
-      const turns = await buildScorePlanTurns({
-        sessionKey,
-        input,
-        scoring,
-        audioArtifacts,
-        liveness,
-        lifecycle,
-      });
-      const { run, storage: storageResult } = await runAndStoreLiveVoiceprintScoringPlan({
-        storage,
-        sidecar: scoring.sidecar,
-        turns,
-        createdAt: input.createdAt,
-        updatedAt: input.updatedAt,
-      });
-      log.info("identity.voiceprint.score_turns", {
-        session_key: sessionKey,
-        status: run.status,
-        turns: turns.length,
-        queued: run.plan.queued.length,
-        skipped: run.plan.skipped.length,
-        patches: run.patches.length,
-        storage_bundle_id: run.storageBundle?.id,
-        duration_ms: Date.now() - started,
-      });
-      emitVoiceprintAudit(lifecycle, {
-        subjectKey: sessionKey,
-        op: "score",
-        outcome: run.status === "error" ? "error" : "ok",
-        counts: { turns: turns.length, patches: run.patches.length },
-      });
-      // A7 privacy-safe scoring-decision telemetry: one record per SCORED turn
-      // (decision + scalar score + threshold + model), and a distinct no-score
-      // "error" record when the whole batch degraded. Never emits a score on the
-      // skip/error path. Inert unless a recording sink is configured (default OFF).
-      emitVoiceprintScoreTelemetry(lifecycle, sessionKey, run);
-      return serializeScoreTurnsResult({
-        sessionKey,
-        turns: turns.length,
-        run,
-        storage: storageResult,
-      });
-    } catch (error) {
-      emitVoiceprintAudit(lifecycle, {
-        subjectKey: sessionKey,
-        op: "score",
-        outcome: "error",
-      });
-      const methodError = voiceprintMethodError(error);
-      // A fault thrown BEFORE a run object exists (e.g. a batch-integrity/security
-      // guard that throws rather than degrading to run.status === "error") would
-      // otherwise record an audit error but ZERO telemetry — asymmetric with the
-      // in-band error run that emits a scoreless `error` record. Emit one here too so
-      // the error-visibility story is symmetric. Never a score on the error path.
-      emitVoiceprintScoreTelemetryError(lifecycle, sessionKey, methodError.code);
-      throw methodError;
-    }
+    // SHARED SCORING SEAM: the WS1 auto-scorer runs the exact same function, so
+    // audit + A7 telemetry + fail-closed behavior stay identical for both.
+    return scoreVoiceprintTurnsForSession({
+      sessionKey,
+      input,
+      scoring,
+      storage,
+      audioArtifacts,
+      liveness,
+      lifecycle,
+    });
   });
 
   server.registerMethod("identity.voiceprint.apply_bundle", async (conn, params) => {
@@ -1344,6 +1418,10 @@ export function registerVoiceprintMethods(
     storage,
     realtime,
     audioArtifacts,
+    // WS1: right-to-erasure must also purge the subject's auto-score state
+    // (evidence, piggyback buffer, queue, in-flight batch). Undefined when the
+    // auto_score_finalized flag is off — behavior byte-for-byte unchanged.
+    autoScorer,
     lifecycle,
   });
 }
@@ -1361,10 +1439,12 @@ function registerVoiceprintLifecycleMethods(
     storage: VoiceprintStorageAdapter;
     realtime: VoiceprintRealtimeSessionStore;
     audioArtifacts: VoiceprintAudioArtifactStore;
+    /** WS1 auto-scorer; present only when `auto_score_finalized` is on. */
+    autoScorer?: VoiceprintAutoScorer;
     lifecycle: VoiceprintLifecycle;
   },
 ): void {
-  const { scoring, storage, realtime, audioArtifacts, lifecycle } = deps;
+  const { scoring, storage, realtime, audioArtifacts, autoScorer, lifecycle } = deps;
 
   // Record (grant/update) the current consent for the subject/session. Appends a
   // new grant record; the effective consent is the fold of the append-only history.
@@ -1435,6 +1515,7 @@ function registerVoiceprintLifecycleMethods(
         storage,
         realtime,
         audioArtifacts,
+        autoScorer,
         deletedAt: now,
       });
     } catch (error) {
@@ -1565,6 +1646,7 @@ function registerVoiceprintLifecycleMethods(
           storage,
           realtime,
           audioArtifacts,
+          autoScorer,
           deletedAt: nowIso,
         });
       } catch (error) {
@@ -2020,6 +2102,95 @@ function parseEnrollmentAudioSourceInput(value: unknown): EnrollmentAudioSourceI
     endMs,
     route: optionalString(source.route),
   };
+}
+
+/**
+ * SHARED SCORING SEAM — the whole `identity.voiceprint.score_turns` pipeline
+ * (plan build -> sidecar run -> storage bundles -> audit -> A7 telemetry),
+ * extracted BEHAVIOR-PRESERVINGLY from the RPC handler so the WS1 auto-scorer
+ * (gateway/voiceprint-auto-score.ts) reuses it verbatim instead of duplicating
+ * any scoring logic. Audit + telemetry come free via this reuse.
+ *
+ * FAIL-CLOSED boundary for the whole scoring path. Any throw below (bad audio
+ * path, corrupt owner template, storage fault) is converted to a typed
+ * MethodError by `voiceprintMethodError` and audited as an error — it NEVER
+ * escapes as an unhandled crash and NEVER yields an owner-resolving result.
+ * Sidecar/embedding faults degrade to a structured `error`/`skipped` run
+ * (see runAndStoreLiveVoiceprintScoringPlan), not a false-accept.
+ */
+async function scoreVoiceprintTurnsForSession(args: {
+  sessionKey: string;
+  input: ScoreTurnsParams;
+  scoring: VoiceprintLiveScoringConfig;
+  storage: VoiceprintStorageAdapter;
+  audioArtifacts: VoiceprintAudioArtifactStore;
+  liveness: VoiceprintLivenessChallengeStore;
+  lifecycle: VoiceprintLifecycle;
+  /** Log-line label only; defaults to the RPC name so handler logs are unchanged. */
+  logLabel?: string;
+}): Promise<VoiceprintScoreTurnsResult> {
+  const { sessionKey, input, scoring, storage, audioArtifacts, liveness, lifecycle } = args;
+  const logLabel = args.logLabel ?? "identity.voiceprint.score_turns";
+  const started = Date.now();
+
+  try {
+    const turns = await buildScorePlanTurns({
+      sessionKey,
+      input,
+      scoring,
+      audioArtifacts,
+      liveness,
+      lifecycle,
+    });
+    const { run, storage: storageResult } = await runAndStoreLiveVoiceprintScoringPlan({
+      storage,
+      sidecar: scoring.sidecar,
+      turns,
+      createdAt: input.createdAt,
+      updatedAt: input.updatedAt,
+    });
+    log.info(logLabel, {
+      session_key: sessionKey,
+      status: run.status,
+      turns: turns.length,
+      queued: run.plan.queued.length,
+      skipped: run.plan.skipped.length,
+      patches: run.patches.length,
+      storage_bundle_id: run.storageBundle?.id,
+      duration_ms: Date.now() - started,
+    });
+    emitVoiceprintAudit(lifecycle, {
+      subjectKey: sessionKey,
+      op: "score",
+      outcome: run.status === "error" ? "error" : "ok",
+      counts: { turns: turns.length, patches: run.patches.length },
+    });
+    // A7 privacy-safe scoring-decision telemetry: one record per SCORED turn
+    // (decision + scalar score + threshold + model), and a distinct no-score
+    // "error" record when the whole batch degraded. Never emits a score on the
+    // skip/error path. Inert unless a recording sink is configured (default OFF).
+    emitVoiceprintScoreTelemetry(lifecycle, sessionKey, run);
+    return serializeScoreTurnsResult({
+      sessionKey,
+      turns: turns.length,
+      run,
+      storage: storageResult,
+    });
+  } catch (error) {
+    emitVoiceprintAudit(lifecycle, {
+      subjectKey: sessionKey,
+      op: "score",
+      outcome: "error",
+    });
+    const methodError = voiceprintMethodError(error);
+    // A fault thrown BEFORE a run object exists (e.g. a batch-integrity/security
+    // guard that throws rather than degrading to run.status === "error") would
+    // otherwise record an audit error but ZERO telemetry — asymmetric with the
+    // in-band error run that emits a scoreless `error` record. Emit one here too so
+    // the error-visibility story is symmetric. Never a score on the error path.
+    emitVoiceprintScoreTelemetryError(lifecycle, sessionKey, methodError.code);
+    throw methodError;
+  }
 }
 
 async function buildScorePlanTurns(input: {
@@ -3079,11 +3250,13 @@ interface VoiceprintSubjectPurgeOutcome {
  * (1) delete the encrypted owner template (idempotent, reuses deleteOwnerTemplate),
  * (2) purge ALL derived voiceprint storage states/bundles for the subject,
  * (3) evict the in-memory realtime turn tracker (raw-audio pointers, speech-window
- *     timing, transcript-identity joins) and the session-keyed audio-artifact cache
- *     (raw-audio file references) for the subject. After this runs, no owner template
- *     resolves, no derived state remains, and no in-memory biometric-derived artifact
- *     is left resident. Idempotent: re-running on an already-purged subject is a
- *     no-op with zero counts.
+ *     timing, transcript-identity joins), the session-keyed audio-artifact cache
+ *     (raw-audio file references), and the WS1 auto-score state (evidence verdict,
+ *     pending piggyback buffer of derived identity states, turn queue, in-flight
+ *     batch) for the subject. After this runs, no owner template resolves, no
+ *     derived state remains, and no in-memory biometric-derived artifact is left
+ *     resident. Idempotent: re-running on an already-purged subject is a no-op
+ *     with zero counts.
  */
 async function purgeVoiceprintSubject(input: {
   sessionKey: string;
@@ -3091,8 +3264,21 @@ async function purgeVoiceprintSubject(input: {
   storage: VoiceprintStorageAdapter;
   realtime: VoiceprintRealtimeSessionStore;
   audioArtifacts: VoiceprintAudioArtifactStore;
+  /** WS1 auto-scorer (present only when `auto_score_finalized` is on). */
+  autoScorer?: VoiceprintAutoScorer;
   deletedAt: string;
 }): Promise<VoiceprintSubjectPurgeOutcome> {
+  // WS1: drop the subject's auto-score state FIRST — evidence verdict, the
+  // pendingScoredStates piggyback buffer (derived-biometric records), the turn
+  // queue, and the in-flight marker. Resetting BEFORE the storage purge means an
+  // already-running batch that persists a bundle between here and `purgeSubject`
+  // is still erased below, and the drain loop's map-identity guard drops its
+  // late results instead of resurrecting evidence/piggyback state. Residual
+  // narrow race (accepted): a batch whose `purgeSubject` write starts AFTER ours
+  // finishes can leave one post-purge bundle; re-running the purge (idempotent)
+  // reconciles it.
+  input.autoScorer?.reset(input.sessionKey);
+
   let templateRemoved = false;
   let templateRef: string | undefined;
   if (input.scoring?.ownerTemplateFileSource) {
