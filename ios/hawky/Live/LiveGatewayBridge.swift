@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 enum LiveGatewayBridgeError: LocalizedError {
@@ -1119,6 +1120,58 @@ actor LiveGatewayBridge {
             timeoutSeconds: timeoutSeconds
         )
         return LiveVoiceprintAudioArtifactRegistration(payload: payload)
+    }
+
+    /// Upload a locally-recorded enrollment WAV to the gateway's media ingest so it
+    /// lands under an `allowed_audio_root` and `audio_artifact.register` can resolve
+    /// it. Reuses the SAME `media.chunk.upload` RPC the live session already uses:
+    /// the finalized WAV is read, re-chunked as pcm16, and streamed under the
+    /// caller-supplied `mediaId`, with `final:true` on the last chunk so the gateway
+    /// finalizes the file (writing `<media_root>/<date>/<mediaId>.wav` + a
+    /// `<mediaId>.json` sidecar whose `final_iso` the voiceprint resolver requires).
+    ///
+    /// The `mediaId` passed here MUST be byte-identical to the `mediaId` later passed
+    /// to `registerVoiceprintAudioArtifact`, so the on-disk filename matches. Returns
+    /// true when the final chunk was acknowledged; false on any transport/RPC failure.
+    func uploadVoiceprintEnrollmentAudio(
+        sessionKey: String,
+        mediaID: String,
+        wavPath: String,
+        timeoutSeconds: TimeInterval = 30
+    ) async -> Bool {
+        do {
+            let token = try KeychainStore.load(for: gatewayURL)
+            guard let token, !token.isEmpty else { return false }
+
+            let fileURL = URL(fileURLWithPath: wavPath)
+            let sampleRate = try AVAudioFile(forReading: fileURL).processingFormat.sampleRate
+            let effectiveSampleRate = sampleRate > 0 ? sampleRate : 24_000
+
+            let transport = transportFactory()
+            let wsURL = Self.websocketURL(from: gatewayURL)
+            let connectParams = ConnectParams(
+                version: "1", platform: "ios-live-voiceprint-upload", token: token,
+                sessionKey: sessionKey, role: "client", mode: currentMode
+            )
+            _ = try await transport.connect(url: wsURL, connectParams: connectParams)
+            defer { Task { await transport.disconnect() } }
+
+            // Delegate the chunking + media.chunk.upload wire format to the ONE
+            // shared primitive the deferred Live-recording upload also uses. The
+            // bridge's only job is resolving the transport/token/wsURL and mapping
+            // the shared uploader's throwing contract to this method's Bool result.
+            try await LiveMediaAudioChunkUploader.uploadWavAsMediaChunks(
+                transport: transport,
+                wavURL: fileURL,
+                mediaId: mediaID,
+                sampleRate: effectiveSampleRate,
+                capturedAtNs: 0,
+                timeoutSeconds: timeoutSeconds + 2
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Enroll the OWNER voiceprint template from one or more recorded sources.

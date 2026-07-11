@@ -1,5 +1,5 @@
 import Foundation
-import CoreML
+@preconcurrency import CoreML
 
 /// CoreML-backed `SpeakerEmbedder` seam for the device-provisioned CAM++ model.
 ///

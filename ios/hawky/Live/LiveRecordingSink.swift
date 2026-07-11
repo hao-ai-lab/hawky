@@ -303,3 +303,107 @@ private enum DeferredUploadError: Error {
     case bufferAllocationFailed
     case rpc(String)
 }
+
+/// Single reusable WAV -> `media.chunk.upload` primitive shared by BOTH the
+/// deferred Live-recording upload (`DeferredLiveMediaUploader.uploadAudio`) and
+/// the owner-enrollment WAV upload (`LiveGatewayBridge.uploadVoiceprintEnrollmentAudio`).
+///
+/// It reads the finalized WAV, re-chunks it into pcm16 windows of
+/// `sampleRate * 10` frames, and streams each window as a `media.chunk.upload`
+/// RequestFrame (`media_id` / `seq` / base64 `bytes` / `mime` `audio/pcm16;rate=` /
+/// `captured_at_ns` / `final`), with `final:true` on the last chunk so the gateway
+/// finalizes the file. Empty pcm windows are skipped; a degenerate (empty) WAV
+/// still emits a single `final:true` empty chunk so the writer finalizes. This
+/// preserves the exact wire contract of the former DeferredLiveMediaUploader loop.
+enum LiveMediaAudioChunkUploader {
+    /// Upload `wavURL` as pcm16 `media.chunk.upload` chunks under `mediaId`.
+    /// - `capturedAtNs`: value stamped into every chunk's `captured_at_ns`.
+    /// - `timeoutSeconds`: per-chunk RPC correlator timeout; `nil` uses the
+    ///   transport default (the deferred path passes `nil` for byte-identical
+    ///   behavior with the original `transport.send(frame)` call).
+    /// Throws `DeferredUploadError.rpc` on any non-ok response.
+    static func uploadWavAsMediaChunks(
+        transport: GatewayTransport,
+        wavURL: URL,
+        mediaId: String,
+        sampleRate: Double,
+        capturedAtNs: UInt64,
+        timeoutSeconds: TimeInterval?
+    ) async throws {
+        let file = try AVAudioFile(forReading: wavURL)
+        let format = file.processingFormat
+        let framesPerChunk = AVAudioFrameCount(max(1, Int(sampleRate * 10)))
+        var seq = 0
+
+        while file.framePosition < file.length {
+            let remaining = AVAudioFrameCount(file.length - file.framePosition)
+            let capacity = min(framesPerChunk, remaining)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+                throw DeferredUploadError.bufferAllocationFailed
+            }
+            try file.read(into: buffer, frameCount: capacity)
+            let pcm = pcm16Data(from: buffer)
+            guard !pcm.isEmpty else { continue }
+            let isFinal = file.framePosition >= file.length
+            try await sendChunk(
+                transport: transport, mediaId: mediaId, pcm: pcm, seq: seq,
+                sampleRate: sampleRate, capturedAtNs: capturedAtNs, final: isFinal,
+                timeoutSeconds: timeoutSeconds
+            )
+            seq += 1
+        }
+
+        if seq == 0 {
+            try await sendChunk(
+                transport: transport, mediaId: mediaId, pcm: Data(), seq: 0,
+                sampleRate: sampleRate, capturedAtNs: capturedAtNs, final: true,
+                timeoutSeconds: timeoutSeconds
+            )
+        }
+    }
+
+    private static func sendChunk(
+        transport: GatewayTransport,
+        mediaId: String,
+        pcm: Data,
+        seq: Int,
+        sampleRate: Double,
+        capturedAtNs: UInt64,
+        final: Bool,
+        timeoutSeconds: TimeInterval?
+    ) async throws {
+        let params: [String: JSONValue] = [
+            "media_id": .string(mediaId),
+            "seq": .number(Double(seq)),
+            "bytes": .string(pcm.base64EncodedString()),
+            "mime": .string("audio/pcm16;rate=\(Int(sampleRate))"),
+            "captured_at_ns": .number(Double(capturedAtNs)),
+            "final": .bool(final),
+        ]
+        let frame = RequestFrame(
+            id: UUID().uuidString,
+            method: "media.chunk.upload",
+            params: params
+        )
+        let response = try await transport.send(frame, timeout: timeoutSeconds)
+        if !response.ok {
+            throw DeferredUploadError.rpc(response.error?.message ?? "media.chunk.upload failed")
+        }
+    }
+
+    /// The ONE pcm16 extraction shared across all WAV upload paths.
+    static func pcm16Data(from buffer: AVAudioPCMBuffer) -> Data {
+        let frameLength = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameLength > 0, channelCount > 0 else { return Data() }
+        let byteCount = frameLength * channelCount * MemoryLayout<Int16>.size
+
+        if let data = buffer.int16ChannelData?[0] {
+            return Data(bytes: data, count: byteCount)
+        }
+        if let audioBuffer = buffer.audioBufferList.pointee.mBuffers.mData {
+            return Data(bytes: audioBuffer, count: min(byteCount, Int(buffer.audioBufferList.pointee.mBuffers.mDataByteSize)))
+        }
+        return Data()
+    }
+}

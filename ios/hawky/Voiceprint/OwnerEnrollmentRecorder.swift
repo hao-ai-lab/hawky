@@ -146,23 +146,37 @@ final class OwnerEnrollmentRecorder {
         guard let artifact else { return nil }
         let voicedMs = elapsedMs * Self.voicedFraction
 
-        // Register the local WAV so enroll_owner can reference it by artifact id.
+        // Upload the finalized WAV to the gateway, THEN register it. The WAV is
+        // written only to the phone's Documents dir; without this upload it never
+        // reaches an allowed_audio_root and audio_artifact.register fails
+        // FAILED_PRECONDITION (file not found). The upload reuses the SAME
+        // media.chunk.upload RPC the live session uses, keyed by the WAV basename so
+        // the media_id the gateway writes under is byte-identical to the mediaID we
+        // register with.
         if let (gateway, sessionKey) = store.voiceprintEnrollmentGateway() {
-            let registration = await gateway.registerVoiceprintAudioArtifact(
+            let uploaded = await gateway.uploadVoiceprintEnrollmentAudio(
                 sessionKey: sessionKey,
-                audioArtifactID: artifact.audioArtifactID,
                 mediaID: artifact.audioArtifactID,
-                sampleRate: artifact.sampleRate,
-                route: "ios-enrollment",
-                timeoutSeconds: 15
+                wavPath: artifact.audioPath,
+                timeoutSeconds: 30
             )
-            let resolvedID = registration?.audioArtifactID ?? artifact.audioArtifactID
-            if registration?.ok == true {
-                return OwnerEnrollmentSource(
-                    audioArtifactID: resolvedID,
+            if uploaded {
+                let registration = await gateway.registerVoiceprintAudioArtifact(
+                    sessionKey: sessionKey,
+                    audioArtifactID: artifact.audioArtifactID,
+                    mediaID: artifact.audioArtifactID,
+                    sampleRate: artifact.sampleRate,
                     route: "ios-enrollment",
-                    voicedMs: voicedMs
+                    timeoutSeconds: 15
                 )
+                let resolvedID = registration?.audioArtifactID ?? artifact.audioArtifactID
+                if registration?.ok == true {
+                    return OwnerEnrollmentSource(
+                        audioArtifactID: resolvedID,
+                        route: "ios-enrollment",
+                        voicedMs: voicedMs
+                    )
+                }
             }
         }
 
