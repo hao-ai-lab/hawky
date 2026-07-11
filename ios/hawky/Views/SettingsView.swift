@@ -906,10 +906,23 @@ struct SettingsView: View {
                     )
                 }
                 .accessibilityIdentifier("settings.live.voiceEnrollment.row")
+
+                Toggle(isOn: Binding(
+                    get: { liveStore.config.voiceprintRealtimeEnabled },
+                    set: { liveStore.updateVoiceprintRealtimeEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Live voice recognition")
+                        Text("Recognize when you (the owner) are speaking during a live session. Enroll your voice first.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.live.voiceRecognition.toggle")
             } header: {
                 Text("Voice identity")
             } footer: {
-                Text("Enroll your own voice so Hawky can recognize when you're speaking. This only sets up the template — it does not turn on live voice recognition.")
+                Text("Enroll your own voice, then turn on live voice recognition so Hawky can tell when you're the one speaking. Enrolling alone only sets up the encrypted template.")
             }
             .settingsSectionSurface()
         }
