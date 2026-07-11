@@ -3491,8 +3491,14 @@ final class LiveSessionStore {
         sessionKey: String
     ) {
         let cfg = activeConfig ?? config
-        guard let embedder = resolvedSpeakerEmbedder(config: cfg),
-              let bridge = gatewayBridge else { return }
+        // The server-side (marker-only) recognition path only needs the realtime gate
+        // + a bridge — NOT a provisioned CoreML embedder. So gate on
+        // `voiceprintRealtimeEnabled` + `gatewayBridge` here, and resolve the embedder
+        // OPTIONALLY: when it is nil (the default, no CoreML model) every turn degrades
+        // to markers-only and is scored server-side; when it is present, the turns that
+        // produce an embedding take the fail-closed client-embedding (B2) path instead.
+        guard cfg.voiceprintRealtimeEnabled, let bridge = gatewayBridge else { return }
+        let embedder = resolvedSpeakerEmbedder(config: cfg)
         let modeRaw = cfg.mode.rawValue
 
         // Run CoreML inference OFF the main actor so per-turn embedding never blocks
@@ -3518,14 +3524,21 @@ final class LiveSessionStore {
             }.value
 
             let embedded = scoreTurns.filter { $0.embedding != nil }.count
-            // No embedding produced → do NOT open a challenge / send score_turns.
-            // The marker path (voiceprint.realtime_event) already covered these turns.
+            // No on-device embedding produced → SERVER-SIDE recognition path.
+            // The finalized turns already uploaded their audio (recordingSink uses a
+            // non-nil transport), so each turn's audioArtifactId already resolves on
+            // the gateway. Submit MARKER-ONLY score_turns (no sampleEmbedding, no
+            // nonce): the sidecar scores the turn audio against the owner template and
+            // returns per-turn `states`. This is DISTINCT from the client-embedding
+            // (B2) path below, and runs on EXACTLY the turns that produced no embedding
+            // — so every turn is scored on exactly one path (marker XOR embedding).
             guard embedded > 0 else {
-                await MainActor.run { [weak self] in
-                    self?.appendVerbose(
-                        "Voiceprint on-device embeddings: 0/\(scoreTurns.count) turns — marker path"
-                    )
-                }
+                await self?.scoreFinalizedTurnsServerSide(
+                    scoreTurns: scoreTurns,
+                    sessionKey: sessionKey,
+                    mode: modeRaw,
+                    bridge: bridge
+                )
                 return
             }
 
@@ -3536,13 +3549,77 @@ final class LiveSessionStore {
                 mode: modeRaw,
                 turns: scoreTurns
             )
+            let provider = embedder?.modelInfo.provider.rawValue ?? "on-device"
             await MainActor.run { [weak self] in
                 self?.appendVerbose(Self.voiceprintSubmissionLog(
                     submission,
                     embedded: embedded,
                     total: scoreTurns.count,
-                    provider: embedder.modelInfo.provider.rawValue
+                    provider: provider
                 ))
+            }
+        }
+    }
+
+    /// SERVER-SIDE owner recognition for finalized turns that carry NO on-device
+    /// embedding (the default marker path). Submits MARKER-ONLY score_turns — the
+    /// existing `LiveVoiceprintScoreTurn` serialization emits neither `sampleEmbedding`
+    /// nor `nonce` when both are nil, which is exactly the marker-only shape the gateway
+    /// resolves against the already-uploaded turn audio. Reuses
+    /// `sendVoiceprintScoreTurns` (no second RPC helper) and deliberately does NOT route
+    /// through `VoiceprintLivenessCoordinator`: that path fails closed without a nonce,
+    /// but server-side sidecar scoring needs neither embedding nor nonce.
+    ///
+    /// FAIL-SAFE: a nil result / empty states / transport error degrades quietly (a
+    /// verbose log, then continue). Never surfaces a false "owner" on error.
+    nonisolated private func scoreFinalizedTurnsServerSide(
+        scoreTurns: [LiveVoiceprintScoreTurn],
+        sessionKey: String,
+        mode: String,
+        bridge: LiveGatewayBridge
+    ) async {
+        guard !scoreTurns.isEmpty else { return }
+        let params = LiveVoiceprintScoreTurn.scoreTurnsParams(sessionKey: sessionKey, turns: scoreTurns)
+        let result = await bridge.sendVoiceprintScoreTurns(
+            sessionKey: sessionKey,
+            params: params,
+            mode: mode,
+            timeoutSeconds: 15
+        )
+        let lines = Self.voiceprintRecognitionLines(result: result, total: scoreTurns.count)
+        await MainActor.run { [weak self] in
+            for line in lines { self?.appendVerbose(line) }
+        }
+    }
+
+    /// Build the per-turn verbose recognition lines from a server-side score_turns
+    /// result. Pure/static so it is unit-testable without a live session. FAIL-SAFE:
+    /// a nil result or empty `states` yields a single neutral "no result" line and
+    /// NEVER an owner line, so a transport error can never surface a false "owner".
+    nonisolated static func voiceprintRecognitionLines(  // testable
+        result: LiveVoiceprintScoreTurnsResult?,
+        total: Int
+    ) -> [String] {
+        guard let result, !result.states.isEmpty else {
+            return ["Voiceprint recognition: no result for \(total) turn\(total == 1 ? "" : "s") — marker path"]
+        }
+        return result.states.map { state in
+            let score = state.confidence.map { String(format: "%.2f", $0) }
+            switch state.result {
+            case "owner_speaking":
+                return "🗣️ You (owner)" + (score.map { " · \($0)" } ?? "")
+            case "possible_owner":
+                return "Possibly you (owner)" + (score.map { " · \($0)" } ?? "")
+            case "unknown_speaker", "unknown_cluster":
+                return "Unknown speaker" + (score.map { " · \($0)" } ?? "")
+            case "confirmed_person":
+                return "Known person" + (score.map { " · \($0)" } ?? "")
+            case let other?:
+                return "Speaker: \(other)" + (score.map { " · \($0)" } ?? "")
+            case nil:
+                // No decision (skipped / pending / error lifecycle) — never "owner".
+                let why = state.skipReason ?? state.lifecycle
+                return "Voiceprint: \(state.transcriptItemID) not scored (\(why))"
             }
         }
     }

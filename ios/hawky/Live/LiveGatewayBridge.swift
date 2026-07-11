@@ -190,13 +190,61 @@ struct LiveVoiceprintEmbeddingChallenge: Equatable {
     }
 }
 
-/// Result of `identity.voiceprint.score_turns`. iOS only needs a typed
-/// success/failure signal (the server owns the actual scoring decision), so this
-/// captures `ok` plus the echoed session key and the reported turn count.
+/// One per-turn recognition state from `identity.voiceprint.score_turns`
+/// (server `VoiceprintTranscriptIdentityState`). The recognition decision the
+/// live UI shows is `result` (owner_speaking / possible_owner / unknown_speaker /
+/// …) + `confidence`, keyed by `transcriptItemId`. `lifecycle` reports whether the
+/// state was `resolved` / `unknown` / `skipped` / `error` / etc.
+///
+/// NOTE: the server wire key for the score is `confidence` (NOT `score`) — see
+/// `VoiceprintTranscriptIdentityState` in `src/identity/voiceprint/transcript-state.ts`.
+/// `result`, `confidence` and `skipReason` are OPTIONAL on the wire.
+struct LiveVoiceprintScoreTurnState: Equatable {
+    var transcriptItemID: String
+    var lifecycle: String
+    var result: String?
+    var confidence: Double?
+    var skipReason: String?
+
+    init?(object: [String: JSONValue]) {
+        guard
+            case let .some(.string(transcriptItemID)) = object["transcriptItemId"],
+            case let .some(.string(lifecycle)) = object["lifecycle"]
+        else {
+            return nil
+        }
+        self.transcriptItemID = transcriptItemID
+        self.lifecycle = lifecycle
+        if case let .some(.string(result)) = object["result"] {
+            self.result = result
+        } else {
+            self.result = nil
+        }
+        if case let .some(.number(confidence)) = object["confidence"] {
+            self.confidence = confidence
+        } else {
+            self.confidence = nil
+        }
+        if case let .some(.string(skipReason)) = object["skipReason"] {
+            self.skipReason = skipReason
+        } else {
+            self.skipReason = nil
+        }
+    }
+}
+
+/// Result of `identity.voiceprint.score_turns`. Captures `ok` + the echoed session
+/// key + the reported turn count, PLUS the per-turn recognition `states` array that
+/// carries the server's speaker decision (result/confidence/lifecycle keyed by
+/// transcriptItemId). The server owns the scoring; iOS reads `states` to surface it.
 struct LiveVoiceprintScoreTurnsResult: Equatable {
     var ok: Bool
     var sessionKey: String?
     var turns: Int?
+    /// Per-turn recognition states, in server order. Empty when the response
+    /// omits `states` (older server / error path) — never nil, so callers can
+    /// treat "no state" as "no owner shown" without special-casing.
+    var states: [LiveVoiceprintScoreTurnState]
 
     init?(payload: JSONValue?) {
         guard case let .some(.object(root)) = payload else { return nil }
@@ -218,6 +266,14 @@ struct LiveVoiceprintScoreTurnsResult: Equatable {
             self.turns = Int(turns)
         } else {
             self.turns = nil
+        }
+        if case let .some(.array(states)) = root["states"] {
+            self.states = states.compactMap { value in
+                guard case let .object(object) = value else { return nil }
+                return LiveVoiceprintScoreTurnState(object: object)
+            }
+        } else {
+            self.states = []
         }
     }
 }
