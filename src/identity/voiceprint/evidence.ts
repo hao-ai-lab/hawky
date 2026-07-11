@@ -1,4 +1,5 @@
 import type { VoiceprintDecision } from "./types.js";
+import { normalizeCosineSimilarityToConfidence } from "./similarity.js";
 
 /**
  * Session-level speaker evidence accumulator.
@@ -343,20 +344,21 @@ export function readSpeakerEvidence(
  *
  * For owner-ish verdicts (`owner_present`/`provisional`) the agreeing turns are
  * owner_speaking/possible_owner, so a HIGHER cosine (closer to the owner
- * template) means MORE confidence — use `normalizeScore` directly.
+ * template) means MORE confidence — use `normalizeCosineSimilarityToConfidence`
+ * directly.
  *
  * For `not_owner` the agreeing turns are `unknown_speaker`, which by
  * construction sit BELOW the owner threshold. A clearly-different speaker has a
  * low (even negative) cosine and should read as HIGH not_owner confidence, while
  * a borderline speaker just under the threshold is less certain. The score
- * contribution must therefore be INVERTED (`1 - normalizeScore`); otherwise the
+ * contribution must therefore be INVERTED (`1 - normalized`); otherwise the
  * more obviously-not-the-owner a speaker is, the lower the reported confidence.
  */
 function verdictScoreContribution(
   verdict: SpeakerEvidenceVerdict,
   score: number,
 ): number {
-  const normalized = normalizeScore(score);
+  const normalized = normalizeCosineSimilarityToConfidence(score);
   return verdict === "not_owner" ? 1 - normalized : normalized;
 }
 
@@ -374,14 +376,6 @@ function observationAgreesWithVerdict(
     case "unknown":
       return false;
   }
-}
-
-/** Map a cosine similarity in [-1, 1] to [0, 1]; clamp anything else. */
-function normalizeScore(score: number): number {
-  if (!Number.isFinite(score)) {
-    return 0;
-  }
-  return clamp01((score + 1) / 2);
 }
 
 function clamp01(value: number): number {

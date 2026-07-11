@@ -61,6 +61,17 @@ export function safeCosineDistance(
 }
 
 /**
+ * Map a cosine similarity in [-1, 1] to a confidence in [0, 1]; non-finite
+ * input (NaN/Infinity) maps to 0, and any out-of-range finite value is clamped.
+ */
+export function normalizeCosineSimilarityToConfidence(similarity: number): number {
+  if (!Number.isFinite(similarity)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, (similarity + 1) / 2));
+}
+
+/**
  * Score a sample against enrolled owner clips using the BEST-MATCHING enrolled
  * clip (max over per-clip cosine similarity) rather than a single mean-centroid.
  *
