@@ -2,10 +2,13 @@ import Testing
 import Foundation
 @testable import hawky
 
-/// Server-side owner-recognition tests: parse the per-turn `states` the gateway
-/// `score_turns` returns (result/confidence/lifecycle), build MARKER-ONLY turns for
-/// finalized live turns (no sampleEmbedding, no nonce), and map states to the live
-/// verbose recognition lines. All against a fake bridge — no live gateway.
+/// Server-side owner-recognition rendering tests: parse the per-turn `states` the
+/// gateway returns (result/confidence/lifecycle), build MARKER-ONLY turns for the
+/// on-device/B2 submission path (no sampleEmbedding, no nonce), and map states to the
+/// live verbose recognition lines. WS2: iOS no longer boomerangs score_turns for the
+/// server path — the gateway auto-scores and PIGGYBACKS `scoredStates`, which
+/// `handleVoiceprintRealtimeResult` renders through the SAME shared renderer exercised
+/// here. All pure/static — no live gateway.
 @Suite struct VoiceprintServerSideRecognitionTests {
 
     // MARK: - states parsing
@@ -157,6 +160,35 @@ import Foundation
         let lines = LiveSessionStore.voiceprintRecognitionLines(result: result, total: 1)
         #expect(lines.count == 1)
         #expect(!lines[0].contains("You (owner)"))
+    }
+
+    /// WS2: the piggybacked `scoredStates` render through the SAME states-based
+    /// renderer that `handleVoiceprintRealtimeResult` calls — owner + unknown surface,
+    /// empty states surface no owner line.
+    @Test func recognitionLinesFromScoredStatesMatchRenderer() {
+        let states = [
+            LiveVoiceprintScoreTurnState(object: [
+                "transcriptItemId": .string("item-owner"),
+                "lifecycle": .string("resolved"),
+                "result": .string("owner_speaking"),
+                "confidence": .number(0.97),
+            ])!,
+            LiveVoiceprintScoreTurnState(object: [
+                "transcriptItemId": .string("item-other"),
+                "lifecycle": .string("resolved"),
+                "result": .string("unknown_speaker"),
+                "confidence": .number(0.50),
+            ])!,
+        ]
+        let lines = LiveSessionStore.voiceprintRecognitionLines(states: states, total: 2)
+        #expect(lines.count == 2)
+        #expect(lines[0] == "🗣️ You (owner) · 0.97")
+        #expect(lines[1] == "Unknown speaker · 0.50")
+
+        // FAIL-SAFE: empty scoredStates never surfaces an owner line.
+        let empty = LiveSessionStore.voiceprintRecognitionLines(states: [], total: 4)
+        #expect(empty.count == 1)
+        #expect(!empty[0].contains("owner"))
     }
 
     /// A skipped/unscored turn is surfaced as "not scored", never as an owner.

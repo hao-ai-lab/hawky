@@ -369,6 +369,15 @@ struct LiveVoiceprintRealtimeResult: Equatable {
     var finalizedTurns: [LiveVoiceprintFinalizedTurn]
     var pendingSpeechWindows: Int
     var pendingTranscripts: Int
+    /// WS2 piggyback (PRIMARY identity channel): per-turn states the gateway scored
+    /// server-side since the previous realtime_event, drained onto this response.
+    /// Empty (never nil) when the server omits `scoredStates` (auto-score off / older
+    /// server). Reuses the same `LiveVoiceprintScoreTurnState` parser as score_turns.
+    var scoredStates: [LiveVoiceprintScoreTurnState]
+    /// WS2 piggyback (PRIMARY identity channel): the current scalar-only identity
+    /// summary. nil when the server omits `identity`. Fed into the edge-triggered
+    /// identity state machine; a nil/garbled summary degrades quietly (never owner).
+    var identity: LiveVoiceprintIdentitySummary?
 
     init?(payload: JSONValue?) {
         guard
@@ -383,6 +392,20 @@ struct LiveVoiceprintRealtimeResult: Equatable {
         self.finalizedTurns = Self.turns(from: root["finalizedTurns"])
         self.pendingSpeechWindows = Self.int(from: root["pendingSpeechWindows"]) ?? 0
         self.pendingTranscripts = Self.int(from: root["pendingTranscripts"]) ?? 0
+        self.scoredStates = Self.scoredStates(from: root["scoredStates"])
+        if case let .some(.object(identity)) = root["identity"] {
+            self.identity = LiveVoiceprintIdentitySummary(object: identity)
+        } else {
+            self.identity = nil
+        }
+    }
+
+    private static func scoredStates(from value: JSONValue?) -> [LiveVoiceprintScoreTurnState] {
+        guard case let .some(.array(items)) = value else { return [] }
+        return items.compactMap { item in
+            guard case let .object(object) = item else { return nil }
+            return LiveVoiceprintScoreTurnState(object: object)
+        }
     }
 
     private static func turns(from value: JSONValue?) -> [LiveVoiceprintFinalizedTurn] {
@@ -418,6 +441,9 @@ enum LiveGatewayBridgeStreamEvent: Equatable {
     case whenArmed(intentionId: String, fireDate: String, title: String, body: String)
     /// #482: gateway disarmed or delivered a timed intention — device should cancel pending notification.
     case whenDisarmed(intentionId: String)
+    /// WS2 live owner recognition (SECONDARY channel): edge-triggered scalar-only
+    /// identity push, routed to the same identity state machine as the piggyback.
+    case voiceprintIdentity(sessionKey: String, verdict: String, decision: String?, confidence: Double?, at: String)
 }
 
 struct LiveFrontendBootContextResponse {
@@ -577,6 +603,8 @@ actor LiveGatewayBridge {
                             continuation.yield(.whenArmed(intentionId: intentionId, fireDate: fireDate, title: title, body: body))
                         case .whenDisarmed(let intentionId):
                             continuation.yield(.whenDisarmed(intentionId: intentionId))
+                        case .voiceprintIdentity(let sessionKey, let verdict, let decision, let confidence, let at):
+                            continuation.yield(.voiceprintIdentity(sessionKey: sessionKey, verdict: verdict, decision: decision, confidence: confidence, at: at))
                         case .error(let code, let message):
                             continuation.yield(.error("[\(code)] \(message)"))
                         }
@@ -660,6 +688,9 @@ actor LiveGatewayBridge {
                     break
                 case .whenDisarmed:
                     // Notification cancellation is handled by the live stream loop, not this one-shot path.
+                    break
+                case .voiceprintIdentity:
+                    // WS2: live owner-identity is handled by the live stream loop, not this one-shot path.
                     break
                 }
             }
