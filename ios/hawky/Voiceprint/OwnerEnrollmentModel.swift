@@ -198,6 +198,19 @@ enum LiveVoiceprintEnrollmentRequest {
 
 /// Explicit enrollment states. `needsConsent` and `tooShort` are the two gates
 /// that block a submission; nothing leaves the device in those states.
+/// Upload/registration status of one captured source. A source starts `pending`
+/// while its WAV is uploaded+registered in the background, becomes `uploaded` once
+/// it is artifact-backed on the gateway, or `failed` if the upload could not be
+/// finalized (in which case the local-path fallback source is enrolled as-is).
+///
+/// CORRECTNESS: `enroll_owner` can only resolve a source the gateway can see, so the
+/// Enroll action must wait for every `pending` source before submitting.
+enum OwnerEnrollmentUploadState: Equatable {
+    case pending
+    case uploaded
+    case failed
+}
+
 enum OwnerEnrollmentState: Equatable {
     case idle
     case recording
@@ -223,6 +236,11 @@ final class OwnerEnrollmentModel: ObservableObject {
 
     @Published private(set) var state: OwnerEnrollmentState = .idle
     @Published private(set) var sources: [OwnerEnrollmentSource] = []
+    /// Per-source upload state, keyed by `OwnerEnrollmentSource.id`. A source is
+    /// `pending` from the moment it is recorded until its background upload finishes
+    /// (`uploaded`) or fails (`failed`). Drives the "finishing upload…" hint and,
+    /// critically, gates Enroll: no submission while any source is `pending`.
+    @Published private(set) var uploadStates: [String: OwnerEnrollmentUploadState] = [:]
     /// Explicit in-flow biometric consent. FAIL-CLOSED: starts fully denied. The
     /// UI toggles set `biometricAllowed`/`captureAllowed`; the flow refuses to
     /// submit until both are true.
@@ -230,7 +248,9 @@ final class OwnerEnrollmentModel: ObservableObject {
 
     private let gateway: VoiceprintEnrollmentGateway
     private let sessionKey: String
-    private let voicedFloorMs: Double
+    /// The guided VOICED floor this model enforces (ms). Exposed read-only so the UI
+    /// can render a live "enough speech" threshold against the same value.
+    let voicedFloorMs: Double
 
     init(
         gateway: VoiceprintEnrollmentGateway,
@@ -257,6 +277,16 @@ final class OwnerEnrollmentModel: ObservableObject {
         max(0, voicedFloorMs - totalVoicedMs)
     }
 
+    /// Whether any recorded source is still uploading. Enroll must not submit while
+    /// true — a `pending` source is not yet resolvable on the gateway.
+    var hasPendingUploads: Bool {
+        uploadStates.values.contains(.pending)
+    }
+
+    /// Continuations parked in `awaitPendingUploads()` while uploads are in flight,
+    /// resumed once no source is `pending`. Non-published: internal bookkeeping only.
+    private var pendingUploadWaiters: [CheckedContinuation<Void, Never>] = []
+
     // MARK: - Recording lifecycle (UI-driven)
 
     /// Enter the recording state. Recording owner voice for enrollment is only ever
@@ -267,9 +297,60 @@ final class OwnerEnrollmentModel: ObservableObject {
 
     /// Record a captured source and re-evaluate the gate. The recorder produces a
     /// registered audio artifact (or a local path) plus a VOICED-speech estimate.
-    func addRecordedSource(_ source: OwnerEnrollmentSource) {
+    ///
+    /// `uploadState` marks whether the source still needs a background upload before it
+    /// can be enrolled. Defaults to `.uploaded` so existing callers/tests that hand in
+    /// an already-artifact-backed source do not enter the pending-upload gate.
+    func addRecordedSource(
+        _ source: OwnerEnrollmentSource,
+        uploadState: OwnerEnrollmentUploadState = .uploaded
+    ) {
         sources.append(source)
+        uploadStates[source.id] = uploadState
         refreshGateState()
+    }
+
+    /// Upgrade an already-recorded source in place once its background upload finishes.
+    /// Preserves array position and marks the source `uploaded`. If the id is unknown
+    /// (e.g. reset during upload) this is a no-op. Resumes any Enroll waiter that is
+    /// blocked on pending uploads once none remain.
+    func markSourceUploaded(id: String, upgraded: OwnerEnrollmentSource) {
+        // No-op if the source was cleared (e.g. reset() during upload): do not
+        // resurrect a phantom upload-state entry for a clip that no longer exists.
+        guard uploadStates[id] != nil else { return }
+        if let index = sources.firstIndex(where: { $0.id == id }) {
+            sources[index] = upgraded
+        }
+        uploadStates[id] = .uploaded
+        refreshGateState()
+        resumePendingWaitersIfSettled()
+    }
+
+    /// Mark a source's background upload as failed. The local-path fallback source
+    /// stays in place (it can still enroll from the file on an accessible device), so
+    /// this only flips the upload state and unblocks any Enroll waiter.
+    func markSourceUploadFailed(id: String) {
+        guard uploadStates[id] != nil else { return }
+        uploadStates[id] = .failed
+        refreshGateState()
+        resumePendingWaitersIfSettled()
+    }
+
+    /// Suspend until no source is `pending`. Returns immediately when nothing is in
+    /// flight. Used by `submit()` so Enroll never fires against an unresolved source.
+    func awaitPendingUploads() async {
+        guard hasPendingUploads else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            pendingUploadWaiters.append(continuation)
+        }
+    }
+
+    /// Resume all parked Enroll waiters once no upload is `pending`.
+    private func resumePendingWaitersIfSettled() {
+        guard !hasPendingUploads, !pendingUploadWaiters.isEmpty else { return }
+        let waiters = pendingUploadWaiters
+        pendingUploadWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     /// Recording could not begin (mic permission denied or session/engine setup
@@ -284,10 +365,13 @@ final class OwnerEnrollmentModel: ObservableObject {
     }
 
     /// Discard all captured sources and reset to idle (does not touch consent so the
-    /// user's opt-in choice survives a re-record).
+    /// user's opt-in choice survives a re-record). Clears upload tracking and unblocks
+    /// any parked Enroll waiter so it does not hang after a reset.
     func reset() {
         sources.removeAll()
+        uploadStates.removeAll()
         state = .idle
+        resumePendingWaitersIfSettled()
     }
 
     /// Recompute the blocking state after a source or consent change. Never advances
@@ -342,8 +426,31 @@ final class OwnerEnrollmentModel: ObservableObject {
             state = .tooShort
             return nil
         }
-
+        // 4. CORRECTNESS: enroll_owner can only resolve a source the gateway can see.
+        //    Wait for every in-flight background upload before submitting so we never
+        //    enroll against a still-uploading source. (The UI also disables Enroll
+        //    while uploads are pending; this await is the belt to that suspenders.)
         state = .submitting
+        // Wait out EVERY in-flight upload, including any that began while we were parked,
+        // so a still-uploading (local-path) source can never reach enroll_owner.
+        while hasPendingUploads {
+            await awaitPendingUploads()
+        }
+
+        // Re-check the gates after the await: a reset (or a failed upload dropping the
+        // voiced total below the floor) could have changed the picture while we waited.
+        guard !sources.isEmpty else {
+            state = .idle
+            return nil
+        }
+        guard consent.satisfiesGate else {
+            state = .needsConsent
+            return nil
+        }
+        guard hasEnoughSpeech else {
+            state = .tooShort
+            return nil
+        }
         let params = LiveVoiceprintEnrollmentRequest.enrollOwnerParams(
             sessionKey: sessionKey,
             sources: sources,
