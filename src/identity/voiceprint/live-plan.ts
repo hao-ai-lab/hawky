@@ -233,23 +233,19 @@ export async function runLiveVoiceprintScoringPlan(input: {
   sidecarErrorHandling?: LiveVoiceprintScoringPlanSidecarErrorHandling;
 }): Promise<LiveVoiceprintScoringPlanRun> {
   const plan = buildLiveVoiceprintScoringPlan({ turns: input.turns });
+  const createdAt = input.updatedAt ?? input.createdAt;
   if (plan.jobContexts.length === 0) {
     // No sidecar jobs. If any turns were scored from a client embedding, still
     // build their patches (from clientScored) without ever spawning the sidecar.
     if (plan.clientScored.length === 0) {
-      return {
-        version: 1,
+      return buildPlanRunResult({
         status: plan.status === "empty" ? "empty" : "skipped",
         plan,
         batch: null,
         patches: [],
         states: plan.states,
-        storageBundle: storageBundleForPlanRun({
-          states: plan.states,
-          patches: [],
-          createdAt: input.updatedAt ?? input.createdAt,
-        }),
-      };
+        createdAt,
+      });
     }
     const clientBatch = clientOnlyBatchResult(plan);
     const patches = buildLiveVoiceprintScoringPlanPatches({
@@ -260,19 +256,14 @@ export async function runLiveVoiceprintScoringPlan(input: {
       staleUpdateHandling: input.staleUpdateHandling,
     });
     const states = applyLiveVoiceprintScoringPlanPatches({ plan, patches });
-    return {
-      version: 1,
+    return buildPlanRunResult({
       status: runStatus(plan, clientBatch),
       plan,
       batch: clientBatch,
       patches,
       states,
-      storageBundle: storageBundleForPlanRun({
-        states,
-        patches,
-        createdAt: input.updatedAt ?? input.createdAt,
-      }),
-    };
+      createdAt,
+    });
   }
 
   let batch: LiveVoiceprintScoringBatchResult;
@@ -326,7 +317,7 @@ export async function runLiveVoiceprintScoringPlan(input: {
       storageBundle: storageBundleForPlanRun({
         states,
         patches: clientPatches,
-        createdAt: input.updatedAt ?? input.createdAt,
+        createdAt,
       }),
       error: {
         code: "sidecar_failed",
@@ -344,19 +335,14 @@ export async function runLiveVoiceprintScoringPlan(input: {
   });
 
   const states = applyLiveVoiceprintScoringPlanPatches({ plan, patches });
-  return {
-    version: 1,
+  return buildPlanRunResult({
     status: runStatus(plan, batch),
     plan,
     batch,
     patches,
     states,
-    storageBundle: storageBundleForPlanRun({
-      states,
-      patches,
-      createdAt: input.updatedAt ?? input.createdAt,
-    }),
-  };
+    createdAt,
+  });
 }
 
 export function markLiveVoiceprintScoringPlanErrorStates(input: {
@@ -434,6 +420,36 @@ export function applyLiveVoiceprintScoringPlanPatches(input: {
   }
 
   return states;
+}
+
+/**
+ * Assemble a non-error {@link LiveVoiceprintScoringPlanRun} from its computed
+ * parts. The three success return paths (no-client-scored, client-only, and
+ * sidecar) build byte-identical shapes — same `version`, same
+ * `storageBundleForPlanRun` derivation — so they share this builder. The error
+ * path is NOT routed here because it additionally carries an `error` field.
+ */
+function buildPlanRunResult(input: {
+  status: LiveVoiceprintScoringPlanRunStatus;
+  plan: LiveVoiceprintScoringPlan;
+  batch: LiveVoiceprintScoringBatchResult | null;
+  patches: VoiceprintTranscriptIdentityStatePatch[];
+  states: VoiceprintTranscriptIdentityState[];
+  createdAt?: IsoTime;
+}): LiveVoiceprintScoringPlanRun {
+  return {
+    version: 1,
+    status: input.status,
+    plan: input.plan,
+    batch: input.batch,
+    patches: input.patches,
+    states: input.states,
+    storageBundle: storageBundleForPlanRun({
+      states: input.states,
+      patches: input.patches,
+      createdAt: input.createdAt,
+    }),
+  };
 }
 
 function storageBundleForPlanRun(input: {
