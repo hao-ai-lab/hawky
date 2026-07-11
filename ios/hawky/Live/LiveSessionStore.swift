@@ -1367,6 +1367,14 @@ final class LiveSessionStore {
         persist()
     }
 
+    /// Toggle live server-side owner recognition. When on (and an owner voice is
+    /// enrolled), finalized live turns are scored against the owner template and the
+    /// transcript shows who is speaking. Off by default.
+    func updateVoiceprintRealtimeEnabled(_ enabled: Bool) {
+        config.voiceprintRealtimeEnabled = enabled
+        persist()
+    }
+
     func updateVisualDedupEnabled(_ enabled: Bool) {
         config.visualDedupEnabled = enabled
         persist()
