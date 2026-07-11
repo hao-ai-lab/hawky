@@ -66,21 +66,7 @@ final class OwnerEnrollmentRecorder {
         }
 
         let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
-        // Validate the tap format: installTap raises an uncatchable NSException on a
-        // 0 Hz / 0-channel format. Fall back to a known-good format if the input node
-        // has not yet settled on a valid record format.
-        let tapFormat: AVAudioFormat
-        if inputFormat.sampleRate > 0, inputFormat.channelCount > 0 {
-            tapFormat = inputFormat
-        } else if let fallback = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: LiveRecordingSink.defaultSampleRate,
-            channels: 1,
-            interleaved: false
-        ) {
-            tapFormat = fallback
-        } else {
+        guard let tapFormat = Self.resolveTapFormat(for: input) else {
             print("[OwnerEnrollmentRecorder] no valid input format available")
             Self.deactivateSession()
             return .failed
@@ -96,21 +82,7 @@ final class OwnerEnrollmentRecorder {
             audioSampleRate: sampleRate
         )
 
-        if !tapInstalled {
-            input.installTap(onBus: 0, bufferSize: Self.tapBufferFrames, format: tapFormat) { [weak self] buffer, _ in
-                guard let self else { return }
-                let chunk = Self.pcm16Chunk(from: buffer)
-                guard !chunk.isEmpty else { return }
-                Task { @MainActor [weak self] in
-                    self?.sink.ingestAudio(LiveAudioChunk(
-                        data: chunk,
-                        formatDescription: "pcm16",
-                        capturedAt: Date()
-                    ))
-                }
-            }
-            tapInstalled = true
-        }
+        installTapIfNeeded(on: input, format: tapFormat)
 
         do {
             engine.prepare()
@@ -151,13 +123,25 @@ final class OwnerEnrollmentRecorder {
         guard let artifact else { return nil }
         let voicedMs = elapsedMs * Self.voicedFraction
 
-        // Upload the finalized WAV to the gateway, THEN register it. The WAV is
-        // written only to the phone's Documents dir; without this upload it never
-        // reaches an allowed_audio_root and audio_artifact.register fails
-        // FAILED_PRECONDITION (file not found). The upload reuses the SAME
-        // media.chunk.upload RPC the live session uses, keyed by the WAV basename so
-        // the media_id the gateway writes under is byte-identical to the mediaID we
-        // register with.
+        return await finalizeSource(artifact: artifact, voicedMs: voicedMs, store: store)
+    }
+
+    /// Upload the finalized WAV to the gateway and register it as a voiceprint
+    /// audio artifact, returning the resulting source. On any gateway failure
+    /// (offline / no roots configured) falls back to the local audio path so a
+    /// device with an accessible recording dir can still enroll from the file.
+    ///
+    /// The upload must precede registration: the WAV is written only to the phone's
+    /// Documents dir; without the upload it never reaches an allowed_audio_root and
+    /// audio_artifact.register fails FAILED_PRECONDITION (file not found). The
+    /// upload reuses the SAME media.chunk.upload RPC the live session uses, keyed by
+    /// the WAV basename so the media_id the gateway writes under is byte-identical
+    /// to the mediaID we register with.
+    private func finalizeSource(
+        artifact: LiveVoiceprintAudioArtifactReference,
+        voicedMs: Double,
+        store: LiveSessionStore
+    ) async -> OwnerEnrollmentSource {
         if let (gateway, sessionKey) = store.voiceprintEnrollmentGateway() {
             let uploaded = await gateway.uploadVoiceprintEnrollmentAudio(
                 sessionKey: sessionKey,
@@ -185,14 +169,49 @@ final class OwnerEnrollmentRecorder {
             }
         }
 
-        // Registration failed (offline / no roots configured) — fall back to the
-        // local audio path so a device with an accessible recording dir can still
-        // enroll from the file directly.
         return OwnerEnrollmentSource(
             audioPath: artifact.audioPath,
             route: "ios-enrollment",
             voicedMs: voicedMs
         )
+    }
+
+    // MARK: - Tap format / install
+
+    /// Resolve a tap format for the input node. installTap raises an uncatchable
+    /// NSException on a 0 Hz / 0-channel format, so validate the node's format and
+    /// fall back to a known-good format if it has not yet settled on a valid record
+    /// format. Returns nil only if even the fallback format cannot be built.
+    private static func resolveTapFormat(for input: AVAudioInputNode) -> AVAudioFormat? {
+        let inputFormat = input.outputFormat(forBus: 0)
+        if inputFormat.sampleRate > 0, inputFormat.channelCount > 0 {
+            return inputFormat
+        }
+        return AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: LiveRecordingSink.defaultSampleRate,
+            channels: 1,
+            interleaved: false
+        )
+    }
+
+    /// Install the mic tap once, re-chunking each buffer to pcm16 and forwarding it
+    /// to the sink on the main actor. No-op if a tap is already installed.
+    private func installTapIfNeeded(on input: AVAudioInputNode, format tapFormat: AVAudioFormat) {
+        guard !tapInstalled else { return }
+        input.installTap(onBus: 0, bufferSize: Self.tapBufferFrames, format: tapFormat) { [weak self] buffer, _ in
+            guard let self else { return }
+            let chunk = Self.pcm16Chunk(from: buffer)
+            guard !chunk.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                self?.sink.ingestAudio(LiveAudioChunk(
+                    data: chunk,
+                    formatDescription: "pcm16",
+                    capturedAt: Date()
+                ))
+            }
+        }
+        tapInstalled = true
     }
 
     // MARK: - Permission / session
