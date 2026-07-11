@@ -919,6 +919,20 @@ export interface HawkyConfig {
        */
       accept_client_embeddings?: boolean;
       /**
+       * WS1 live owner recognition (Phase 1). OPT-IN, DEFAULT FALSE. When true,
+       * the gateway itself background-scores each finalized realtime turn
+       * (fire-and-forget off the hot `identity.voiceprint.realtime_event` path,
+       * with a short wait-for-audio retry for the in-flight tail chunk) through
+       * the SAME scoring pipeline as `identity.voiceprint.score_turns`, folds
+       * the results into the session-level speaker-evidence reducer, emits an
+       * edge-triggered `voiceprint.identity` gateway event on identity
+       * establish/flip, and piggybacks the scored per-turn states on the
+       * session's next realtime_event response. Fail-safe: scoring
+       * failure/missing audio => skip, never a false owner. When false (the
+       * default) the realtime handlers behave byte-for-byte as before.
+       */
+      auto_score_finalized?: boolean;
+      /**
        * A8 replay resistance. TTL (ms) for the single-use liveness nonce a client
        * must attach to a client-supplied embedding submission (see
        * identity/voiceprint/liveness-nonce.ts). Short by design; defaults to 60s.
