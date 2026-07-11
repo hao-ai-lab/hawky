@@ -6,6 +6,7 @@ import {
   type SpeechTurn,
 } from "./contracts.js";
 import { voiceprintModelIdentityParts } from "./model.js";
+import { validateIsoLikeTime as validateIsoLikeTimeShared } from "./live-validators.js";
 import type { VoiceprintAudioQualityStatus } from "./quality.js";
 import {
   isUsableEmbeddingVector,
@@ -345,9 +346,7 @@ function validateTemplateStorage(storage: VoiceprintTemplateStorageRef): void {
 }
 
 function validateIsoLikeTime(value: string, field: string): void {
-  if (!value.trim() || Number.isNaN(Date.parse(value))) {
-    throw new Error(`Voiceprint template ${field} must be an ISO timestamp.`);
-  }
+  validateIsoLikeTimeShared(value, "Voiceprint template", field);
 }
 
 function validatePositiveInteger(value: number, field: string): void {

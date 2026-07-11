@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
 import type { VoiceprintAudioQualityAssessment } from "./quality.js";
 import { voiceprintModelIdentityParts } from "./model.js";
+import { validateIdentifierNotEmpty, validateTimeBounds } from "./live-validators.js";
 import {
   allowedUsesForVoiceprintResult,
   assertVoiceprintConsentAllowsProcessing,
@@ -380,21 +381,13 @@ function applyQualityGateToAllowedUses(
 }
 
 function validateSpeechTurn(turn: SpeechTurn): void {
-  if (!turn.sessionKey.trim()) {
-    throw new Error("Voiceprint SpeechTurn requires sessionKey.");
-  }
-  if (!turn.transcriptItemId.trim()) {
-    throw new Error("Voiceprint SpeechTurn requires transcriptItemId.");
-  }
-  if (!turn.audioArtifactId.trim()) {
-    throw new Error("Voiceprint SpeechTurn requires audioArtifactId.");
-  }
-  if (!Number.isFinite(turn.startMs) || !Number.isFinite(turn.endMs)) {
-    throw new Error("Voiceprint SpeechTurn requires finite startMs and endMs.");
-  }
-  if (turn.endMs <= turn.startMs) {
-    throw new Error("Voiceprint SpeechTurn requires endMs > startMs.");
-  }
+  validateIdentifierNotEmpty(turn.sessionKey, "Voiceprint SpeechTurn requires sessionKey.");
+  validateIdentifierNotEmpty(
+    turn.transcriptItemId,
+    "Voiceprint SpeechTurn requires transcriptItemId.",
+  );
+  validateIdentifierNotEmpty(turn.audioArtifactId, "Voiceprint SpeechTurn requires audioArtifactId.");
+  validateTimeBounds(turn.startMs, turn.endMs, "Voiceprint SpeechTurn");
 }
 
 function signalTypeForResult(

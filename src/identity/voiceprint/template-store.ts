@@ -16,6 +16,7 @@ import {
   type VoiceprintTemplate,
   type VoiceprintTemplateArtifact,
 } from "./template.js";
+import { validateIsoLikeTime as validateIsoLikeTimeShared } from "./live-validators.js";
 
 const VOICEPRINT_TEMPLATE_FILE_MODE = 0o600;
 const VOICEPRINT_TEMPLATE_KEY_BYTES = 32;
@@ -340,7 +341,5 @@ function decodeBase64url(value: unknown, field: string, expectedBytes?: number):
 }
 
 function validateIsoLikeTime(value: string, field: string): void {
-  if (!value.trim() || Number.isNaN(Date.parse(value))) {
-    throw new Error(`Voiceprint template file ${field} must be an ISO timestamp.`);
-  }
+  validateIsoLikeTimeShared(value, "Voiceprint template file", field);
 }
