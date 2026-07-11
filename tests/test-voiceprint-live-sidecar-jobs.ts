@@ -4,6 +4,8 @@ import {
   buildLiveVoiceprintScoringJob,
   prepareLiveVoiceprintTurn,
   scoreLiveVoiceprintScoringJobResponse,
+  UnusableVoiceprintEmbeddingError,
+  validateEmbeddingResponse,
   type LiveVoiceprintReadyTurn,
 } from "../src/identity/voiceprint/index.js";
 
@@ -210,6 +212,150 @@ describe("live voiceprint sidecar jobs", () => {
       consent: { ...processingConsent, memoryPromotionAllowed: true },
     });
     expect(result.status).toBe("scored");
+  });
+});
+
+describe("live voiceprint unusable-embedding is a TYPED per-turn fault (not substring)", () => {
+  // The batch scorer must distinguish a per-turn DATA fault (skip only this turn)
+  // from a PRECONDITION fault (fail the batch) by the ERROR TYPE, not by matching
+  // the message text. These tests prove the type-based reclassification and that a
+  // message reword could not silently flip skip-vs-fail.
+
+  test("garbage/empty RESPONSE embedding reclassifies to the TYPED error via instanceof", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // Empty embedding vector: a per-turn DATA fault. The batch scorer catches this by
+    // `instanceof UnusableVoiceprintEmbeddingError` and skips only this turn.
+    let caught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    // Detection is by TYPE — this holds even if the message were reworded.
+    expect(caught).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+    // Message text is preserved verbatim for any caller/test asserting on it.
+    expect((caught as Error).message).toBe(
+      "Voiceprint embedding response requires a finite non-empty embedding.",
+    );
+  });
+
+  test("wrong-dimension SAMPLE embedding reclassifies to the TYPED error", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // A usable-but-wrong-dimension sidecar vector: still a per-turn DATA fault that
+    // skips only this turn. Owner embeddings are 2-D; the sample is 3-D.
+    let caught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+    expect((caught as Error).message).toContain("sample embedding has dimension");
+  });
+
+  test("a genuine PRECONDITION fault stays a hard (non-Unusable) error", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // Owner-template fault (no owner embeddings): a configuration/precondition fault.
+    // It MUST NOT be reclassified — it fails the batch, so it is a plain Error and
+    // NOT an UnusableVoiceprintEmbeddingError.
+    let caught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+
+    // A response-id mismatch is likewise a batch-integrity precondition, NOT unusable.
+    let idCaught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: "different_request",
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0]],
+      });
+    } catch (error) {
+      idCaught = error;
+    }
+    expect(idCaught).not.toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+  });
+
+  test("the VALIDATION ORIGIN throws the typed error, so detection is by type not string", () => {
+    // validateEmbeddingResponse is the origin of the "finite non-empty embedding"
+    // fault. It now throws the TYPED error directly (message preserved), which is
+    // what lets the scorer reclassify by instanceof instead of substring.
+    let caught: unknown;
+    try {
+      validateEmbeddingResponse({
+        id: "req_1",
+        embedding: [Number.NaN],
+        model: { provider: "custom", modelId: "live-sidecar" },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+
+    // A structural precondition at the SAME origin (missing id) stays a plain Error.
+    let structural: unknown;
+    try {
+      validateEmbeddingResponse({
+        id: "  ",
+        embedding: [1, 0],
+        model: { provider: "custom", modelId: "live-sidecar" },
+      });
+    } catch (error) {
+      structural = error;
+    }
+    expect(structural).toBeInstanceOf(Error);
+    expect(structural).not.toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+  });
+
+  test("the typed error is a distinguishable subclass a message reword cannot break", () => {
+    // Constructed directly with an arbitrary (reworded) message: instanceof still
+    // holds, proving detection does not depend on the message text.
+    const reworded = new UnusableVoiceprintEmbeddingError("totally different wording");
+    expect(reworded).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+    expect(reworded).toBeInstanceOf(Error);
+    expect(reworded.name).toBe("UnusableVoiceprintEmbeddingError");
   });
 });
 

@@ -1,5 +1,6 @@
 import type { VoiceprintModelInfo } from "./types.js";
 import { isUsableEmbeddingVector } from "./similarity.js";
+import { UnusableVoiceprintEmbeddingError } from "./embedding-errors.js";
 
 export interface VoiceprintEmbeddingRequest {
   id: string;
@@ -119,7 +120,13 @@ export function validateEmbeddingResponse(
   // still hard-fail because they break the id-based join / batch integrity. The
   // transport parser (parseEmbeddingBatchResponseJson) keeps the strict default.
   if (!options.skipEmbeddingUsability && !isUsableEmbeddingVector(response.embedding)) {
-    throw new Error("Voiceprint embedding response requires a finite non-empty embedding.");
+    // TYPED per-turn data fault (message text unchanged): the batch scorer detects
+    // this by `instanceof UnusableVoiceprintEmbeddingError` — not by substring — so
+    // a reword can never silently flip skip-vs-fail. On the strict transport-parser
+    // path it simply propagates as an Error subclass and still hard-fails the batch.
+    throw new UnusableVoiceprintEmbeddingError(
+      "Voiceprint embedding response requires a finite non-empty embedding.",
+    );
   }
   if (
     response.audio?.speechMs !== undefined &&

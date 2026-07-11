@@ -98,6 +98,9 @@ export function allowedUsesForVoiceprintResult(input: {
     return { ...NO_VOICEPRINT_ALLOWED_USES };
   }
 
+  // DELIBERATE fail-closed floor: a missing/NaN confidence collapses to -1, which
+  // sits below every threshold (and matches INVALID_VECTOR_SIMILARITY = -1 from
+  // similarity.ts) so it can never resolve as owner. Do NOT clamp or raise this.
   const confidence = Number.isFinite(input.confidence) ? input.confidence : -1;
   const score = Number.isFinite(input.score) ? input.score! : confidence;
   const ownerAccept =
