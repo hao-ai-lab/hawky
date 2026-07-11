@@ -350,13 +350,20 @@ def _rms(samples: List[float]) -> float:
     return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
+# Voiced-energy detection: a frame counts as voiced when its RMS clears a floor
+# set to a fraction of the clip's overall RMS, but never below an absolute noise
+# floor (so a near-silent clip is not scored as all-voiced).
+SPEECH_ABSOLUTE_RMS_FLOOR = 1e-4
+SPEECH_RELATIVE_RMS_FRACTION = 0.35
+
+
 def _speech_ms(samples: List[float], sample_rate: int) -> float:
     """Rough voiced-energy estimate: frames whose RMS is above a small floor."""
     if not samples or sample_rate <= 0:
         return 0.0
     frame = max(1, int(sample_rate * 0.02))  # 20 ms frames
     total = _rms(samples)
-    floor = max(1e-4, total * 0.35)
+    floor = max(SPEECH_ABSOLUTE_RMS_FLOOR, total * SPEECH_RELATIVE_RMS_FRACTION)
     voiced = 0
     for start in range(0, len(samples), frame):
         chunk = samples[start:start + frame]
@@ -386,6 +393,12 @@ class ReferenceBackend:
 
     N_FRAMES = 32
     N_BANDS = 24  # coarse spectral bands per frame -> 32*24 = 768 raw features
+
+    # Deterministic bias so all-zero audio still yields a non-zero-norm vector
+    # (required by the TS validator). BIAS_SEED is an arbitrary fixed lane fed to
+    # the seeded weight generator; BIAS_SCALE keeps the bias tiny vs real features.
+    BIAS_SEED = 0xBEEF
+    BIAS_SCALE = 1e-3
 
     def model_info(self) -> Dict[str, str]:
         return {"provider": self.provider, "modelId": self.model_id, "version": self.version}
@@ -442,7 +455,7 @@ class ReferenceBackend:
         # Add a tiny deterministic bias so all-zero audio still yields a usable
         # (non-zero-norm) vector, which the TS validator requires.
         for d in range(dim):
-            out[d] += _seeded_weight(0xBEEF, d) * 1e-3
+            out[d] += _seeded_weight(self.BIAS_SEED, d) * self.BIAS_SCALE
         return _l2_normalize(out)
 
 

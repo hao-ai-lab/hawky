@@ -1,5 +1,14 @@
 import Foundation
 
+extension Dictionary where Key == String, Value == JSONValue {
+    /// Set `key` to a `.string` value only when the optional is present and
+    /// non-empty. Omitting empty/absent strings matches the server parser's
+    /// treatment of these optional fields.
+    mutating func setOptionalString(_ key: String, _ value: String?) {
+        if let value, !value.isEmpty { self[key] = .string(value) }
+    }
+}
+
 /// On-device speaker-embedder seam (workflow B1).
 ///
 /// The gateway already ships a client-embedding scoring path
@@ -83,6 +92,11 @@ struct SpeakerEmbeddingModelInfo: Equatable, Sendable {
 
 /// A computed speaker embedding plus the model that produced it.
 struct SpeakerEmbedding: Equatable, Sendable {
+    /// CAM++ speaker-embedding dimension. Single source of truth shared by the
+    /// CoreML and deterministic-reference embedders (the reference stub matches it
+    /// so serialization tests exercise a realistic 192-dim shape).
+    static let camPlusDimension = 192
+
     /// The embedding vector. Target dimension is 192 for CAM++.
     var vector: [Float]
     var model: SpeakerEmbeddingModelInfo
@@ -177,16 +191,16 @@ struct LiveVoiceprintScoreTurn: Equatable, Sendable {
             "startMs": .number(startMs),
             "endMs": .number(endMs),
         ]
-        if let sessionKey, !sessionKey.isEmpty { object["sessionKey"] = .string(sessionKey) }
+        object.setOptionalString("sessionKey", sessionKey)
         if let text { object["text"] = .string(text) }
-        if let audioArtifactID, !audioArtifactID.isEmpty { object["audioArtifactId"] = .string(audioArtifactID) }
-        if let audioPath, !audioPath.isEmpty { object["audioPath"] = .string(audioPath) }
-        if let route, !route.isEmpty { object["route"] = .string(route) }
+        object.setOptionalString("audioArtifactId", audioArtifactID)
+        object.setOptionalString("audioPath", audioPath)
+        object.setOptionalString("route", route)
         if let embedding {
             object["sampleEmbedding"] = embedding.vectorJSONArray
             object["sampleEmbeddingModel"] = .object(embedding.model.jsonObject)
         }
-        if let nonce, !nonce.isEmpty { object["nonce"] = .string(nonce) }
+        object.setOptionalString("nonce", nonce)
         return object
     }
 

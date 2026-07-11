@@ -19,8 +19,8 @@ struct CoreMLSpeakerEmbedder: SpeakerEmbedder {
     /// Default bundle resource name for the compiled CAM++ model. Overridable so a
     /// build can provision the model under a different name without code changes.
     static let defaultModelName = "campplus"
-    /// CAM++ speaker embedding dimension.
-    static let defaultDimension = 192
+    /// CAM++ speaker embedding dimension (shared source of truth).
+    static let defaultDimension = SpeakerEmbedding.camPlusDimension
     /// Minimum frames required before we attempt an embedding.
     static let defaultMinimumFrames = 16
 

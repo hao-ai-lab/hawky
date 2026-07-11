@@ -27,6 +27,11 @@ final class OwnerEnrollmentRecorder {
     /// tracks the server's VOICED floor.
     static let voicedFraction: Double = 0.74
 
+    /// Frames per input tap buffer (a common AVAudioEngine tap size, ~256 ms at
+    /// 16 kHz). The callback re-chunks whatever length it receives, so this only
+    /// trades callback frequency against buffer size.
+    private static let tapBufferFrames: AVAudioFrameCount = 4_096
+
     /// Outcome of a start attempt so the caller can distinguish "recording" from a
     /// denied-permission / setup failure and reset UI state accordingly.
     enum StartResult: Equatable {
@@ -92,7 +97,7 @@ final class OwnerEnrollmentRecorder {
         )
 
         if !tapInstalled {
-            input.installTap(onBus: 0, bufferSize: 4_096, format: tapFormat) { [weak self] buffer, _ in
+            input.installTap(onBus: 0, bufferSize: Self.tapBufferFrames, format: tapFormat) { [weak self] buffer, _ in
                 guard let self else { return }
                 let chunk = Self.pcm16Chunk(from: buffer)
                 guard !chunk.isEmpty else { return }

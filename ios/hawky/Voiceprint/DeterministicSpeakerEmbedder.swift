@@ -13,8 +13,9 @@ import Foundation
 /// - The same input samples + sampleRate always yield the same vector.
 /// - Different inputs yield different vectors (with overwhelming probability).
 struct DeterministicSpeakerEmbedder: SpeakerEmbedder {
-    /// CAM++ target dimension, so serialization tests see a realistic 192-dim shape.
-    static let defaultDimension = 192
+    /// CAM++ target dimension (shared source of truth), so serialization tests see
+    /// a realistic 192-dim shape.
+    static let defaultDimension = SpeakerEmbedding.camPlusDimension
     /// Minimum frames required to produce an embedding. Below this we throw
     /// `sampleBufferTooShort` — a real embedder needs a meaningful window, and
     /// the stub mirrors that so the too-short path is testable.

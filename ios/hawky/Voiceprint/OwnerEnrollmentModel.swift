@@ -144,19 +144,13 @@ struct OwnerEnrollmentSource: Equatable, Identifiable {
     /// and `endMs` are emitted both-or-neither, matching the server's requirement.
     var jsonObject: [String: JSONValue] {
         var object: [String: JSONValue] = [:]
-        if let audioArtifactID, !audioArtifactID.isEmpty {
-            object["audioArtifactId"] = .string(audioArtifactID)
-        }
-        if let audioPath, !audioPath.isEmpty {
-            object["audioPath"] = .string(audioPath)
-        }
+        object.setOptionalString("audioArtifactId", audioArtifactID)
+        object.setOptionalString("audioPath", audioPath)
         if let startMs, let endMs {
             object["startMs"] = .number(startMs)
             object["endMs"] = .number(endMs)
         }
-        if let route, !route.isEmpty {
-            object["route"] = .string(route)
-        }
+        object.setOptionalString("route", route)
         return object
     }
 }
@@ -176,9 +170,7 @@ enum LiveVoiceprintEnrollmentRequest {
             "sources": .array(sources.map { .object($0.jsonObject) }),
             "consent": .object(consent.jsonObject),
         ]
-        if let sessionKey, !sessionKey.isEmpty {
-            params["sessionKey"] = .string(sessionKey)
-        }
+        params.setOptionalString("sessionKey", sessionKey)
         if let minSpeechMs {
             params["minSpeechMs"] = .number(minSpeechMs)
         }
@@ -196,9 +188,7 @@ enum LiveVoiceprintEnrollmentRequest {
             "source": .object(source.jsonObject),
             "consent": .object(consent.jsonObject),
         ]
-        if let sessionKey, !sessionKey.isEmpty {
-            params["sessionKey"] = .string(sessionKey)
-        }
+        params.setOptionalString("sessionKey", sessionKey)
         if let minSpeechMs {
             params["minSpeechMs"] = .number(minSpeechMs)
         }
