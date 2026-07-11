@@ -318,6 +318,22 @@ final class LiveSessionStore {
     private var voiceprintOpenSpeechWindowID: String?
     private var voiceprintClosedSpeechWindowIDs: [String] = []
     private var voiceprintSpeechWindowCounter = 0
+    /// Last VAD timestamp (ms) handed to the server voiceprint turn tracker, in the
+    /// recording-offset time base. The tracker requires speech_stopped strictly after
+    /// speech_started (`endMs > startMs`) and a finite time; the WebRTC transport emits
+    /// arg-less VAD, so start/stop can resolve to the same recording offset (or nil during
+    /// warm-up). This floor makes every emitted VAD timestamp finite and strictly
+    /// monotonic while staying aligned to the recording/audio-artifact timeline.
+    private var voiceprintLastVadOffsetMs: Double?
+    /// Speech windows whose speech_stopped fired before the recording WAV was open
+    /// (warm-up race). For WebRTC the parallel-mic WAV opens LAZILY on the first
+    /// streamed chunk after `isStreamingAudio` flips (see startParallelMicRecording),
+    /// so a first-turn speech_stopped can find `recordingSink.currentAudioArtifact ==
+    /// nil` and would otherwise drop the artifact permanently — the server tracker
+    /// defaults includeMissingAudio=false, so that turn never finalizes/scores. We
+    /// stash the join keys here and late-bind the artifact once the WAV opens. Ordered
+    /// + de-duped by join key; bounded (only warm-up turns land here, then it drains).
+    private var voiceprintPendingAudioArtifactJoins: [(itemID: String?, speechWindowID: String?)] = []
     /// B1 on-device speaker embedder. Lazily resolved to the CoreML CAM++ model
     /// when `onDeviceEmbeddingEnabled` gates on and the binary is provisioned;
     /// nil/unavailable otherwise so the marker path is used. Not wired to any
@@ -2389,6 +2405,11 @@ final class LiveSessionStore {
                         source: source,
                         audioSampleRate: chunk.sampleRate
                     )
+                    // The WAV (and thus currentAudioArtifact) is now open. Late-bind any
+                    // warm-up turn whose speech_stopped fired before this point, so a
+                    // first-turn artifact is not permanently lost (server tracker drops
+                    // turns with no audio when includeMissingAudio is false).
+                    self.flushPendingVoiceprintAudioArtifacts()
                 }
                 // Mic-health signal: the realtime mic flows through WebRTC, not
                 // the sample recorder, so this parallel tap is the only
@@ -3526,9 +3547,24 @@ final class LiveSessionStore {
     }
 
     private func noteTimelineSpeechStarted(event: LiveVoiceprintRealtimeEvent?) {
+        // Feed the LiveTimeline ONLY the real OpenAI realtime item_id (nil during the
+        // arg-less WebRTC warm-up), never the voiceprint-synthesized "ios_speech_N"
+        // speechWindowID. Two reasons:
+        //  1. Off-by-default invariance. This block (barge-in + timeline) is ungated —
+        //     it runs regardless of voiceprintRealtimeEnabled. The VAD converter now
+        //     survives empty-JSON speech_started (previously dropped -> event == nil ->
+        //     realtimeItemID nil). Passing the synthesized speechWindowID here would
+        //     silently change the flag-OFF timeline's realtimeItemID from nil to
+        //     "ios_speech_N". Using itemID keeps the timeline byte-for-byte unchanged.
+        //  2. It was never load-bearing. attachTranscript matches realtimeItemID against
+        //     the real OpenAI item_id (LiveModels.attachTranscript); a synthesized
+        //     "ios_speech_N" can never equal a real item_id, so it always fell through
+        //     to the transcript == nil fallback — identical to nil. The voiceprint wire
+        //     + audio-artifact legs read event.speechWindowID directly, not the timeline,
+        //     so recognition correlation is unaffected.
         liveTimeline.noteSpeechStarted(
             atNs: Self.currentUptimeNanoseconds(),
-            realtimeItemID: event?.itemID ?? event?.speechWindowID
+            realtimeItemID: event?.itemID
         )
     }
 
@@ -3555,17 +3591,55 @@ final class LiveSessionStore {
             if event.itemID == nil && event.speechWindowID == nil {
                 event.speechWindowID = nextVoiceprintSpeechWindowID()
             }
+            event.audioStartMs = nextMonotonicVoiceprintVadOffsetMs(candidate: event.audioStartMs)
             voiceprintOpenSpeechWindowID = event.speechWindowID ?? event.itemID
         case "input_audio_buffer.speech_stopped":
             if event.itemID == nil && event.speechWindowID == nil {
                 event.speechWindowID = voiceprintOpenSpeechWindowID
             }
+            event.audioEndMs = nextMonotonicVoiceprintVadOffsetMs(candidate: event.audioEndMs)
             appendVoiceprintClosedSpeechWindowID(event.speechWindowID ?? event.itemID)
             voiceprintOpenSpeechWindowID = nil
         default:
             break
         }
         return event
+    }
+
+    /// Resolve a recording-timeline-aligned, finite, strictly-monotonic VAD timestamp.
+    ///
+    /// `candidate` is the recording offset (or explicit JSON `audio_*_ms`) from the
+    /// converter — the SAME time base as the audio artifact WAV, so a finalized turn
+    /// window `[startMs, endMs]` maps to the correct recording segment. Two realities
+    /// force the repair here rather than in the pure converter:
+    ///  - Warm-up: the parallel mic tap opens the WAV lazily on the first streamed
+    ///    chunk, so an early speech_started can arrive with a nil offset. Floor it to
+    ///    the last emitted VAD offset (or 0 at session start) — still on the recording
+    ///    timeline, just at its origin.
+    ///  - Arg-less WebRTC VAD: start and stop can resolve to the identical recording
+    ///    offset (no new frames written between them). The server turn tracker rejects
+    ///    `endMs <= startMs`, so nudge strictly forward by 1ms. 1ms is inaudible and
+    ///    keeps the window inside the same recording segment.
+    private func nextMonotonicVoiceprintVadOffsetMs(candidate: Double?) -> Double {
+        let next = Self.monotonicVoiceprintVadOffsetMs(
+            candidate: candidate,
+            last: voiceprintLastVadOffsetMs
+        )
+        voiceprintLastVadOffsetMs = next
+        return next
+    }
+
+    /// Pure, unit-testable core of `nextMonotonicVoiceprintVadOffsetMs`. `last` is the
+    /// previously emitted VAD offset (nil at session start). Returns a finite value that
+    /// is `> last` (or `>= 1` when `last` is nil), preferring `candidate` when it is
+    /// finite and already ahead of the monotonic floor.
+    nonisolated static func monotonicVoiceprintVadOffsetMs(
+        candidate: Double?,
+        last: Double?
+    ) -> Double {
+        let floor = (last?.isFinite == true) ? last! : 0
+        let base = (candidate?.isFinite == true) ? candidate! : floor
+        return max(base, floor + 1)
     }
 
     private func enqueueFallbackVoiceprintTranscriptCompleted(itemID: String, transcript: String) {
@@ -3607,13 +3681,77 @@ final class LiveSessionStore {
 
     private func enqueueCurrentVoiceprintAudioArtifact(itemID: String?, speechWindowID: String?) {
         guard Self.cleanedString(itemID) != nil || Self.cleanedString(speechWindowID) != nil else { return }
-        guard let artifact = recordingSink.currentAudioArtifact else { return }
+        guard let artifact = recordingSink.currentAudioArtifact else {
+            // Warm-up race: the parallel-mic WAV is not open yet (WebRTC opens it
+            // lazily on the first streamed chunk). Stash the join keys and late-bind
+            // when the WAV opens (flushPendingVoiceprintAudioArtifacts), so this turn
+            // is not permanently lost. The artifact is the whole-session WAV; the
+            // server slices by the turn's [startMs, endMs] window, and our VAD offsets
+            // are floored at the WAV origin, so a late-bound first turn still maps to
+            // the correct leading segment.
+            recordPendingVoiceprintAudioArtifactJoin(itemID: itemID, speechWindowID: speechWindowID)
+            return
+        }
         enqueueVoiceprintRealtimeEvent(Self.voiceprintAudioArtifactEvent(
             itemID: itemID,
             speechWindowID: speechWindowID,
             artifact: artifact,
             route: diagnostics.audioRoute
         ))
+    }
+
+    private func recordPendingVoiceprintAudioArtifactJoin(itemID: String?, speechWindowID: String?) {
+        // Off-by-default parity: only stash when the voiceprint realtime path is armed.
+        // With the flag off, the artifact event would be dropped by enqueue anyway, so
+        // stashing it would be dead state. This keeps flag-off behavior a pure no-op.
+        guard Self.voiceprintRealtimeRuntimeTarget(activeConfig: activeConfig, draftConfig: config) != nil else {
+            return
+        }
+        Self.appendPendingVoiceprintAudioArtifactJoin(
+            itemID: itemID,
+            speechWindowID: speechWindowID,
+            into: &voiceprintPendingAudioArtifactJoins
+        )
+    }
+
+    /// Pure, unit-testable core of the warm-up pending-join stash. Appends a cleaned
+    /// (itemID, speechWindowID) pair to `pending` unless a pair with the same server
+    /// join key (itemID first, else speechWindowID — matching voiceprintAudioArtifactEvent)
+    /// is already queued, so a re-fired speech_stopped cannot double-bind the artifact.
+    /// A pair with no usable join key is ignored.
+    nonisolated static func appendPendingVoiceprintAudioArtifactJoin(
+        itemID: String?,
+        speechWindowID: String?,
+        into pending: inout [(itemID: String?, speechWindowID: String?)]
+    ) {
+        let cleanItemID = cleanedString(itemID)
+        let cleanWindowID = cleanedString(speechWindowID)
+        guard let joinKey = cleanItemID ?? cleanWindowID else { return }
+        let alreadyPending = pending.contains { entry in
+            (cleanedString(entry.itemID) ?? cleanedString(entry.speechWindowID)) == joinKey
+        }
+        guard !alreadyPending else { return }
+        pending.append((itemID: cleanItemID, speechWindowID: cleanWindowID))
+    }
+
+    /// Late-bind audio artifacts for warm-up turns whose speech_stopped fired before
+    /// the recording WAV opened. Called once the WAV is available (first
+    /// recordingSink.start). No-op when there is nothing pending or the artifact is
+    /// still unavailable (defensive; the caller invokes this right after the WAV opens).
+    private func flushPendingVoiceprintAudioArtifacts() {
+        guard !voiceprintPendingAudioArtifactJoins.isEmpty else { return }
+        guard let artifact = recordingSink.currentAudioArtifact else { return }
+        let pending = voiceprintPendingAudioArtifactJoins
+        voiceprintPendingAudioArtifactJoins.removeAll()
+        let route = diagnostics.audioRoute
+        for join in pending {
+            enqueueVoiceprintRealtimeEvent(Self.voiceprintAudioArtifactEvent(
+                itemID: join.itemID,
+                speechWindowID: join.speechWindowID,
+                artifact: artifact,
+                route: route
+            ))
+        }
     }
 
     private func enqueueVoiceprintRealtimeEvent(_ event: LiveVoiceprintRealtimeEvent) {
@@ -3676,6 +3814,8 @@ final class LiveSessionStore {
         voiceprintOpenSpeechWindowID = nil
         voiceprintClosedSpeechWindowIDs.removeAll()
         voiceprintSpeechWindowCounter = 0
+        voiceprintLastVadOffsetMs = nil
+        voiceprintPendingAudioArtifactJoins.removeAll()
         // Drop any cached embedder so a config change (flags off, or a newly
         // provisioned model) is re-resolved on the next finalized turn.
         speakerEmbedder = nil
@@ -3937,9 +4077,15 @@ final class LiveSessionStore {
 
         switch rawType {
         case "input_audio_buffer.speech_started":
-            guard let audioStartMs = numberValue(object, keys: ["audio_start_ms", "start_ms", "at_ms"]) ?? recordingOffset else {
-                return nil
-            }
+            // The vendored WebRTC transport delegate is arg-less, so the provider
+            // re-emits speech_started with an EMPTY JSON body ("{}"). Do NOT drop the
+            // event when neither the raw JSON nor the recording offset carries a
+            // timestamp: the window is still real and must reach the server. When the
+            // recording offset is nil (parallel-mic warm-up), leave audioStartMs nil
+            // here and let the MainActor caller (`prepareVoiceprintRealtimeEvent`)
+            // stamp a recording-timeline-aligned, monotonic timestamp. Stamping here
+            // when the offset IS available preserves the existing wire behavior.
+            let audioStartMs = numberValue(object, keys: ["audio_start_ms", "start_ms", "at_ms"]) ?? recordingOffset
             return LiveVoiceprintRealtimeEvent(
                 type: rawType,
                 itemID: itemID,
@@ -3953,9 +4099,10 @@ final class LiveSessionStore {
                 route: eventRoute
             )
         case "input_audio_buffer.speech_stopped":
-            guard let audioEndMs = numberValue(object, keys: ["audio_end_ms", "end_ms", "at_ms"]) ?? recordingOffset else {
-                return nil
-            }
+            // See speech_started: never drop an empty-JSON VAD stop. A nil audioEndMs
+            // is repaired by the MainActor caller so endMs > startMs strictly, in the
+            // same recording-offset time base as the audio artifact.
+            let audioEndMs = numberValue(object, keys: ["audio_end_ms", "end_ms", "at_ms"]) ?? recordingOffset
             return LiveVoiceprintRealtimeEvent(
                 type: rawType,
                 itemID: itemID,
