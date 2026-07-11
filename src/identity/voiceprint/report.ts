@@ -254,15 +254,30 @@ function assessDecision(
 }
 
 function summarizeRows(rows: VoiceprintScoreRow[]): VoiceprintScoreReport["summary"] {
-  return {
-    total: rows.length,
-    passed: rows.filter((row) => row.passed === true).length,
-    failed: rows.filter((row) => row.passed === false).length,
-    unlabeled: rows.filter((row) => row.passed === null).length,
-    falseAccepts: rows.filter((row) => row.risk === "false_accept").length,
-    falseRejects: rows.filter((row) => row.risk === "false_reject").length,
-    possibleFalseAccepts: rows.filter((row) => row.risk === "possible_false_accept").length,
-  };
+  // Single pass over rows building every bucket at once. Each accumulator field
+  // increments under the same predicate the old per-bucket `.filter(...).length`
+  // used, so the counts are identical to the prior six separate passes.
+  return rows.reduce(
+    (summary, row) => {
+      summary.total += 1;
+      if (row.passed === true) summary.passed += 1;
+      if (row.passed === false) summary.failed += 1;
+      if (row.passed === null) summary.unlabeled += 1;
+      if (row.risk === "false_accept") summary.falseAccepts += 1;
+      if (row.risk === "false_reject") summary.falseRejects += 1;
+      if (row.risk === "possible_false_accept") summary.possibleFalseAccepts += 1;
+      return summary;
+    },
+    {
+      total: 0,
+      passed: 0,
+      failed: 0,
+      unlabeled: 0,
+      falseAccepts: 0,
+      falseRejects: 0,
+      possibleFalseAccepts: 0,
+    },
+  );
 }
 
 function validateLoadedEmbeddingVectors(
