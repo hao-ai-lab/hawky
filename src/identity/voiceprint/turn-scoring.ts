@@ -13,6 +13,7 @@ import {
   classifyOwnerSimilarityWithResolvedThresholds,
   INVALID_VECTOR_SIMILARITY,
   isUsableEmbeddingVector,
+  normalizeCosineSimilarityToConfidence,
   ownerSimilarity,
 } from "./similarity.js";
 import {
@@ -289,10 +290,7 @@ function validateTurnScoreEmbeddings(
 }
 
 export function confidenceFromCosineSimilarity(similarity: number): number {
-  if (!Number.isFinite(similarity)) {
-    return 0;
-  }
-  return Math.max(0, Math.min(1, (similarity + 1) / 2));
+  return normalizeCosineSimilarityToConfidence(similarity);
 }
 
 export function thresholdForDecision(

@@ -131,6 +131,22 @@ const log = createSubsystemLogger("gateway/voiceprint-methods");
 const VOICEPRINT_STORAGE_FILE_MODE = 0o600;
 const VOICEPRINT_MEDIA_ID_REGEX = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
 
+/**
+ * Accepted voiceprint embedding provider identifiers. Mirrors the
+ * `VoiceprintModelInfo["provider"]` union in identity/voiceprint/types.ts and is
+ * the single allow-list every provider-string validation site references.
+ */
+const VOICEPRINT_PROVIDERS = [
+  "external-json",
+  "signal-baseline",
+  "speechbrain",
+  "wespeaker",
+  "picovoice",
+  "sherpa-onnx",
+  "reference",
+  "custom",
+] as const satisfies readonly VoiceprintModelInfo["provider"][];
+
 class VoiceprintStoragePersistenceError extends Error {
   constructor(message: string) {
     super(message);
@@ -522,7 +538,7 @@ function resolveConfiguredVoiceprintAsNormCohortModel(
     throw new Error("voiceprint.live_scoring.as_norm.cohort_model is required when as_norm.enabled is true.");
   }
   const provider = configString(model.provider, "voiceprint.live_scoring.as_norm.cohort_model.provider");
-  if (!["external-json", "signal-baseline", "speechbrain", "wespeaker", "picovoice", "sherpa-onnx", "reference", "custom"].includes(provider)) {
+  if (!(VOICEPRINT_PROVIDERS as readonly string[]).includes(provider)) {
     throw new Error("voiceprint.live_scoring.as_norm.cohort_model.provider is invalid.");
   }
   return {
@@ -1849,17 +1865,7 @@ function parseOptionalClientEmbeddingModel(value: unknown): VoiceprintModelInfo 
   }
   const model = value as Record<string, unknown>;
   const provider = requiredString(model.provider, "turn.sampleEmbeddingModel.provider");
-  const validProviders = [
-    "external-json",
-    "signal-baseline",
-    "speechbrain",
-    "wespeaker",
-    "picovoice",
-    "sherpa-onnx",
-    "reference",
-    "custom",
-  ];
-  if (!validProviders.includes(provider)) {
+  if (!(VOICEPRINT_PROVIDERS as readonly string[]).includes(provider)) {
     throw new MethodError("INVALID_REQUEST", "turn.sampleEmbeddingModel.provider is invalid.");
   }
   return {
@@ -3943,7 +3949,7 @@ function resolveConfiguredVoiceprintModel(
     throw new Error("voiceprint.live_scoring.expected_model must be an object.");
   }
   const provider = configString(model.provider, "voiceprint.live_scoring.expected_model.provider");
-  if (!["external-json", "signal-baseline", "speechbrain", "wespeaker", "picovoice", "sherpa-onnx", "reference", "custom"].includes(provider)) {
+  if (!(VOICEPRINT_PROVIDERS as readonly string[]).includes(provider)) {
     throw new Error("voiceprint.live_scoring.expected_model.provider is invalid.");
   }
   return {
