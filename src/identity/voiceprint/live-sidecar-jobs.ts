@@ -50,22 +50,12 @@ export interface LiveVoiceprintScoringJobResult {
   result: LiveVoiceprintScoredTurn;
 }
 
-/**
- * FAIL-CLOSED marker: a single sidecar RESPONSE carried a per-turn embedding that
- * is unusable for scoring (empty / NaN / infinite / zero-norm / wrong dimension).
- * This is a DATA-QUALITY fault isolated to ONE turn — never a batch-integrity or
- * security-guard fault — so the batch scorer catches it and marks ONLY that turn
- * skipped (fail-closed: skipped never resolves) instead of throwing out and losing
- * the good turns. Structural faults (id/model mismatch, reference-model guard,
- * duplicate ids) are NOT this error and still throw as clean typed precondition
- * failures.
- */
-export class UnusableVoiceprintEmbeddingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "UnusableVoiceprintEmbeddingError";
-  }
-}
+// Re-export so `index.ts` (`export *`) and existing importers keep the same public
+// symbol. The class now lives in a leaf module (`embedding-errors.ts`) so the
+// validation ORIGINS (sidecar-protocol.ts, turn-scoring.ts) can throw it directly
+// without importing this higher-level job module (which would create a cycle).
+export { UnusableVoiceprintEmbeddingError } from "./embedding-errors.js";
+import { UnusableVoiceprintEmbeddingError } from "./embedding-errors.js";
 
 export function buildLiveVoiceprintScoringJob(input: {
   prepared: LiveVoiceprintReadyTurn;
@@ -229,32 +219,32 @@ export function scoreLiveVoiceprintScoringJobResponse(input: {
 }
 
 /**
- * Reclassify a {@link validateEmbeddingResponse} failure: only the "finite
- * non-empty embedding" fault is an unusable-embedding (per-turn) fault. Missing
- * id/model faults are batch-integrity preconditions and keep throwing as-is.
+ * Reclassify a {@link validateEmbeddingResponse} failure: only the finite
+ * non-empty embedding-VECTOR fault is an unusable-embedding (per-turn) fault, and
+ * it is now thrown at the origin as a typed {@link UnusableVoiceprintEmbeddingError}.
+ * We detect it by TYPE (`instanceof`) rather than by substring so rewording the
+ * message can never silently flip skip-vs-fail. Missing id/model faults are
+ * batch-integrity preconditions (plain Error) and keep throwing as-is.
  */
 function reclassifyUnusableEmbeddingError(error: unknown): unknown {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("finite non-empty embedding")) {
-    return new UnusableVoiceprintEmbeddingError(message);
+  if (error instanceof UnusableVoiceprintEmbeddingError) {
+    return error;
   }
-  return error instanceof Error ? error : new Error(message);
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 /**
  * Reclassify a scoring failure: only an unusable/wrong-dimension SAMPLE embedding
- * (the sidecar-returned vector) is a per-turn data fault. Owner-embedding, consent,
- * and quality faults are configuration/precondition faults and keep throwing.
+ * (the sidecar-returned vector) is a per-turn data fault, thrown at the origin as a
+ * typed {@link UnusableVoiceprintEmbeddingError} and detected here by TYPE, not
+ * substring. Owner-embedding, consent, and quality faults are configuration/
+ * precondition faults (plain Error) and keep throwing.
  */
 function reclassifyUnusableSampleEmbeddingError(error: unknown): unknown {
-  const message = error instanceof Error ? error.message : String(error);
-  if (
-    message.includes("sample embedding is invalid") ||
-    message.includes("sample embedding has dimension")
-  ) {
-    return new UnusableVoiceprintEmbeddingError(message);
+  if (error instanceof UnusableVoiceprintEmbeddingError) {
+    return error;
   }
-  return error instanceof Error ? error : new Error(message);
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function validateJobOptions(input: {

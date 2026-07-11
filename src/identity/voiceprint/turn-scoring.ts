@@ -33,6 +33,7 @@ import {
   type VoiceprintCohort,
 } from "./as-norm.js";
 import { sameVoiceprintModel } from "./model.js";
+import { UnusableVoiceprintEmbeddingError } from "./embedding-errors.js";
 
 /**
  * OPT-IN AS-Norm score normalization for a single turn (default OFF).
@@ -271,7 +272,11 @@ function validateTurnScoreEmbeddings(
   }
 
   if (!isUsableEmbeddingVector(sampleEmbedding)) {
-    throw new Error("Voiceprint sample embedding is invalid.");
+    // TYPED per-turn data fault (SAMPLE = the sidecar-returned vector). Message text
+    // unchanged; the batch scorer reclassifies by `instanceof`, not substring. Owner
+    // embedding faults below stay plain Error — they are precondition faults and must
+    // hard-fail the batch.
+    throw new UnusableVoiceprintEmbeddingError("Voiceprint sample embedding is invalid.");
   }
 
   const expectedDim = ownerEmbeddings[0]!.length;
@@ -283,7 +288,8 @@ function validateTurnScoreEmbeddings(
     }
   }
   if (sampleEmbedding.length !== expectedDim) {
-    throw new Error(
+    // TYPED per-turn data fault (wrong-dimension SAMPLE vector). Message text unchanged.
+    throw new UnusableVoiceprintEmbeddingError(
       `Voiceprint sample embedding has dimension ${sampleEmbedding.length}; expected ${expectedDim}.`,
     );
   }

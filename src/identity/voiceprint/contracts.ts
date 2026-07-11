@@ -450,6 +450,10 @@ function actorForResult(
   result: Exclude<VoiceprintSpeakerResult, "confirmed_person">,
   clusterId?: RecordId,
 ): EventParticipation["actor"] {
+  // `possible_owner` NEVER reaches here: this runs only from buildEventParticipation,
+  // which is gated on allowedUses.eventGraph, and possible_owner always yields
+  // eventGraph:false (see policy.ts). So the owner branch matching only
+  // "owner_speaking" is deliberate — not a missing possible_owner case.
   if (result === "owner_speaking") {
     return { type: "owner" };
   }
