@@ -10,6 +10,7 @@ import {
 } from "./turn-scoring.js";
 import type { SpeechTurn } from "./contracts.js";
 import { voiceprintConsentAllowsProcessing } from "./policy.js";
+import { validateIdentifierNotEmpty, validateTimeBounds } from "./live-validators.js";
 
 export type LiveVoiceprintSkipReason =
   | "non_user_turn"
@@ -164,19 +165,14 @@ function resolveLiveVoiceprintQuality(
 }
 
 function validateLiveSpeechTurn(turn: SpeechTurn): void {
-  if (!turn.sessionKey.trim()) {
-    throw new Error("Live voiceprint turn requires sessionKey.");
-  }
-  if (!turn.transcriptItemId.trim()) {
-    throw new Error("Live voiceprint turn requires transcriptItemId.");
-  }
-  if (!turn.audioArtifactId.trim()) {
-    throw new Error("Live voiceprint turn requires audioArtifactId.");
-  }
-  if (!Number.isFinite(turn.startMs) || !Number.isFinite(turn.endMs)) {
-    throw new Error("Live voiceprint turn requires finite startMs and endMs.");
-  }
-  if (turn.endMs <= turn.startMs) {
-    throw new Error("Live voiceprint turn requires endMs > startMs.");
-  }
+  validateIdentifierNotEmpty(turn.sessionKey, "Live voiceprint turn requires sessionKey.");
+  validateIdentifierNotEmpty(
+    turn.transcriptItemId,
+    "Live voiceprint turn requires transcriptItemId.",
+  );
+  validateIdentifierNotEmpty(
+    turn.audioArtifactId,
+    "Live voiceprint turn requires audioArtifactId.",
+  );
+  validateTimeBounds(turn.startMs, turn.endMs, "Live voiceprint turn");
 }

@@ -24,6 +24,7 @@ import {
 import { isReferenceVoiceprintModel } from "./model-lifecycle.js";
 import type { VoiceprintConsentSnapshot } from "./policy.js";
 import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
+import { validateIdentifierNotEmpty, validateTimeBounds } from "./live-validators.js";
 
 export interface LiveVoiceprintScoringJob {
   version: 1;
@@ -265,9 +266,10 @@ function validateJobOptions(input: {
   maxAttempts?: number;
   timeoutMs?: number;
 }): void {
-  if (!input.audioPath.trim()) {
-    throw new Error("Live voiceprint scoring job requires audioPath.");
-  }
+  validateIdentifierNotEmpty(
+    input.audioPath,
+    "Live voiceprint scoring job requires audioPath.",
+  );
   const attempt = input.attempt ?? 0;
   const maxAttempts = input.maxAttempts ?? 1;
   if (!Number.isInteger(attempt) || attempt < 0) {
@@ -296,21 +298,19 @@ function validateJobOptions(input: {
 
 function validatePreparedTurnForJob(prepared: LiveVoiceprintReadyTurn): void {
   const turn = prepared.turn;
-  if (!turn.sessionKey.trim()) {
-    throw new Error("Live voiceprint scoring job requires sessionKey.");
-  }
-  if (!turn.transcriptItemId.trim()) {
-    throw new Error("Live voiceprint scoring job requires transcriptItemId.");
-  }
-  if (!turn.audioArtifactId.trim()) {
-    throw new Error("Live voiceprint scoring job requires audioArtifactId.");
-  }
-  if (!Number.isFinite(turn.startMs) || !Number.isFinite(turn.endMs)) {
-    throw new Error("Live voiceprint scoring job requires finite startMs and endMs.");
-  }
-  if (turn.endMs <= turn.startMs) {
-    throw new Error("Live voiceprint scoring job requires endMs > startMs.");
-  }
+  validateIdentifierNotEmpty(
+    turn.sessionKey,
+    "Live voiceprint scoring job requires sessionKey.",
+  );
+  validateIdentifierNotEmpty(
+    turn.transcriptItemId,
+    "Live voiceprint scoring job requires transcriptItemId.",
+  );
+  validateIdentifierNotEmpty(
+    turn.audioArtifactId,
+    "Live voiceprint scoring job requires audioArtifactId.",
+  );
+  validateTimeBounds(turn.startMs, turn.endMs, "Live voiceprint scoring job");
   if (!prepared.quality.allowedUses.scoring) {
     throw new Error("Live voiceprint scoring job requires quality that allows scoring.");
   }

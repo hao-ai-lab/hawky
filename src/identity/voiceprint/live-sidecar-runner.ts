@@ -28,6 +28,7 @@ import {
   formatVoiceprintModel,
   sameVoiceprintModel,
 } from "./model.js";
+import { checkNoDuplicateIds } from "./live-validators.js";
 import {
   voiceprintConsentAllowsProcessing,
   type VoiceprintConsentSnapshot,
@@ -302,16 +303,14 @@ function validateRequestMatchesJobs(
   request: VoiceprintEmbeddingBatchRequest,
   jobs: readonly LiveVoiceprintScoringJobContext[],
 ): void {
-  const duplicateJobId = firstDuplicate(jobs.map((context) => context.job.id));
-  if (duplicateJobId) {
-    throw new Error(`Duplicate live voiceprint scoring job id: ${duplicateJobId}.`);
-  }
-  const duplicateEmbeddingRequestId = firstDuplicate(
-    jobs.map((context) => context.job.embeddingRequest.id),
+  checkNoDuplicateIds(
+    jobs.map((context) => context.job.id),
+    (duplicate) => `Duplicate live voiceprint scoring job id: ${duplicate}.`,
   );
-  if (duplicateEmbeddingRequestId) {
-    throw new Error(`Duplicate live voiceprint job request id: ${duplicateEmbeddingRequestId}.`);
-  }
+  checkNoDuplicateIds(
+    jobs.map((context) => context.job.embeddingRequest.id),
+    (duplicate) => `Duplicate live voiceprint job request id: ${duplicate}.`,
+  );
 
   const expectedById = new Map(
     jobs.map((context) => [context.job.embeddingRequest.id, context.job.embeddingRequest] as const),
@@ -334,17 +333,6 @@ function validateRequestMatchesJobs(
   if (request.requests.length !== expectedById.size) {
     throw new Error("Live voiceprint request does not match processable jobs.");
   }
-}
-
-function firstDuplicate(values: readonly string[]): string | null {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) {
-      return value;
-    }
-    seen.add(value);
-  }
-  return null;
 }
 
 function embeddingRequestsMatch(
