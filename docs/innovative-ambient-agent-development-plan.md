@@ -1306,6 +1306,62 @@ The real levers are in *how we score*, not the threshold, in bang-for-buck order
    live scoring path's effective thresholds are byte-for-byte unchanged unless an
    operator explicitly supplies a calibration profile.
 
+### Live owner recognition architecture (Phase 1: gateway auto-score + identity push)
+
+Device testing got enrollment working end-to-end (encrypted CAM++ template; the
+sidecar separates the owner ~0.97 from a different speaker ~0.50) and, after the
+VAD-dataflow fix, live turns finalize on the gateway. What remained broken was the
+recognition trigger: the first wiring had iOS receive `finalizedTurns` from
+`realtime_event` and boomerang them back via `score_turns`, which then skipped
+every turn because the parallel-mic recording uploads DEFERRED (after the session)
+— the audio was never on the gateway at scoring time. Researching the two closest
+open products settled the design (see the model/tool options table for sources):
+**screenpipe** (local WeSpeaker CAM++ ONNX, cluster-then-name, 30s batches — not
+realtime; two-threshold scoping loose-in-session/strict-global; centroid + diverse
+exemplar set for voice drift; over-merge is their dominant product bug) and
+**Omi** (the closest analog: owner speech-profile enrollment; STT diarization for
+relative labels + backend embedding match for identity, run ASYNC off a ring
+buffer off the hot path, matched once per session-speaker; identity persisted on
+the transcript segment and rendered as `User:` lines for the LLM; labels corrected
+retroactively via a push event).
+
+Phase 1 adopts the Omi shape — score where the data lives, push results:
+
+- **Server (config `voiceprint.live_scoring.auto_score_finalized`, default false):**
+  when the realtime turn tracker finalizes turns, the gateway fire-and-forget
+  background-scores them itself (reusing the existing scoring plan; short
+  wait-for-audio retry for the in-flight tail chunk), feeds the A2 evidence
+  reducer, and on identity establish/flip emits a `voiceprint.identity` event
+  (`broadcast`/`broadcastToSession` — verified to exist) AND piggybacks per-turn
+  scored states on the session's next `realtime_event` response (belt +
+  suspenders; the phone-side persistent ChatClient event stream and the
+  EventFrameDecoder's ignore-unknown-events behavior are both verified). A7
+  telemetry and the A9 memory bridge consume the same states server-side, so
+  ambient identity works even when the phone app is backgrounded.
+- **iOS (thin):** with voiceprint on, the parallel mic records in liveUpload mode
+  (chunks stream during the session; the mid-write WAV is readable by design —
+  placeholder-size header, sidecar from the first chunk) and flushes on
+  speech_stopped; the score_turns boomerang orchestration is removed (the states
+  parser is reused to decode pushed/piggybacked results); an edge-triggered
+  identity state machine injects ONE system context item into the OpenAI Realtime
+  session on establish/flip (never per-turn, never triggering a response) and
+  retro-labels the transcript UI.
+- **Fail-safe invariants:** scoring failure/missing audio → skip, never a false
+  owner; flag off → byte-for-byte unchanged; hot event path never blocked.
+
+Deliberately rejected: per-turn audio-segment upload (duplicates the deferred
+upload ~1.4x, litters per-turn artifacts, diverges from the tracker's
+whole-session-WAV + absolute-offsets model) and Omi's abandoned profile-WAV
+prepending. **Phase 2 (privacy endgame):** on-device embeddings via the
+sherpa-onnx iOS xcframework with the SAME campplus.onnx the sidecar runs (same
+fbank preprocessing → numerical parity ~free), submitted through the
+already-built-and-tested client-embedding + A8 nonce path so audio never leaves
+the phone; prerequisites are Swift API verification, device-vs-sidecar embedding
+parity, and 28MB model delivery. **Phase 3:** voice-drift adaptation
+(centroid/exemplars over `add_enrollment_clip`/`reembed_owner_template`),
+unknown-cluster naming with split/merge/undo review (PR 3; screenpipe #4292's
+lesson), and a diarization front-end for multi-speaker (see MOSS note).
+
 ## Target Shape
 
 The identity system should have four durable concepts:
