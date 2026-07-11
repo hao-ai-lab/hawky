@@ -126,14 +126,21 @@ import Testing
         #expect(event == nil)
     }
 
-    @Test func rawSpeechParserRequiresRecordingRelativeOffsets() {
-        let event = LiveSessionStore.voiceprintRealtimeEvent(
+    /// The vendored WebRTC transport delegate is arg-less, so the provider re-emits VAD
+    /// with an EMPTY JSON body and (during parallel-mic warm-up) no recording offset.
+    /// Such an event must SURVIVE the converter — dropping it lost every speech window and
+    /// left the server turn tracker at finalized_turns:0. It carries no stamped offset
+    /// here; `prepareVoiceprintRealtimeEvent` stamps a recording-aligned, monotonic time.
+    @Test func rawSpeechParserSurvivesEmptyJSONWithoutRecordingOffset() throws {
+        let event = try #require(LiveSessionStore.voiceprintRealtimeEvent(
             rawType: "input_audio_buffer.speech_started",
             rawJSON: "{}",
             route: "iphone_mic"
-        )
+        ))
 
-        #expect(event == nil)
+        #expect(event.type == "input_audio_buffer.speech_started")
+        #expect(event.audioStartMs == nil)
+        #expect(event.route == "iphone_mic")
     }
 
     @Test func rawSpeechParserUsesRecordingOffsetFallback() throws {
