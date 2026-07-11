@@ -39,6 +39,7 @@ struct OwnerEnrollmentView: View {
         Form {
             Section {
                 header
+                nextStepBanner
             }
             .settingsSectionSurfaceCompat()
 
@@ -124,6 +125,10 @@ struct OwnerEnrollmentView: View {
                 }
                 .disabled(isSubmitting)
                 .accessibilityIdentifier("voiceprint.enroll.startOver")
+
+                Text("Not happy with the recording? Start over to clear these clips and record again.")
+                    .font(DesignTokens.Font.meta)
+                    .foregroundStyle(.secondary)
             }
         } header: {
             Text("Recording")
@@ -253,6 +258,34 @@ struct OwnerEnrollmentView: View {
             && !isSubmitting
             && !recorder.isRecording
             && !model.hasPendingUploads
+    }
+
+    /// The single most-important next action, driven by state, so the user is always
+    /// led to the next step instead of guessing. nil once enrolled.
+    private var nextStepText: String? {
+        if case .enrolled = model.state { return nil }
+        if model.hasPendingUploads { return "Finishing upload — one moment…" }
+        if !model.hasEnoughSpeech {
+            return "Step 1 — tap Record a sample and speak for a little over 30 seconds."
+        }
+        if !model.consent.satisfiesGate {
+            return "Step 2 — turn on biometric consent below."
+        }
+        return "You're ready — tap Enroll my voice at the bottom."
+    }
+
+    @ViewBuilder private var nextStepBanner: some View {
+        if let text = nextStepText {
+            Label {
+                Text(text).font(DesignTokens.Font.rowDetail)
+            } icon: {
+                Image(systemName: "arrow.turn.down.right")
+            }
+            .foregroundStyle(DesignTokens.accent)
+            .padding(.top, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("voiceprint.enroll.nextStep")
+        }
     }
 
     private var speechFooter: String {
