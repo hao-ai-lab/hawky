@@ -17,8 +17,15 @@ import Foundation
 final class OwnerEnrollmentRecorder {
     private(set) var isRecording = false
 
+    /// Live elapsed wall-clock capture time (ms), published so the UI counter can
+    /// climb in real time while recording. Reset to 0 on start, advanced by a
+    /// main-actor timer (never the audio thread), and frozen on stop. The View
+    /// applies `voicedFraction` to render a running "voiced speech" estimate.
+    private(set) var elapsedMs: Double = 0
+
     private let sink = LiveRecordingSink()
     private var startedAt: Date?
+    private var elapsedTimer: Timer?
     private let engine = AVAudioEngine()
     private var tapInstalled = false
 
@@ -89,6 +96,7 @@ final class OwnerEnrollmentRecorder {
             try engine.start()
             startedAt = Date()
             isRecording = true
+            startElapsedTimer()
             return .started
         } catch {
             print("[OwnerEnrollmentRecorder] engine start failed: \(error)")
@@ -103,11 +111,26 @@ final class OwnerEnrollmentRecorder {
         }
     }
 
-    /// Stop capture, finalize the WAV, register it as a voiceprint audio artifact,
-    /// and return the resulting source. Returns nil on any failure.
-    func stop(store: LiveSessionStore) async -> OwnerEnrollmentSource? {
+    /// Result of stopping a capture: a source that can be shown IMMEDIATELY (with the
+    /// locally-computed voicedMs) plus the raw artifact needed to upgrade that source
+    /// to an artifact-backed one via a background `upload(...)`. `localSource` always
+    /// carries the local WAV path so the UI can update the voiced count and consent
+    /// gate without waiting on the network; `artifact` is nil only when the WAV could
+    /// not be finalized (nothing to upload, nothing to enroll from).
+    struct StopOutcome {
+        let localSource: OwnerEnrollmentSource
+        let artifact: LiveVoiceprintAudioArtifactReference?
+    }
+
+    /// Stop capture and finalize the WAV. Returns IMMEDIATELY (no network) with a
+    /// local-path source computed from the locally-measured voiced duration, so the
+    /// UI's voiced count / consent gate update the instant the user stops. The caller
+    /// runs `upload(...)` in the background to upgrade the source to artifact-backed.
+    /// Returns nil only when there was no active recording to stop.
+    func stop() async -> StopOutcome? {
         guard isRecording else { return nil }
         isRecording = false
+        stopElapsedTimer()
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -116,20 +139,30 @@ final class OwnerEnrollmentRecorder {
         Self.deactivateSession()
 
         let artifact = sink.currentAudioArtifact
-        let elapsedMs = startedAt.map { Date().timeIntervalSince($0) * 1000 } ?? 0
+        let measuredMs = startedAt.map { Date().timeIntervalSince($0) * 1000 } ?? 0
         startedAt = nil
+        elapsedMs = measuredMs
         await sink.stop()
 
-        guard let artifact else { return nil }
-        let voicedMs = elapsedMs * Self.voicedFraction
+        let voicedMs = measuredMs * Self.voicedFraction
 
-        return await finalizeSource(artifact: artifact, voicedMs: voicedMs, store: store)
+        // Always hand back a local-path source so the UI can update immediately even
+        // if the upload later fails. If the WAV could not be finalized there is
+        // nothing to enroll from, so return a source with no path/artifact and a nil
+        // artifact; the caller treats that as a failed capture.
+        let localSource = OwnerEnrollmentSource(
+            audioPath: artifact?.audioPath,
+            route: "ios-enrollment",
+            voicedMs: voicedMs
+        )
+        return StopOutcome(localSource: localSource, artifact: artifact)
     }
 
     /// Upload the finalized WAV to the gateway and register it as a voiceprint
-    /// audio artifact, returning the resulting source. On any gateway failure
-    /// (offline / no roots configured) falls back to the local audio path so a
-    /// device with an accessible recording dir can still enroll from the file.
+    /// audio artifact, returning an artifact-backed source keyed by the SAME id/
+    /// voicedMs as the local source it upgrades. Returns nil on any gateway failure
+    /// (offline / no roots configured / register rejected) so the caller keeps the
+    /// local-path fallback source it already displayed.
     ///
     /// The upload must precede registration: the WAV is written only to the phone's
     /// Documents dir; without the upload it never reaches an allowed_audio_root and
@@ -137,11 +170,12 @@ final class OwnerEnrollmentRecorder {
     /// upload reuses the SAME media.chunk.upload RPC the live session uses, keyed by
     /// the WAV basename so the media_id the gateway writes under is byte-identical
     /// to the mediaID we register with.
-    private func finalizeSource(
+    func upload(
         artifact: LiveVoiceprintAudioArtifactReference,
+        sourceID: String,
         voicedMs: Double,
         store: LiveSessionStore
-    ) async -> OwnerEnrollmentSource {
+    ) async -> OwnerEnrollmentSource? {
         if let (gateway, sessionKey) = store.voiceprintEnrollmentGateway() {
             let uploaded = await gateway.uploadVoiceprintEnrollmentAudio(
                 sessionKey: sessionKey,
@@ -160,7 +194,11 @@ final class OwnerEnrollmentRecorder {
                 )
                 let resolvedID = registration?.audioArtifactID ?? artifact.audioArtifactID
                 if registration?.ok == true {
+                    // Upgrade the SAME source (id preserved) from local-path to
+                    // artifact-backed; voicedMs is carried through unchanged so the
+                    // guided floor does not shift under the user.
                     return OwnerEnrollmentSource(
+                        id: sourceID,
                         audioArtifactID: resolvedID,
                         route: "ios-enrollment",
                         voicedMs: voicedMs
@@ -169,11 +207,34 @@ final class OwnerEnrollmentRecorder {
             }
         }
 
-        return OwnerEnrollmentSource(
-            audioPath: artifact.audioPath,
-            route: "ios-enrollment",
-            voicedMs: voicedMs
-        )
+        // Upload/register failed: the caller keeps the local-path source it already
+        // displayed. Signal that no upgrade happened.
+        return nil
+    }
+
+    // MARK: - Elapsed timer (live UI counter, main-actor only)
+
+    /// Start the 0.1s main-actor timer that publishes `elapsedMs` while recording.
+    /// Runs on the main actor (never the audio thread) so it only drives UI. Tolerant
+    /// to save power; stopped on `stop()`.
+    private func startElapsedTimer() {
+        elapsedMs = 0
+        elapsedTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording, let started = self.startedAt else { return }
+                self.elapsedMs = Date().timeIntervalSince(started) * 1000
+            }
+        }
+        timer.tolerance = 0.05
+        RunLoop.main.add(timer, forMode: .common)
+        elapsedTimer = timer
+    }
+
+    /// Invalidate the elapsed timer so it stops advancing `elapsedMs`.
+    private func stopElapsedTimer() {
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
     }
 
     // MARK: - Tap format / install
@@ -245,13 +306,31 @@ final class OwnerEnrollmentRecorder {
 
     /// Put the shared session into a record-capable category and activate it, so the
     /// input node reports a valid record format.
+    ///
+    /// Uses `.measurement` mode — the standard raw-capture mode for analysis/ASR —
+    /// rather than `.default`. `.default` applies input AGC/processing that boosts
+    /// normal/close speech to full scale, which drove the enrollment WAVs to ~4.8%
+    /// clipping (peak pinned at 1.0) and got them rejected by the server quality gate.
+    /// `.measurement` disables that processing so normal speech lands with headroom.
+    /// As a belt-and-suspenders, if the input gain is settable, lower it toward a safe
+    /// level; both are best-effort so a hardware route that rejects them still records.
     private static func activateRecordSession() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
-            mode: .default,
+            mode: .measurement,
             options: [.defaultToSpeaker, .allowBluetoothHFP]
         )
+        // Best-effort headroom: lower the input gain if the route allows it. This is
+        // secondary to `.measurement` mode and must never block recording, so failures
+        // are swallowed and capture proceeds.
+        if session.isInputGainSettable {
+            do {
+                try session.setInputGain(0.7)
+            } catch {
+                print("[OwnerEnrollmentRecorder] input gain set failed (non-fatal): \(error)")
+            }
+        }
         try session.setActive(true)
     }
 

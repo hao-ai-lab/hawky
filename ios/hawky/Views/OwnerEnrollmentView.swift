@@ -115,6 +115,15 @@ struct OwnerEnrollmentView: View {
             if !model.sources.isEmpty {
                 LabeledContent("Clips recorded", value: "\(model.sources.count)")
                     .font(DesignTokens.Font.rowDetail)
+
+                Button(role: .destructive) {
+                    Task { await startOver() }
+                } label: {
+                    Label("Start over", systemImage: "arrow.counterclockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(isSubmitting)
+                .accessibilityIdentifier("voiceprint.enroll.startOver")
             }
         } header: {
             Text("Recording")
@@ -124,8 +133,16 @@ struct OwnerEnrollmentView: View {
     }
 
     private var speechIndicator: some View {
-        let seconds = Int((model.totalVoicedMs / 1000).rounded())
-        let enough = model.hasEnoughSpeech
+        // While recording, add a live estimate of the in-progress clip's voiced speech
+        // (elapsed * the same ~0.74 voiced fraction) on top of the committed total so
+        // the counter climbs in real time. On stop the final value is committed to the
+        // model (per the decoupled-display path) and this live term drops to 0.
+        let liveVoicedMs = recorder.isRecording
+            ? recorder.elapsedMs * OwnerEnrollmentRecorder.voicedFraction
+            : 0
+        let displayedMs = model.totalVoicedMs + liveVoicedMs
+        let seconds = Int((displayedMs / 1000).rounded())
+        let enough = displayedMs >= model.voicedFloorMs
         return HStack(spacing: 8) {
             Image(systemName: enough ? "checkmark.circle.fill" : "waveform")
                 .foregroundStyle(enough ? DesignTokens.Status.success : .secondary)
@@ -208,7 +225,13 @@ struct OwnerEnrollmentView: View {
                 .foregroundStyle(DesignTokens.Status.error)
                 .accessibilityIdentifier("voiceprint.enroll.failed")
         default:
-            if noGateway {
+            if model.hasPendingUploads {
+                // Enroll is disabled while a clip is still uploading; tell the user why.
+                Label("Finishing upload…", systemImage: "arrow.up.circle")
+                    .font(DesignTokens.Font.meta)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("voiceprint.enroll.uploading")
+            } else if noGateway {
                 Text("Hawky gateway is not reachable — connect first to enroll.")
                     .font(DesignTokens.Font.meta)
                     .foregroundStyle(.secondary)
@@ -229,6 +252,7 @@ struct OwnerEnrollmentView: View {
             && model.hasEnoughSpeech
             && !isSubmitting
             && !recorder.isRecording
+            && !model.hasPendingUploads
     }
 
     private var speechFooter: String {
@@ -241,12 +265,52 @@ struct OwnerEnrollmentView: View {
 
     // MARK: - Recording action
 
+    /// Discard all captured clips and re-record from scratch WITHOUT leaving the
+    /// screen. Stops any in-progress recording first (its clip is dropped, not
+    /// enrolled), then clears the model; the biometric consent toggle is kept. Any
+    /// in-flight background upload is orphaned safely (its callback no-ops on the
+    /// cleared source).
+    private func startOver() async {
+        if recorder.isRecording {
+            _ = await recorder.stop()
+        }
+        model.reset()
+    }
+
     private func toggleRecording() async {
         if recorder.isRecording {
-            if let source = await recorder.stop(store: store) {
-                model.addRecordedSource(source)
-            } else {
+            // Decouple display from upload: stop() returns immediately with a local
+            // source (voiced count computed on-device), so the counter + consent gate
+            // update at once. The upload+register then runs in the BACKGROUND and
+            // upgrades the source to artifact-backed. Enroll is gated on the source's
+            // pending upload state until that finishes (see canSubmit / submit()).
+            guard let outcome = await recorder.stop() else {
                 model.refreshGateState()
+                return
+            }
+            guard let artifact = outcome.artifact else {
+                // WAV could not be finalized — nothing to enroll from.
+                model.refreshGateState()
+                return
+            }
+
+            let localSource = outcome.localSource
+            model.addRecordedSource(localSource, uploadState: .pending)
+
+            // Background upgrade: local-path -> artifact-backed. On success upgrade the
+            // same source; on failure keep the local-path fallback (marked failed so
+            // Enroll is no longer blocked waiting on it).
+            Task {
+                if let upgraded = await recorder.upload(
+                    artifact: artifact,
+                    sourceID: localSource.id,
+                    voicedMs: localSource.voicedMs,
+                    store: store
+                ) {
+                    model.markSourceUploaded(id: localSource.id, upgraded: upgraded)
+                } else {
+                    model.markSourceUploadFailed(id: localSource.id)
+                }
             }
         } else {
             model.beginRecording()

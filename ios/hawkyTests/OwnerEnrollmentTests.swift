@@ -311,6 +311,127 @@ import Foundation
         #expect(detail == "insufficient_speech")
     }
 
+    // MARK: - Pending-upload gate: Enroll must not submit while a source is uploading
+
+    @Test func enrollDoesNotSubmitWhilePendingUploadThenSubmitsOnceUploaded() async {
+        let gateway = FakeEnrollmentGateway(enrollResult: acceptedResult())
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+
+        // Record a source that is still uploading in the background (local-path
+        // fallback shown immediately; artifact-backed upgrade pending). Grant full
+        // consent and clear the voiced floor so consent/too-short are NOT the blocker.
+        let pending = OwnerEnrollmentSource(
+            id: "pending-1",
+            audioPath: "/tmp/enroll-pending.wav",
+            route: "ios-enrollment",
+            voicedMs: OwnerEnrollmentModel.guidedVoicedFloorMs + 2_000
+        )
+        model.addRecordedSource(pending, uploadState: .pending)
+        model.consent = OwnerEnrollmentConsent(
+            captureAllowed: true, biometricAllowed: true,
+            memoryPromotionAllowed: false, exportAllowed: false
+        )
+        model.refreshGateState()
+        #expect(model.hasPendingUploads)
+
+        // submit() must PARK on the pending upload — it may not call the gateway yet.
+        let submitTask = Task { await model.submit() }
+        // Give the submit task a chance to reach awaitPendingUploads and park.
+        await Task.yield()
+        #expect(gateway.enrollCalls.isEmpty)
+
+        // Completing the background upload (artifact-backed upgrade) unblocks submit,
+        // which then fires exactly one enroll_owner RPC.
+        let upgraded = OwnerEnrollmentSource(
+            id: "pending-1",
+            audioArtifactID: "artifact-pending-1",
+            route: "ios-enrollment",
+            voicedMs: OwnerEnrollmentModel.guidedVoicedFloorMs + 2_000
+        )
+        model.markSourceUploaded(id: "pending-1", upgraded: upgraded)
+
+        let result = await submitTask.value
+        #expect(result?.accepted == true)
+        #expect(gateway.enrollCalls.count == 1)
+        #expect(!model.hasPendingUploads)
+
+        // The RPC carried the UPGRADED artifact-backed source (not the local path).
+        let source = firstSourceObject(gateway.enrollCalls[0])
+        #expect(source?["audioArtifactId"] == .string("artifact-pending-1"))
+        #expect(source?["audioPath"] == nil)
+        if case .enrolled = model.state {} else {
+            Issue.record("expected enrolled after upload completed, got \(model.state)")
+        }
+    }
+
+    // MARK: - Start over / reset clears clips, keeps consent, orphans late uploads
+
+    @Test func resetClearsClipsKeepsConsentAndNoOpsLateUpload() async {
+        let gateway = FakeEnrollmentGateway(enrollResult: acceptedResult())
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+        model.consent = OwnerEnrollmentConsent(
+            captureAllowed: true, biometricAllowed: true,
+            memoryPromotionAllowed: false, exportAllowed: false
+        )
+        let pending = OwnerEnrollmentSource(
+            id: "reset-1",
+            audioPath: "/tmp/enroll-reset.wav",
+            route: "ios-enrollment",
+            voicedMs: OwnerEnrollmentModel.guidedVoicedFloorMs + 2_000
+        )
+        model.addRecordedSource(pending, uploadState: .pending)
+        #expect(model.sources.count == 1)
+        #expect(model.hasPendingUploads)
+
+        // "Start over": clears clips + upload tracking, returns to idle, KEEPS consent.
+        model.reset()
+        #expect(model.sources.isEmpty)
+        #expect(!model.hasPendingUploads)
+        #expect(model.consent.satisfiesGate)   // consent survives a re-record
+
+        // A late background-upload callback for the cleared source is a no-op — it must
+        // not resurrect a phantom clip or a pending-upload entry.
+        let upgraded = OwnerEnrollmentSource(
+            id: "reset-1", audioArtifactID: "artifact-reset-1", route: "ios-enrollment",
+            voicedMs: OwnerEnrollmentModel.guidedVoicedFloorMs + 2_000
+        )
+        model.markSourceUploaded(id: "reset-1", upgraded: upgraded)
+        #expect(model.sources.isEmpty)
+        #expect(!model.hasPendingUploads)
+    }
+
+    // MARK: - Failed upload keeps the local-path fallback and unblocks Enroll
+
+    @Test func failedUploadKeepsLocalSourceAndUnblocksEnroll() async {
+        let gateway = FakeEnrollmentGateway(enrollResult: acceptedResult())
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+
+        let local = OwnerEnrollmentSource(
+            id: "local-1",
+            audioPath: "/tmp/enroll-local.wav",
+            route: "ios-enrollment",
+            voicedMs: OwnerEnrollmentModel.guidedVoicedFloorMs + 2_000
+        )
+        model.addRecordedSource(local, uploadState: .pending)
+        model.consent = OwnerEnrollmentConsent(
+            captureAllowed: true, biometricAllowed: true,
+            memoryPromotionAllowed: false, exportAllowed: false
+        )
+        model.refreshGateState()
+        #expect(model.hasPendingUploads)
+
+        // Upload fails: the local-path source stays; the pending gate clears so Enroll
+        // is no longer blocked and submits the local-path source as-is.
+        model.markSourceUploadFailed(id: "local-1")
+        #expect(!model.hasPendingUploads)
+        #expect(model.uploadStates["local-1"] == .failed)
+
+        _ = await model.submit()
+        #expect(gateway.enrollCalls.count == 1)
+        let source = firstSourceObject(gateway.enrollCalls[0])
+        #expect(source?["audioPath"] == .string("/tmp/enroll-local.wav"))
+    }
+
     // MARK: - Result parsing: accepted vs non-accepted posture
 
     @Test func enrollmentResultAcceptedOnlyWhenStatusAccepted() {
