@@ -58,6 +58,16 @@ protocol VoiceprintEnrollmentGateway: Sendable {
         timeoutSeconds: TimeInterval
     ) async -> LiveVoiceprintEnrollmentResult?
 
+    /// Enroll the owner template from a live listening session's uploaded
+    /// recording segments (`enroll_owner_from_recording`). Defaulted to nil so
+    /// inert/offline gateways and unit-test fakes keep compiling; the model's
+    /// submit path then fails closed with a clear "could not reach" message.
+    func enrollVoiceprintOwnerFromRecording(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval
+    ) async -> LiveVoiceprintEnrollmentResult?
+
     /// Query whether an owner template is already enrolled (+ scalar metadata) so
     /// the UI can show an "already enrolled" state. Defaulted to nil so inert /
     /// test gateways need not implement it (the UI then shows the first-time flow).
@@ -86,6 +96,15 @@ extension VoiceprintEnrollmentGateway {
         sessionKey: String,
         timeoutSeconds: TimeInterval
     ) async -> LiveVoiceprintOwnerTemplateStatus? { nil }
+
+    /// Default: from-recording enrollment unavailable (nil). Gateways that cannot
+    /// run the RPC (inert/offline gateway, unit-test fakes) inherit this, and the
+    /// model surfaces a "could not reach" failure instead of enrolling anything.
+    func enrollVoiceprintOwnerFromRecording(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval
+    ) async -> LiveVoiceprintEnrollmentResult? { nil }
 }
 
 /// The biometric-consent snapshot for enrollment. All four keys are surfaced to
@@ -192,6 +211,26 @@ enum LiveVoiceprintEnrollmentRequest {
         return params
     }
 
+    /// `identity.voiceprint.enroll_owner_from_recording` params: the base id of
+    /// a live listening session's recording (e.g. "live-20260712-135209", the
+    /// base of the uploaded `.segNNN.mic` segments) plus the same consent object.
+    static func enrollOwnerFromRecordingParams(
+        sessionKey: String?,
+        recordingBaseId: String,
+        consent: OwnerEnrollmentConsent,
+        minSpeechMs: Double? = nil
+    ) -> [String: JSONValue] {
+        var params: [String: JSONValue] = [
+            "recordingBaseId": .string(recordingBaseId),
+            "consent": .object(consent.jsonObject),
+        ]
+        params.setOptionalString("sessionKey", sessionKey)
+        if let minSpeechMs {
+            params["minSpeechMs"] = .number(minSpeechMs)
+        }
+        return params
+    }
+
     /// `identity.voiceprint.add_enrollment_clip` params: a single `source`.
     static func addEnrollmentClipParams(
         sessionKey: String?,
@@ -249,6 +288,18 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// a clip that just clears the client estimate still clears the server floor.
     nonisolated static let guidedVoicedFloorMs: Double = 32_000
 
+    /// Fraction of listening wall-clock time counted as VOICED speech. Mirrors
+    /// OwnerEnrollmentRecorder.voicedFraction (the server sidecar's ~74% voiced
+    /// estimate) so the client's live progress tracks the server's VOICED floor.
+    nonisolated static let voicedFraction: Double = 0.74
+
+    /// The server's hard VOICED floor for enrollment (ms). The gateway clamps
+    /// `minSpeechMs` to >= 30s, so the listening flow guides against exactly this
+    /// value: at ~74% voiced fraction it means listening for ~40s of wall clock.
+    /// The from-recording rejection's `speechMs` is measured against this floor
+    /// to compute the "keep talking ~N more seconds" hint.
+    nonisolated static let serverVoicedFloorMs: Double = 30_000
+
     @Published private(set) var state: OwnerEnrollmentState = .idle
     @Published private(set) var sources: [OwnerEnrollmentSource] = []
     /// Per-source upload state, keyed by `OwnerEnrollmentSource.id`. A source is
@@ -264,6 +315,29 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// not yet queried / unknown; `.enrolled == false` = first-time flow;
     /// `.enrolled == true` = show the "already enrolled" summary + re-enroll CTA.
     @Published private(set) var existingEnrollment: LiveVoiceprintOwnerTemplateStatus?
+
+    // MARK: - Listening-session flow state (enroll from a live recording)
+
+    /// True while a silent live listening session is running (the store owns the
+    /// actual session; this mirrors it for the UI + gate logic).
+    @Published private(set) var isListening = false
+    /// Wall-clock listening time (ms). Advanced by a main-actor timer while
+    /// listening (mirrors OwnerEnrollmentRecorder's elapsed counter — UI only,
+    /// never the audio thread) and frozen to the measured total on stop.
+    @Published private(set) var listeningElapsedMs: Double = 0
+    /// Base id of the captured live recording (e.g. "live-20260712-135209" — the
+    /// base of the `.segNNN.mic` segments the session uploaded). Non-nil only
+    /// after a listening session stopped with an open recording; it is what
+    /// `submitFromRecording()` hands to `enroll_owner_from_recording`.
+    @Published private(set) var capturedRecordingBaseId: String?
+    /// The last `enroll_owner_from_recording` rejection whose reasons included
+    /// `not_enough_speech`. Kept so the UI can render "keep talking ~N more
+    /// seconds" from the SERVER-counted `speechMs` (authoritative, unlike the
+    /// client's wall-clock estimate). Cleared on the next listen / accept / reset.
+    @Published private(set) var lastRecordingRejection: LiveVoiceprintEnrollmentResult?
+
+    private var listeningTimer: Timer?
+    private var listeningStartedAt: Date?
 
     private let gateway: VoiceprintEnrollmentGateway
     private let sessionKey: String
@@ -399,17 +473,22 @@ final class OwnerEnrollmentModel: ObservableObject {
     }
 
     /// Discard all captured sources and reset to idle (does not touch consent so the
-    /// user's opt-in choice survives a re-record). Clears upload tracking and unblocks
-    /// any parked Enroll waiter so it does not hang after a reset.
+    /// user's opt-in choice survives a re-record). Clears upload tracking, the
+    /// listening capture, and unblocks any parked Enroll waiter so it does not hang
+    /// after a reset.
     func reset() {
         sources.removeAll()
         uploadStates.removeAll()
+        capturedRecordingBaseId = nil
+        lastRecordingRejection = nil
+        listeningElapsedMs = 0
         state = .idle
         resumePendingWaitersIfSettled()
     }
 
-    /// Recompute the blocking state after a source or consent change. Never advances
-    /// past a gate on its own — `submit()` is the only path to the gateway.
+    /// Recompute the blocking state after a source / capture / consent change. Never
+    /// advances past a gate on its own — `submit()` / `submitFromRecording()` are the
+    /// only paths to the gateway.
     func refreshGateState() {
         switch state {
         case .submitting, .enrolled:
@@ -417,6 +496,27 @@ final class OwnerEnrollmentModel: ObservableObject {
             return
         default:
             break
+        }
+        // A running listening session IS the recording state — consent toggles etc.
+        // must not knock the flow back to idle while Hawky is still listening.
+        if isListening {
+            state = .recording
+            return
+        }
+        // Listening-session flow: a captured live recording gates on the SAME
+        // consent, then on the server's voiced floor applied to the client's
+        // wall-clock estimate. (The clip-based `sources` flow below is untouched.)
+        if capturedRecordingBaseId != nil, sources.isEmpty {
+            if !consent.satisfiesGate {
+                state = .needsConsent
+                return
+            }
+            if !hasEnoughListeningSpeech {
+                state = .tooShort
+                return
+            }
+            state = .recording
+            return
         }
         guard !sources.isEmpty else {
             state = .idle
@@ -507,5 +607,202 @@ final class OwnerEnrollmentModel: ObservableObject {
             state = .failed(detail)
         }
         return result
+    }
+
+    // MARK: - Listening-session flow (enroll from a live recording)
+
+    /// Estimated VOICED speech captured by the listening session so far (ms).
+    /// Wall clock × the sidecar's ~74% voiced fraction — guidance only; the
+    /// server's `speechMs` is authoritative at submit time.
+    var listeningVoicedMs: Double {
+        listeningElapsedMs * Self.voicedFraction
+    }
+
+    /// Whether the listening capture's voiced estimate clears the server floor.
+    var hasEnoughListeningSpeech: Bool {
+        listeningVoicedMs >= Self.serverVoicedFloorMs
+    }
+
+    /// Seconds of extra TALKING (voiced speech) still needed before the floor is
+    /// met. Prefers the SERVER-counted shortfall from the last not_enough_speech
+    /// rejection (exact), falling back to the client wall-clock estimate.
+    var keepTalkingSeconds: Int {
+        let shortfallMs: Double
+        if let serverSpeechMs = lastRecordingRejection?.speechMs {
+            shortfallMs = max(0, Self.serverVoicedFloorMs - serverSpeechMs)
+        } else {
+            shortfallMs = max(0, Self.serverVoicedFloorMs - listeningVoicedMs)
+        }
+        return Int((shortfallMs / 1000).rounded(.up))
+    }
+
+    /// Whether "Enroll my voice" may submit the captured recording: same
+    /// fail-closed consent gate as the clip flow, plus a capture that exists,
+    /// clears the guided floor, and is not still being listened to.
+    var canSubmitFromRecording: Bool {
+        capturedRecordingBaseId != nil
+            && consent.satisfiesGate
+            && hasEnoughListeningSpeech
+            && !isListening
+    }
+
+    /// Begin a silent live listening session (the store runs the actual session
+    /// with temporary overrides; see LiveSessionStore.startEnrollmentListeningSession).
+    /// GUARD: refuses when no gateway is configured — without one the uploaded
+    /// segments can never reach the machine, so listening would be pointless.
+    /// Returns whether listening actually began.
+    @discardableResult
+    func startListening(
+        store: LiveSessionStore,
+        recordingTransport: GatewayTransport? = nil,
+        recordingTransportProvider: GatewayTransportResolver? = nil
+    ) async -> Bool {
+        guard !isListening else { return true }
+        guard store.voiceprintEnrollmentGateway() != nil else {
+            state = .failed("Hawky gateway is not reachable — connect first to enroll.")
+            return false
+        }
+        // A new capture replaces the previous one (re-listening is a fresh take).
+        capturedRecordingBaseId = nil
+        lastRecordingRejection = nil
+        listeningElapsedMs = 0
+        state = .recording
+        let started = await store.startEnrollmentListeningSession(
+            recordingTransport: recordingTransport,
+            recordingTransportProvider: recordingTransportProvider
+        )
+        guard started else {
+            state = .failed("Could not start the listening session. Check the microphone permission and try again.")
+            return false
+        }
+        isListening = true
+        listeningStartedAt = Date()
+        startListeningTimer()
+        return true
+    }
+
+    /// Stop the listening session: capture the recording base id, tear the live
+    /// session down (the store restores every temporary override), and re-evaluate
+    /// the gates. Safe to call when not listening (no-op).
+    func stopListening(store: LiveSessionStore) async {
+        guard isListening else { return }
+        isListening = false
+        stopListeningTimer()
+        let measuredMs = listeningStartedAt.map { Date().timeIntervalSince($0) * 1000 } ?? listeningElapsedMs
+        listeningStartedAt = nil
+        let baseID = await store.stopEnrollmentListeningSession()
+        recordListeningCapture(recordingBaseId: baseID, elapsedMs: measuredMs)
+    }
+
+    /// Commit a finished listening capture and re-evaluate the gates. Split out of
+    /// `stopListening(store:)` so the flow is unit-testable without a live session.
+    /// A nil base id means the recording never opened (mic warm-up failure) —
+    /// surface that as a clear failure instead of a dead-end idle state.
+    func recordListeningCapture(recordingBaseId: String?, elapsedMs: Double) {
+        listeningElapsedMs = elapsedMs
+        guard let recordingBaseId, !recordingBaseId.isEmpty else {
+            capturedRecordingBaseId = nil
+            state = .failed("No audio was captured — try again.")
+            return
+        }
+        capturedRecordingBaseId = recordingBaseId
+        refreshGateState()
+    }
+
+    /// Submit `enroll_owner_from_recording` for the captured listening session.
+    /// Same FAIL-CLOSED consent gate as `submit()`: the RPC is NEVER sent unless
+    /// `biometricAllowed && captureAllowed`. Returns the parsed result, or nil if
+    /// the submission was blocked (still listening / no capture / no consent /
+    /// too little speech) or the transport failed.
+    @discardableResult
+    func submitFromRecording(minSpeechMs: Double? = nil) async -> LiveVoiceprintEnrollmentResult? {
+        // 1. The listening session must be fully stopped — its final segments only
+        //    finish uploading on stop, so submitting mid-listen would enroll a
+        //    truncated recording.
+        guard !isListening else { return nil }
+        // 2. Must have a captured recording to enroll from.
+        guard let recordingBaseId = capturedRecordingBaseId else {
+            state = .idle
+            return nil
+        }
+        // 3. FAIL-CLOSED consent gate (identical to submit()). Withholding consent
+        //    leaves the flow in needsConsent and submits NOTHING.
+        guard consent.satisfiesGate else {
+            state = .needsConsent
+            return nil
+        }
+        // 4. Guided floor: block a capture the server would certainly reject and
+        //    surface tooShort with a "keep talking" hint instead.
+        guard hasEnoughListeningSpeech else {
+            state = .tooShort
+            return nil
+        }
+        state = .submitting
+        let params = LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams(
+            sessionKey: sessionKey,
+            recordingBaseId: recordingBaseId,
+            consent: consent,
+            minSpeechMs: minSpeechMs
+        )
+        // Longer budget than enroll_owner: the gateway resolves + embeds every
+        // selected segment before answering.
+        let result = await gateway.enrollVoiceprintOwnerFromRecording(
+            sessionKey: sessionKey,
+            params: params,
+            timeoutSeconds: 60
+        )
+        guard let result else {
+            state = .failed("Could not reach the Hawky gateway to enroll your voice.")
+            return nil
+        }
+        if result.accepted {
+            lastRecordingRejection = nil
+            state = .enrolled(result)
+        } else if result.reasons.contains("not_enough_speech") {
+            // The recording uploaded fine but did not contain 30s of VOICED speech.
+            // Keep the server-counted speechMs so the UI can say exactly how much
+            // more talking the next take needs, and route to tooShort (actionable)
+            // rather than failed (terminal).
+            lastRecordingRejection = result
+            state = .tooShort
+        } else {
+            state = .failed(Self.recordingFailureMessage(for: result))
+        }
+        return result
+    }
+
+    /// Actionable copy for a non-accepted `enroll_owner_from_recording` result
+    /// (not_enough_speech is routed to `.tooShort` before this is consulted).
+    nonisolated static func recordingFailureMessage(for result: LiveVoiceprintEnrollmentResult) -> String {
+        if result.reasons.contains("quality_rejected") {
+            return "Too noisy — try somewhere quieter."
+        }
+        if result.reasons.contains("no_usable_segments") {
+            return "Upload didn't complete — try again."
+        }
+        return result.reasons.first ?? "Enrollment was not accepted (\(result.status ?? "unknown"))."
+    }
+
+    // MARK: - Listening timer (live UI counter, main-actor only)
+
+    /// 0.1s main-actor timer publishing `listeningElapsedMs` while listening —
+    /// the same pattern as OwnerEnrollmentRecorder's elapsed counter. Drives ONLY
+    /// the UI progress line; it never touches audio.
+    private func startListeningTimer() {
+        listeningTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isListening, let started = self.listeningStartedAt else { return }
+                self.listeningElapsedMs = Date().timeIntervalSince(started) * 1000
+            }
+        }
+        timer.tolerance = 0.05
+        RunLoop.main.add(timer, forMode: .common)
+        listeningTimer = timer
+    }
+
+    private func stopListeningTimer() {
+        listeningTimer?.invalidate()
+        listeningTimer = nil
     }
 }

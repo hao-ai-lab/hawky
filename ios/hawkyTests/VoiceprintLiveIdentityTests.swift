@@ -130,7 +130,10 @@ import Foundation
             return
         }
         #expect(verdict == .ownerPresent)
-        #expect(injection == "The current speaker has been identified as the device owner.")
+        // The injection is the single canonical owner text (A/B-verified wording
+        // lives in injectionText(for:); assert identity, not a duplicated literal).
+        #expect(injection == LiveVoiceprintIdentityMachine.injectionText(for: .ownerPresent))
+        #expect(injection.contains("they are the device owner"))
         #expect(label == "Owner speaking")
     }
 
@@ -144,7 +147,8 @@ import Foundation
             return
         }
         #expect(verdict == .notOwner)
-        #expect(injection.contains("unknown speaker"))
+        #expect(injection == LiveVoiceprintIdentityMachine.injectionText(for: .notOwner))
+        #expect(injection.contains("does NOT match the device owner"))
     }
 
     /// SAME-VERDICT repeat (a new `at` but the same verdict) does NOT re-inject/re-label.
@@ -214,8 +218,10 @@ import Foundation
         try await provider.sendContext(owner, createResponse: false)
 
         #expect(provider.sentContext.count == 1)
+        // The injected text is byte-identical to the canonical owner injection
+        // (single-sourced in injectionText(for:), not a duplicated literal here).
         #expect(provider.sentContext.first?.text == owner)
-        #expect(provider.sentContext.first?.text == "The current speaker has been identified as the device owner.")
+        #expect(provider.sentContext.first?.text.contains("they are the device owner") == true)
         // The load-bearing guarantee: identity injection NEVER asks for a response.
         #expect(provider.sentContext.first?.createResponse == false)
         // And it never routed through the response-triggering deliberate-prompt path.

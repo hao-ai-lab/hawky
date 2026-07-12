@@ -958,6 +958,131 @@ final class LiveSessionStore {
     }
 
     // -------------------------------------------------------------------------
+    // Owner-voiceprint enrollment listening session (B3, live-capture path).
+    //
+    // Enrollment must capture through the SAME live WebRTC pipeline recognition
+    // scores — a standalone recorder is acoustically orthogonal to that domain
+    // (docs/voiceprint-architecture.md, "capture-domain mismatch"). So the Voice
+    // enrollment screen runs a REAL Live session, silenced, with recording forced
+    // to live upload; the gateway then builds the template from the uploaded
+    // `.segNNN.mic` segments via enroll_owner_from_recording.
+    // -------------------------------------------------------------------------
+
+    /// True while the silent enrollment listening session is running. Session-
+    /// scoped; cleared by `stopEnrollmentListeningSession()`.
+    private(set) var enrollmentListeningActive = false
+
+    /// Base id of the current (or, after stop, most recent) Live recording — the
+    /// WAV basename, which is byte-identical to the base of the uploaded
+    /// `.segNNN.mic` segment media ids (e.g. "live-20260712-135209"). Reads the
+    /// open recording's artifact while recording, and falls back to
+    /// `lastRecordingURL` afterwards (the sink clears its recording id on stop
+    /// but keeps the last URL readable).
+    var currentRecordingBaseId: String? {
+        if let artifact = recordingSink.currentAudioArtifact {
+            return artifact.audioArtifactID
+        }
+        guard let url = recordingSink.lastRecordingURL else { return nil }
+        let base = url.deletingPathExtension().lastPathComponent
+        return base.isEmpty ? nil : base
+    }
+
+    /// Start a SILENT live listening session for owner-voiceprint enrollment.
+    ///
+    /// Reuses the one true `start()` path (never a forked second session) with
+    /// TEMPORARY overrides passed via `configOverride`, which start() uses for
+    /// the frozen `activeConfig` snapshot only — the draft `config` and its
+    /// UserDefaults persistence are never touched, so nothing here can leak into
+    /// the user's saved settings and there is nothing to restore beyond stop():
+    /// - audioInputEnabled: on (the whole point is capturing the mic),
+    /// - mediaPersistenceMode: .liveUpload (segments must reach the gateway
+    ///   DURING the session for enroll_owner_from_recording to resolve them),
+    /// - camera/video: off (voice only; also keeps Safety/CocktailParty visual
+    ///   pipelines out of the session),
+    /// - speakOnlyWhenSpokenTo: on + openingBehavior .silent, so the connect-time
+    ///   session config already has auto-response off and no greeting — closing
+    ///   the gap before the full silence update below lands.
+    ///
+    /// SILENCING CHOICE — Stay Silent's `setSilenceMode(true)`, NOT
+    /// `safetyCheckEnabled`/hardQuiet: hardQuiet deliberately KEEPS server-VAD
+    /// auto-response so the model still replies to the user's own speech turns
+    /// (exactly what a 40s enrollment monologue would trigger), and enabling
+    /// Safety Check also drags in the hazard-watch controller — a side feature.
+    /// `setSilenceMode(true)` is the one mechanism that ONLY silences: it turns
+    /// off auto-response AND the manual reply-on-user-turn path, sets
+    /// tool_choice "none", and cancels any stray server turn. Its release-recap
+    /// behavior never runs because we tear the session down while still silent.
+    ///
+    /// Returns false (with the session torn down) if the session, its recording,
+    /// or the silence update could not be established — the flow FAILS CLOSED
+    /// rather than listening non-silently or without upload.
+    func startEnrollmentListeningSession(
+        recordingTransport: GatewayTransport? = nil,
+        recordingTransportProvider: GatewayTransportResolver? = nil
+    ) async -> Bool {
+        guard !phase.isActive else { return false }
+        var override = config
+        override.audioInputEnabled = true
+        override.mediaPersistenceMode = .liveUpload
+        override.visualSource = .off
+        override.visualCadence = .off
+        // No visual input → no visual side features. Forced off explicitly so an
+        // enabled setting can't wedge a camera pipeline into the listening session.
+        override.cocktailPartyEnabled = false
+        override.safetyCheckEnabled = false
+        override.speakOnlyWhenSpokenTo = true
+        override.openingBehavior = .silent
+        await start(
+            recordingTransport: recordingTransport ?? lastRecordingTransport,
+            recordingTransportProvider: recordingTransportProvider ?? lastRecordingTransportProvider,
+            configOverride: override
+        )
+        guard phase == .connected, let provider else {
+            await stop()
+            return false
+        }
+        // No recording ⇒ no segments ever reach the gateway ⇒ enrollment can only
+        // end in no_usable_segments. Fail now with the session torn down.
+        guard isRecording else {
+            await stop()
+            return false
+        }
+        do {
+            try await provider.setSilenceMode(true, config: liveConfig)
+        } catch {
+            // Couldn't silence — never run a listening session where the model
+            // may talk over the user's enrollment speech.
+            await stop()
+            return false
+        }
+        enrollmentListeningActive = true
+        appendSystemMessage("Voice enrollment: listening silently.", eventType: "voiceprint.enroll_listen.on")
+        return true
+    }
+
+    /// Stop the enrollment listening session and return the recording base id to
+    /// enroll from (nil when the recording never opened). The temporary session
+    /// shape needs no explicit restore: it lived only in `activeConfig`, which
+    /// `stop()` clears — the draft `config` and persisted settings were never
+    /// modified. Silence is deliberately NOT released first; the session is torn
+    /// down whole, so the model never gets a turn (and the Stay Silent release
+    /// recap never runs).
+    @discardableResult
+    func stopEnrollmentListeningSession() async -> String? {
+        let wasActive = enrollmentListeningActive
+        enrollmentListeningActive = false
+        // Read before stop() (the open artifact is definitive); the accessor's
+        // lastRecordingURL fallback covers the post-stop re-read below, and also
+        // the case where the session already auto-stopped (backgrounding /
+        // provider failure) — the finished recording is still enrollable.
+        let baseID = currentRecordingBaseId
+        if wasActive || phase.isActive {
+            await stop()
+        }
+        return baseID ?? currentRecordingBaseId
+    }
+
+    // -------------------------------------------------------------------------
     // Memory feature (#653): bridge access for the Live → More → Memory testing
     // tab. Like peopleBridge(), this works in any session state — the memory.*
     // RPCs are workspace-global, so they only need a gateway URL.
@@ -1598,9 +1723,16 @@ final class LiveSessionStore {
         persistSessions()
     }
 
+    /// `configOverride`, when non-nil, is the config this session runs with INSTEAD
+    /// of the draft `config`. It is used verbatim for the session snapshot
+    /// (`activeConfig`) but is NEVER written back to the draft or persisted (the
+    /// only draft write below remains the resolved gatewayBridgeSessionKey), so
+    /// temporary session shapes — e.g. the enrollment listening session — cannot
+    /// leak into the user's saved settings.
     func start(
         recordingTransport: GatewayTransport? = nil,
-        recordingTransportProvider: GatewayTransportResolver? = nil
+        recordingTransportProvider: GatewayTransportResolver? = nil,
+        configOverride: LiveSessionConfig? = nil
     ) async {
         guard !phase.isActive else { return }
         // Remember the transport so auto-recovery (scene-phase, no container) can
@@ -1628,7 +1760,7 @@ final class LiveSessionStore {
         }
 
         let prepareStartedAt = Date()
-        var effectiveConfig = config
+        var effectiveConfig = configOverride ?? config
         audioOutputPlayer.updateDestination(effectiveConfig.audioOutputDestination)
         if effectiveConfig.provider == .openAIRealtime {
             effectiveConfig.openAICredentialMode = .directAPIKey
@@ -2031,7 +2163,10 @@ final class LiveSessionStore {
         if userInitiated {
             cancelInterruptedRecovery()
         }
-        // Stay Silent is session-scoped; reset it when the session ends.
+        // Stay Silent is session-scoped; reset it when the session ends. So is the
+        // enrollment listening session — clearing it here covers non-user stops
+        // (backgrounding, provider failure) as well as the explicit stop path.
+        enrollmentListeningActive = false
         staySilentActive = false
         silenceStartedAt = nil
         silenceTranscript.removeAll()
