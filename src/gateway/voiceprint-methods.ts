@@ -396,6 +396,10 @@ export function resolveVoiceprintLiveScoringConfigFromConfig(
     // finalized realtime turns itself. False => realtime handlers byte-for-byte
     // unchanged (no auto-scorer is even constructed).
     autoScoreFinalized: optionalBoolean(raw.auto_score_finalized) ?? false,
+    // WS1 auto-scorer tuning. Only the A2 evidence hysteresis is config-exposed
+    // (controls how fast an owner identity establishes + broadcasts). Undefined
+    // when unset => DEFAULT_SPEAKER_EVIDENCE_CONFIG (flipThreshold 3).
+    autoScoreTuning: resolveVoiceprintAutoScoreTuning(raw.evidence),
     livenessNonceTtlMs: optionalPositiveNumber(
       raw.liveness_nonce_ttl_ms,
       "voiceprint.live_scoring.liveness_nonce_ttl_ms",
@@ -656,6 +660,46 @@ function validateCohortEmbeddingList(value: unknown, field: string): number[][] 
   });
 }
 
+/**
+ * Parse `voiceprint.live_scoring.evidence` into the auto-scorer's A2 hysteresis
+ * overrides. Every field is optional; an absent block => undefined => the
+ * reducer keeps DEFAULT_SPEAKER_EVIDENCE_CONFIG. `flip_threshold` is the number
+ * of consecutive strong-owner turns needed to establish (and broadcast) an owner
+ * identity — lower = faster push, higher = more anti-flap. Validation of ranges
+ * / flip_threshold <= window_size happens in the reducer's resolveConfig.
+ */
+function resolveVoiceprintAutoScoreTuning(
+  raw: unknown,
+): VoiceprintAutoScoreTuning | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (typeof raw !== "object") {
+    throw new Error("voiceprint.live_scoring.evidence must be an object.");
+  }
+  const evidence = raw as Record<string, unknown>;
+  const flipThreshold = optionalPositiveNumber(
+    evidence.flip_threshold ?? evidence.flipThreshold,
+    "voiceprint.live_scoring.evidence.flip_threshold",
+  );
+  const windowSize = optionalPositiveNumber(
+    evidence.window_size ?? evidence.windowSize,
+    "voiceprint.live_scoring.evidence.window_size",
+  );
+  const staleTimeoutMs = optionalPositiveNumber(
+    evidence.stale_timeout_ms ?? evidence.staleTimeoutMs,
+    "voiceprint.live_scoring.evidence.stale_timeout_ms",
+  );
+  const config: NonNullable<VoiceprintAutoScoreTuning["evidenceConfig"]> = {};
+  if (flipThreshold !== undefined) config.flipThreshold = flipThreshold;
+  if (windowSize !== undefined) config.windowSize = windowSize;
+  if (staleTimeoutMs !== undefined) config.staleTimeoutMs = staleTimeoutMs;
+  if (Object.keys(config).length === 0) {
+    return undefined;
+  }
+  return { evidenceConfig: config };
+}
+
 function resolveConfiguredVoiceprintAsNormThresholds(
   thresholds: NonNullable<ConfiguredVoiceprintAsNorm>["normalized_thresholds"],
 ): VoiceprintThresholds | undefined {
@@ -856,11 +900,13 @@ export function registerVoiceprintMethods(
           if (!turn.audioArtifactId) {
             return true;
           }
-          const resolved = audioArtifacts.resolve({
+          const resolved = resolveLiveTurnAudioArtifact({
             sessionKey,
             audioArtifactId: turn.audioArtifactId,
             startMs: turn.startMs,
             endMs: turn.endMs,
+            audioArtifacts,
+            allowedAudioRoots: scoring.allowedAudioRoots,
           });
           if (!resolved) {
             return false;
@@ -2219,17 +2265,34 @@ async function buildScorePlanTurns(input: {
 
   let needsOwnerTemplate = false;
   for (const turn of input.input.turns) {
-    const registeredArtifact = turn.audioArtifactId
-      ? input.audioArtifacts.resolve({
-        sessionKey: input.sessionKey,
-        audioArtifactId: turn.audioArtifactId,
-        startMs: turn.startMs,
-        endMs: turn.endMs,
-      })
-      : undefined;
-    const audioPath = registeredArtifact?.audioPath ?? turn.audioPath;
-    const requestStartMs = registeredArtifact?.requestStartMs ?? turn.startMs;
-    const requestEndMs = registeredArtifact?.requestEndMs ?? turn.endMs;
+    const resolvedArtifact = resolveLiveTurnAudioArtifact({
+      sessionKey: input.sessionKey,
+      audioArtifactId: turn.audioArtifactId,
+      startMs: turn.startMs,
+      endMs: turn.endMs,
+      audioArtifacts: input.audioArtifacts,
+      allowedAudioRoots: input.scoring.allowedAudioRoots,
+    });
+    let audioPath = turn.audioPath;
+    let requestStartMs: number | undefined = turn.startMs;
+    let requestEndMs: number | undefined = turn.endMs;
+    if (resolvedArtifact) {
+      audioPath = resolvedArtifact.audioPath;
+      if (resolvedArtifact.source === "store") {
+        // Registered artifact carries a segment-relative window; keep the prior
+        // coalescing so this path is byte-for-byte unchanged.
+        requestStartMs = resolvedArtifact.requestStartMs ?? turn.startMs;
+        requestEndMs = resolvedArtifact.requestEndMs ?? turn.endMs;
+      } else {
+        // Segmented live resolution computed a SEGMENT-RELATIVE (padded) window.
+        // It must be passed through verbatim: leaving it undefined would let the
+        // queue's `?? turn.startMs` fallback re-slice the 3s segment file by
+        // FULL-RECORDING offsets — beyond the file for every segment after the
+        // first, yielding empty audio ("segment too short" from the sidecar).
+        requestStartMs = resolvedArtifact.requestStartMs;
+        requestEndMs = resolvedArtifact.requestEndMs;
+      }
+    }
     // A turn is scored from its client-supplied embedding ONLY when the gateway
     // is explicitly opted in AND the turn actually carries one. Otherwise the
     // client vector is ignored for direct scoring and the turn keeps the audio
@@ -4432,6 +4495,250 @@ function resolveAllowedAudioPath(
     "FORBIDDEN",
     "Voiceprint audioPath is outside the configured audio roots.",
   );
+}
+
+/**
+ * Two-tier resolution of a live turn's audio to an on-disk WAV path.
+ *
+ * Tier 1 — the {@link VoiceprintAudioArtifactStore}, populated ONLY by the
+ * explicit `identity.voiceprint.audio_artifact.register` RPC (enrollment, and
+ * any client that registers). A registered artifact carries the SEGMENT-RELATIVE
+ * request window (`requestStartMs`/`requestEndMs`) computed at registration time,
+ * so the caller slices the WAV to the turn's sub-window exactly as before.
+ *
+ * Tier 2 (gateway-autonomous) — the live realtime path NEVER calls that RPC. iOS
+ * streams `media.chunk.upload` segments whose `media_id` EQUALS the turn's
+ * `audioArtifactId` (the WAV filename base, e.g. `live-<ts>.segNNN.mic`) and
+ * lands them under an allowed root. Without this tier the store stays empty for
+ * live sessions, every finalized turn resolves to nothing, and the auto-scorer
+ * skips it ("audio never resolved") — so nothing is ever recognized. Here we
+ * resolve the self-recorded segment directly. Each segment is a whole ~3s
+ * VAD-aligned chunk that IS the turn's audio, so it is scored WHOLE
+ * (`requestStartMs`/`requestEndMs` stay undefined): the turn's startMs/endMs are
+ * offsets into the FULL recording, not this segment, and must NOT slice it.
+ *
+ * A not-yet-finalized / missing / ambiguous segment throws inside
+ * {@link resolveVoiceprintMediaArtifactPath}; that (and a non-media-id
+ * audioArtifactId, which fails the id regex) is caught and returned as
+ * `undefined` — "not ready", so the auto-scorer retries and the score path skips
+ * fail-safe rather than scoring a guess.
+ */
+function resolveLiveTurnAudioArtifact(input: {
+  sessionKey: string;
+  audioArtifactId: string | undefined;
+  startMs?: number;
+  endMs?: number;
+  audioArtifacts: VoiceprintAudioArtifactStore;
+  allowedAudioRoots?: readonly string[];
+}):
+  | { audioPath: string; sampleRate?: number; requestStartMs?: number; requestEndMs?: number; source: "store" | "segment" }
+  | undefined {
+  const audioArtifactId = input.audioArtifactId?.trim();
+  if (!audioArtifactId) {
+    return undefined;
+  }
+  const registered = input.audioArtifacts.resolve({
+    sessionKey: input.sessionKey,
+    audioArtifactId,
+    startMs: input.startMs,
+    endMs: input.endMs,
+  });
+  if (registered) {
+    return {
+      audioPath: registered.audioPath,
+      sampleRate: registered.sampleRate,
+      requestStartMs: registered.requestStartMs,
+      requestEndMs: registered.requestEndMs,
+      source: "store",
+    };
+  }
+  if (!input.allowedAudioRoots?.length) {
+    return undefined;
+  }
+  // iOS suffixes its recording base id with the turn join id
+  // (`<recordingBase>:<transcriptItemId|speechWindowId>`, see LiveSessionStore
+  // voiceprintAudioArtifactEvent). Only the prefix before the first `:` names
+  // media; `:` is not a legal media-id character, so the joined id can never
+  // collide with a real media id.
+  const mediaId = audioArtifactId.split(":", 1)[0]!;
+  try {
+    const resolved = resolveVoiceprintMediaArtifactPath({
+      mediaId,
+      allowedAudioRoots: input.allowedAudioRoots,
+    });
+    return { audioPath: resolved.audioPath, sampleRate: resolved.sampleRate, source: "segment" };
+  } catch {
+    // Fall through to segmented resolution below.
+  }
+  // The recording base is not a file: live ingest lands as sequential segments
+  // (`<base>.segNNN.mic.wav`) under the media root while the phone's single
+  // local WAV keeps the bare base name. The turn's startMs/endMs are
+  // recording-aligned (stamped from the recording sink's audio offset), so map
+  // the window onto the cumulative segment timeline and slice the best segment.
+  const segmented = resolveVoiceprintSegmentedMediaArtifact({
+    recordingBaseId: mediaId,
+    startMs: input.startMs,
+    endMs: input.endMs,
+    allowedAudioRoots: input.allowedAudioRoots,
+  });
+  if (segmented) {
+    return { ...segmented, source: "segment" };
+  }
+  return undefined;
+}
+
+const VOICEPRINT_SEGMENT_SUFFIX_REGEX = /^\.seg(\d{1,6})\.mic$/;
+
+/**
+ * Map a recording-aligned turn window onto the finalized live segments of a
+ * recording (`<base>.segNNN.mic.wav` + sidecars) and pick the segment with the
+ * largest overlap, returning a segment-relative slice window.
+ *
+ * Returns `undefined` ("not ready yet") — so the auto-scorer retries and the
+ * score path skips fail-safe — when the segment containing the END of the turn
+ * has not been finalized: segments finalize on a short cadence, and scoring a
+ * still-open window would silently truncate the turn audio. Segment start
+ * offsets come from the cumulative sidecar `duration_ms` of the PRIOR segments
+ * (contiguous from seg 0, the media writer's invariant); a gap in the segment
+ * sequence aborts resolution rather than guessing offsets.
+ */
+function resolveVoiceprintSegmentedMediaArtifact(input: {
+  recordingBaseId: string;
+  startMs?: number;
+  endMs?: number;
+  allowedAudioRoots: readonly string[];
+}): { audioPath: string; sampleRate?: number; requestStartMs?: number; requestEndMs?: number } | undefined {
+  if (!VOICEPRINT_MEDIA_ID_REGEX.test(input.recordingBaseId)) {
+    return undefined;
+  }
+  const startMs = input.startMs;
+  const endMs = input.endMs;
+  if (
+    startMs === undefined || endMs === undefined ||
+    !Number.isFinite(startMs) || !Number.isFinite(endMs) ||
+    startMs < 0 || endMs <= startMs
+  ) {
+    return undefined;
+  }
+
+  // Collect finalized audio segments of this recording across the allowed roots
+  // (root + one directory level, same layout resolveVoiceprintMediaArtifactPath
+  // scans). Segment index -> {path, durationMs, sampleRate}.
+  const prefix = `${input.recordingBaseId}`;
+  const segments = new Map<number, { audioPath: string; durationMs: number; sampleRate?: number }>();
+  for (const root of input.allowedAudioRoots) {
+    const dirs = [resolve(root)];
+    try {
+      for (const entry of readdirSync(resolve(root), { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          dirs.push(join(resolve(root), entry.name));
+        }
+      }
+    } catch {
+      continue;
+    }
+    for (const dir of dirs) {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!name.startsWith(prefix) || !name.endsWith(".wav")) {
+          continue;
+        }
+        const suffix = name.slice(prefix.length, -".wav".length);
+        const match = VOICEPRINT_SEGMENT_SUFFIX_REGEX.exec(suffix);
+        if (!match) {
+          continue;
+        }
+        const index = Number.parseInt(match[1]!, 10);
+        const audioPath = join(dir, name);
+        const sidecarPath = join(dir, `${name.slice(0, -".wav".length)}.json`);
+        if (!existsSync(sidecarPath)) {
+          continue;
+        }
+        let sidecar: ReturnType<typeof readVoiceprintMediaSidecar>;
+        try {
+          sidecar = readVoiceprintMediaSidecar(sidecarPath);
+        } catch {
+          continue;
+        }
+        // Only FINALIZED audio segments participate; an open segment's duration
+        // is still growing and would corrupt the cumulative timeline.
+        if (!sidecar.final_iso) {
+          continue;
+        }
+        if (typeof sidecar.mime === "string" && !sidecar.mime.startsWith("audio/")) {
+          continue;
+        }
+        const durationMs = typeof sidecar.duration_ms === "number" && Number.isFinite(sidecar.duration_ms)
+          ? sidecar.duration_ms
+          : undefined;
+        if (durationMs === undefined || durationMs <= 0) {
+          continue;
+        }
+        if (segments.has(index)) {
+          // Same segment index in two allowed roots — ambiguous, refuse to guess.
+          return undefined;
+        }
+        segments.set(index, {
+          audioPath,
+          durationMs,
+          sampleRate: sampleRateFromMime(sidecar.mime),
+        });
+      }
+    }
+  }
+  if (segments.size === 0) {
+    return undefined;
+  }
+
+  // Build the cumulative timeline from seg 0; stop at the first gap.
+  let best: { audioPath: string; sampleRate?: number; requestStartMs: number; requestEndMs: number; overlapMs: number } | undefined;
+  let offsetMs = 0;
+  let turnEndCovered = false;
+  for (let index = 0; segments.has(index); index += 1) {
+    const segment = segments.get(index)!;
+    const segStart = offsetMs;
+    const segEnd = offsetMs + segment.durationMs;
+    offsetMs = segEnd;
+    const overlapStart = Math.max(startMs, segStart);
+    const overlapEnd = Math.min(endMs, segEnd);
+    if (overlapEnd <= overlapStart) {
+      continue;
+    }
+    if (endMs <= segEnd) {
+      turnEndCovered = true;
+    }
+    const overlapMs = overlapEnd - overlapStart;
+    if (!best || overlapMs > best.overlapMs) {
+      best = {
+        audioPath: segment.audioPath,
+        sampleRate: segment.sampleRate,
+        requestStartMs: overlapStart - segStart,
+        requestEndMs: overlapEnd - segStart,
+        overlapMs,
+      };
+    }
+  }
+  // The tail of the turn is in a segment that has not finalized (or not
+  // uploaded) yet — report "not ready" so the caller's retry loop waits for it
+  // instead of scoring a truncated window.
+  if (!best || !turnEndCovered) {
+    return undefined;
+  }
+  // Return the EXACT overlap window. The speaker model embeds windows well
+  // under a second (measured to 200ms), and padding the window with adjacent
+  // audio measurably DILUTES the embedding (silence / assistant echo pull the
+  // cosine below the owner threshold), so no minimum-length padding is applied.
+  return {
+    audioPath: best.audioPath,
+    sampleRate: best.sampleRate,
+    requestStartMs: best.requestStartMs,
+    requestEndMs: best.requestEndMs,
+  };
 }
 
 function resolveVoiceprintMediaArtifactPath(input: {
