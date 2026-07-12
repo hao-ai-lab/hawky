@@ -39,6 +39,9 @@ struct OwnerEnrollmentView: View {
         Form {
             Section {
                 header
+                if let enrolled = model.existingEnrollment, enrolled.enrolled {
+                    existingEnrollmentBanner(enrolled)
+                }
                 nextStepBanner
             }
             .settingsSectionSurfaceCompat()
@@ -60,6 +63,53 @@ struct OwnerEnrollmentView: View {
         .onAppear {
             noGateway = store.voiceprintEnrollmentGateway() == nil
         }
+        .task {
+            // Query existing enrollment once on appear so the UI can show an
+            // "already enrolled" summary instead of always the first-time flow.
+            await model.loadEnrollmentStatus()
+        }
+    }
+
+    /// Summary shown when an owner template already exists: re-recording is a
+    /// REPLACEMENT, so this frames the flow as "already set up — re-record to
+    /// update" rather than a blank first-time enrollment.
+    private func existingEnrollmentBanner(_ status: LiveVoiceprintOwnerTemplateStatus) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Your voice is already enrolled")
+                    .font(DesignTokens.Font.rowTitle)
+                Text(Self.enrolledSummary(status))
+                    .font(DesignTokens.Font.rowDetail)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Recording again replaces your current voice template.")
+                    .font(DesignTokens.Font.rowDetail)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+    }
+
+    /// One-line "enrolled <date> · <seconds>s · <quality>" summary from the
+    /// gateway's scalar status. Missing fields are simply omitted.
+    static func enrolledSummary(_ status: LiveVoiceprintOwnerTemplateStatus) -> String {
+        var parts: [String] = []
+        if let iso = status.enrolledAt, let date = ISO8601DateFormatter().date(from: iso) {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .none
+            parts.append("Enrolled \(formatter.string(from: date))")
+        }
+        if let speechMs = status.speechMs, speechMs > 0 {
+            parts.append("\(Int((speechMs / 1000).rounded()))s of speech")
+        }
+        if let quality = status.quality, !quality.isEmpty {
+            parts.append("\(quality) quality")
+        }
+        return parts.isEmpty ? "Set up and encrypted on your machine." : parts.joined(separator: " · ")
     }
 
     private var header: some View {

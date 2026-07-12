@@ -245,6 +245,48 @@ describe("voiceprint enrollment lifecycle", () => {
     expect(existsSync(scoring.ownerTemplateFileSource!.filePath)).toBe(false);
   });
 
+  test("owner_template_status reports not-enrolled before and enrolled metadata after (no biometric leak)", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-status-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:voiceprint-enroll-status" };
+
+    const before = await server.call("identity.voiceprint.owner_template_status", conn, {});
+    expect(before).toMatchObject({ ok: true, enrolled: false });
+
+    const clip = writeGoodWav(dir, "clip.wav");
+    await server.call("identity.voiceprint.enroll_owner", conn, {
+      sources: [{ audioPath: clip, startMs: 0, endMs: 40000 }],
+      consent,
+    });
+
+    const after = await server.call("identity.voiceprint.owner_template_status", conn, {});
+    expect(after.enrolled).toBe(true);
+    expect(after.templateRef).toBeTruthy();
+    expect(after.enrolledAt).toBeTruthy();
+    expect(after.sourceCount).toBe(1);
+    expect(typeof after.speechMs).toBe("number");
+    expect(after.embeddingDim).toBeGreaterThan(0);
+    // Scalar metadata only — never the centroid/embeddings.
+    expect(JSON.stringify(after)).not.toContain("centroid");
+    expect(JSON.stringify(after)).not.toContain("\"embedding\"");
+
+    // After deletion it reports not-enrolled again.
+    await server.call("identity.voiceprint.delete_owner_template", conn, {});
+    const afterDelete = await server.call("identity.voiceprint.owner_template_status", conn, {});
+    expect(afterDelete.enrolled).toBe(false);
+  });
+
+  test("owner_template_status is not-enrolled (never throws) when enrollment is unconfigured", async () => {
+    const server = makeMockServer();
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, undefined);
+    const status = await server.call("identity.voiceprint.owner_template_status", { sessionKey: "live:x" }, {});
+    expect(status).toMatchObject({ ok: true, enrolled: false });
+  });
+
   test("add_enrollment_clip grows the template and keeps the owner match", async () => {
     const server = makeMockServer();
     const storage = createInMemoryVoiceprintStorage();

@@ -311,6 +311,45 @@ struct LiveVoiceprintAudioArtifactRegistration: Equatable {
     }
 }
 
+/// Result of `identity.voiceprint.owner_template_status`. Scalar metadata only —
+/// the server never returns biometric material. `enrolled == false` covers
+/// "no template", "deleted", and "enrollment unconfigured" alike.
+struct LiveVoiceprintOwnerTemplateStatus: Equatable {
+    var enrolled: Bool
+    var templateRef: String?
+    var enrolledAt: String?
+    var speechMs: Double?
+    var sourceCount: Int?
+    var quality: String?
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        if case let .some(.bool(enrolled)) = root["enrolled"] {
+            self.enrolled = enrolled
+        } else {
+            self.enrolled = false
+        }
+        self.templateRef = Self.optionalString(root["templateRef"])
+        self.enrolledAt = Self.optionalString(root["enrolledAt"])
+        self.quality = Self.optionalString(root["quality"])
+        if case let .some(.number(speech)) = root["speechMs"] {
+            self.speechMs = speech
+        } else {
+            self.speechMs = nil
+        }
+        if case let .some(.number(count)) = root["sourceCount"] {
+            self.sourceCount = Int(count)
+        } else {
+            self.sourceCount = nil
+        }
+    }
+
+    private static func optionalString(_ value: JSONValue?) -> String? {
+        if case let .some(.string(text)) = value, !text.isEmpty { return text }
+        return nil
+    }
+}
+
 /// Result of `identity.voiceprint.enroll_owner` / `add_enrollment_clip` (B3). The
 /// server returns a status ("accepted" on success; "rejected" / "reembedded" /
 /// "needs_reenrollment" otherwise) plus `sourceCount` and the voiced `speechMs`.
@@ -1277,6 +1316,23 @@ actor LiveGatewayBridge {
             timeoutSeconds: timeoutSeconds
         )
         return LiveVoiceprintEnrollmentResult(payload: payload)
+    }
+
+    /// Query whether an owner voiceprint template is already enrolled + its
+    /// scalar metadata (never the biometric material). Drives the enrollment
+    /// UI's "already enrolled" state. Returns nil only on transport failure; an
+    /// unconfigured / unenrolled gateway returns a parsed `.notEnrolled`.
+    func fetchOwnerTemplateStatus(
+        sessionKey: String,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> LiveVoiceprintOwnerTemplateStatus? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.owner_template_status",
+            params: ["sessionKey": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintOwnerTemplateStatus(payload: payload)
     }
 
     /// Append one more source to an existing owner template ("add another clip").
