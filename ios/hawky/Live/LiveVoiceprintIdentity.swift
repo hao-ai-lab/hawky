@@ -164,15 +164,26 @@ struct LiveVoiceprintIdentityMachine: Equatable {
     /// verdicts; provisional/unknown reach here only on a FLIP AWAY from a hard
     /// verdict (identity lost), for which we tell the model the speaker is no longer
     /// confirmed.
+    /// The wording matters twice over (A/B-verified on gpt-realtime-2):
+    /// 1. OpenAI realtime models are trained to DISCLAIM voice recognition, so a
+    ///    bare fact ("the speaker is the owner") loses to that prior when the
+    ///    user asks "can you recognize my voice?". The injection must attribute
+    ///    the verification to Hawky's voiceprint system — the app did it, not
+    ///    the model — and tell the model to rely on it.
+    /// 2. Over-attributing reads like an engineering demo: without the "don't
+    ///    explain the mechanism" clause the model recites "Hawky's voiceprint
+    ///    system verified..." on every identity question. The natural target is
+    ///    a familiar-person response ("Yep — I know I'm talking to you"), with
+    ///    the mechanism explained only when the user asks HOW it knows.
     static func injectionText(for verdict: LiveVoiceprintVerdict) -> String {
         switch verdict {
         case .ownerPresent:
-            return "The current speaker has been identified as the device owner."
+            return "Hawky's voiceprint system verified the current speaker's voice: they are the device owner (the app verified this, not you). Just know who you're talking to — treat and address them as the owner naturally, like a familiar person. If they ask whether you know who they are, confirm briefly and warmly; do NOT explain the verification mechanism or mention the voiceprint system unless they specifically ask HOW you know."
         case .notOwner:
-            return "The current speaker has been identified as an unknown speaker (not the device owner)."
+            return "Hawky's voiceprint system checked the current speaker's voice: it does NOT match the device owner, so treat them as a guest — naturally, without announcing it or mentioning the verification unless they ask how you know. Do not assume they are the owner."
         default:
             // Identity flipped away from a hard verdict back to provisional/unknown.
-            return "The current speaker's identity is no longer confirmed."
+            return "Hawky's voiceprint system can no longer confirm the current speaker's identity; quietly treat it as unverified until Hawky confirms again — no need to mention this unless asked."
         }
     }
 
