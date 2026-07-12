@@ -3,21 +3,26 @@ import SwiftUI
 // =============================================================================
 // OwnerEnrollmentView — B3 owner voiceprint enrollment UI (thin SwiftUI shell).
 //
-// Guided prompts + a record/stop control + a live "enough speech" indicator + an
-// explicit biometric-consent toggle + a submit button. All logic lives in
+// Enrollment runs a SILENT live listening session (LiveSessionStore.
+// startEnrollmentListeningSession): Hawky listens through the SAME live WebRTC
+// pipeline recognition scores — a standalone recorder is acoustically orthogonal
+// to that domain (docs/voiceprint-architecture.md, "capture-domain mismatch") —
+// and the gateway then builds the owner template from the recording's uploaded
+// segments via enroll_owner_from_recording. All logic lives in
 // OwnerEnrollmentModel; this view only renders state and forwards user actions.
 //
 // FAIL-CLOSED: the Enroll button is disabled until the user grants biometric +
-// capture consent AND enough voiced speech is recorded. Enrolling here sets up the
-// owner template only — it does NOT enable live voiceprint scoring (that stays a
-// separate, still-off switch), and reaching this screen never flips any flag.
+// capture consent AND enough voiced speech was captured. Enrolling here sets up
+// the owner template only — it does NOT enable live voiceprint scoring (that
+// stays a separate, still-off switch), and reaching this screen never flips any
+// flag.
 // =============================================================================
 
 struct OwnerEnrollmentView: View {
     let store: LiveSessionStore
 
+    @Environment(AppContainer.self) private var container
     @StateObject private var model: OwnerEnrollmentModel
-    @State private var recorder = OwnerEnrollmentRecorder()
     @State private var noGateway = false
 
     init(store: LiveSessionStore) {
@@ -49,7 +54,7 @@ struct OwnerEnrollmentView: View {
             guidedPromptsSection
                 .settingsSectionSurfaceCompat()
 
-            recordingSection
+            listeningSection
                 .settingsSectionSurfaceCompat()
 
             consentSection
@@ -62,6 +67,14 @@ struct OwnerEnrollmentView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             noGateway = store.voiceprintEnrollmentGateway() == nil
+        }
+        .onDisappear {
+            // Leaving the screen must not leave a silent live session (and its
+            // mic + upload) running in the background. The captured recording
+            // stays enrollable if the user comes back.
+            if model.isListening {
+                Task { await model.stopListening(store: store) }
+            }
         }
         .task {
             // Query existing enrollment once on appear so the UI can show an
@@ -84,7 +97,7 @@ struct OwnerEnrollmentView: View {
                     .font(DesignTokens.Font.rowDetail)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Recording again replaces your current voice template.")
+                Text("Enrolling again replaces your current voice template.")
                     .font(DesignTokens.Font.rowDetail)
                     .foregroundStyle(.secondary)
             }
@@ -116,7 +129,7 @@ struct OwnerEnrollmentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Set up your owner voice")
                 .font(DesignTokens.Font.panelTitle)
-            Text("Record a short sample of your own voice so Hawky can recognize when you are the one speaking. Your voice template is encrypted and stays on your machine.")
+            Text("Hawky listens silently through a short live session while you talk, so it can recognize when you are the one speaking. Your voice template is encrypted and stays on your machine.")
                 .font(DesignTokens.Font.rowDetail)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -138,20 +151,20 @@ struct OwnerEnrollmentView: View {
         } header: {
             Text("Say a few sentences")
         } footer: {
-            Text("Speak naturally for a little over 30 seconds. You can read these lines or just talk about your day.")
+            Text("Talk naturally the whole time — read these lines, or just talk about your day.")
         }
     }
 
-    private var recordingSection: some View {
+    private var listeningSection: some View {
         Section {
             Button {
-                Task { await toggleRecording() }
+                Task { await toggleListening() }
             } label: {
                 HStack {
-                    Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic.circle.fill")
-                    Text(recorder.isRecording ? "Stop recording" : "Record a sample")
+                    Image(systemName: model.isListening ? "stop.circle.fill" : "ear")
+                    Text(model.isListening ? "Stop listening" : "Start listening")
                     Spacer()
-                    if recorder.isRecording {
+                    if model.isListening {
                         ProgressView()
                     }
                 }
@@ -159,16 +172,13 @@ struct OwnerEnrollmentView: View {
             }
             .primaryPanelActionCompat()
             .disabled(isSubmitting)
-            .accessibilityIdentifier("voiceprint.enroll.record")
+            .accessibilityIdentifier("voiceprint.enroll.listen")
 
             speechIndicator
 
-            if !model.sources.isEmpty {
-                LabeledContent("Clips recorded", value: "\(model.sources.count)")
-                    .font(DesignTokens.Font.rowDetail)
-
+            if model.capturedRecordingBaseId != nil, !model.isListening {
                 Button(role: .destructive) {
-                    Task { await startOver() }
+                    model.reset()
                 } label: {
                     Label("Start over", systemImage: "arrow.counterclockwise")
                         .frame(maxWidth: .infinity)
@@ -176,32 +186,30 @@ struct OwnerEnrollmentView: View {
                 .disabled(isSubmitting)
                 .accessibilityIdentifier("voiceprint.enroll.startOver")
 
-                Text("Not happy with the recording? Start over to clear these clips and record again.")
+                Text("Not happy with the take? Start over to discard it and listen again.")
                     .font(DesignTokens.Font.meta)
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("Recording")
+            Text("Listening")
         } footer: {
-            Text(speechFooter)
+            Text(listeningFooter)
         }
     }
 
+    /// Live progress line: "Xs / 30s of speech" against the server's voiced
+    /// floor. Climbs in real time from the model's main-actor timer while
+    /// listening (wall clock × the ~0.74 voiced fraction); frozen after stop.
     private var speechIndicator: some View {
-        // While recording, add a live estimate of the in-progress clip's voiced speech
-        // (elapsed * the same ~0.74 voiced fraction) on top of the committed total so
-        // the counter climbs in real time. On stop the final value is committed to the
-        // model (per the decoupled-display path) and this live term drops to 0.
-        let liveVoicedMs = recorder.isRecording
-            ? recorder.elapsedMs * OwnerEnrollmentRecorder.voicedFraction
-            : 0
-        let displayedMs = model.totalVoicedMs + liveVoicedMs
-        let seconds = Int((displayedMs / 1000).rounded())
-        let enough = displayedMs >= model.voicedFloorMs
+        let seconds = Int((model.listeningVoicedMs / 1000).rounded())
+        let floorSeconds = Int(OwnerEnrollmentModel.serverVoicedFloorMs / 1000)
+        let enough = model.hasEnoughListeningSpeech
         return HStack(spacing: 8) {
             Image(systemName: enough ? "checkmark.circle.fill" : "waveform")
                 .foregroundStyle(enough ? DesignTokens.Status.success : .secondary)
-            Text(enough ? "Enough speech captured (\(seconds)s)" : "Voiced speech: \(seconds)s")
+            Text(enough
+                ? "Enough speech captured (\(seconds)s)"
+                : "\(seconds)s / \(floorSeconds)s of speech")
                 .font(DesignTokens.Font.rowDetail)
             Spacer()
         }
@@ -238,7 +246,7 @@ struct OwnerEnrollmentView: View {
     private var submitSection: some View {
         Section {
             Button {
-                Task { await model.submit() }
+                Task { await model.submitFromRecording() }
             } label: {
                 HStack {
                     Text("Enroll my voice")
@@ -264,13 +272,15 @@ struct OwnerEnrollmentView: View {
                 .font(DesignTokens.Font.meta)
                 .foregroundStyle(.secondary)
         case .tooShort:
-            let remaining = Int((model.remainingVoicedMs / 1000).rounded())
-            Text("Record a bit more — about \(remaining)s of extra speech is needed.")
+            // Prefer the server's exact shortfall (from a not_enough_speech
+            // rejection) over the client wall-clock estimate — the model exposes
+            // both through keepTalkingSeconds.
+            Text("Keep talking about \(model.keepTalkingSeconds) more seconds — start another listening session and talk a bit longer.")
                 .font(DesignTokens.Font.meta)
                 .foregroundStyle(DesignTokens.Status.warning)
                 .accessibilityIdentifier("voiceprint.enroll.tooShort")
         case .enrolled(let result):
-            Text("Enrolled from \(result.sourceCount ?? model.sources.count) clip(s). Your voice is set up.")
+            Text("Enrolled from \(Int(((result.speechMs ?? 0) / 1000).rounded()))s of your speech. Your voice is set up.")
                 .font(DesignTokens.Font.meta)
                 .foregroundStyle(DesignTokens.Status.success)
                 .accessibilityIdentifier("voiceprint.enroll.enrolled")
@@ -280,13 +290,7 @@ struct OwnerEnrollmentView: View {
                 .foregroundStyle(DesignTokens.Status.error)
                 .accessibilityIdentifier("voiceprint.enroll.failed")
         default:
-            if model.hasPendingUploads {
-                // Enroll is disabled while a clip is still uploading; tell the user why.
-                Label("Finishing upload…", systemImage: "arrow.up.circle")
-                    .font(DesignTokens.Font.meta)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("voiceprint.enroll.uploading")
-            } else if noGateway {
+            if noGateway {
                 Text("Hawky gateway is not reachable — connect first to enroll.")
                     .font(DesignTokens.Font.meta)
                     .foregroundStyle(.secondary)
@@ -302,21 +306,18 @@ struct OwnerEnrollmentView: View {
     }
 
     private var canSubmit: Bool {
-        !model.sources.isEmpty
-            && model.consent.satisfiesGate
-            && model.hasEnoughSpeech
-            && !isSubmitting
-            && !recorder.isRecording
-            && !model.hasPendingUploads
+        model.canSubmitFromRecording && !isSubmitting
     }
 
     /// The single most-important next action, driven by state, so the user is always
     /// led to the next step instead of guessing. nil once enrolled.
     private var nextStepText: String? {
         if case .enrolled = model.state { return nil }
-        if model.hasPendingUploads { return "Finishing upload — one moment…" }
-        if !model.hasEnoughSpeech {
-            return "Step 1 — tap Record a sample and speak for a little over 30 seconds."
+        if model.isListening {
+            return "Keep talking — Hawky is listening silently."
+        }
+        if !model.hasEnoughListeningSpeech || model.capturedRecordingBaseId == nil {
+            return "Step 1 — tap Start listening and talk for about 40 seconds."
         }
         if !model.consent.satisfiesGate {
             return "Step 2 — turn on biometric consent below."
@@ -338,76 +339,31 @@ struct OwnerEnrollmentView: View {
         }
     }
 
-    private var speechFooter: String {
-        if model.hasEnoughSpeech {
+    private var listeningFooter: String {
+        if model.isListening {
+            return "Hawky is listening silently — it won't speak or respond. Keep talking until the counter fills."
+        }
+        if model.capturedRecordingBaseId != nil, model.hasEnoughListeningSpeech {
             return "You have enough speech. Grant consent below, then enroll."
         }
-        let remaining = Int((model.remainingVoicedMs / 1000).rounded())
-        return "Keep recording — about \(remaining)s more of voiced speech is needed."
+        return "Hawky will listen silently for about 40 seconds while you talk. Do this alone in a quiet place — it should only hear your voice."
     }
 
-    // MARK: - Recording action
+    // MARK: - Listening action
 
-    /// Discard all captured clips and re-record from scratch WITHOUT leaving the
-    /// screen. Stops any in-progress recording first (its clip is dropped, not
-    /// enrolled), then clears the model; the biometric consent toggle is kept. Any
-    /// in-flight background upload is orphaned safely (its callback no-ops on the
-    /// cleared source).
-    private func startOver() async {
-        if recorder.isRecording {
-            _ = await recorder.stop()
-        }
-        model.reset()
-    }
-
-    private func toggleRecording() async {
-        if recorder.isRecording {
-            // Decouple display from upload: stop() returns immediately with a local
-            // source (voiced count computed on-device), so the counter + consent gate
-            // update at once. The upload+register then runs in the BACKGROUND and
-            // upgrades the source to artifact-backed. Enroll is gated on the source's
-            // pending upload state until that finishes (see canSubmit / submit()).
-            guard let outcome = await recorder.stop() else {
-                model.refreshGateState()
-                return
-            }
-            guard let artifact = outcome.artifact else {
-                // WAV could not be finalized — nothing to enroll from.
-                model.refreshGateState()
-                return
-            }
-
-            let localSource = outcome.localSource
-            model.addRecordedSource(localSource, uploadState: .pending)
-
-            // Background upgrade: local-path -> artifact-backed. On success upgrade the
-            // same source; on failure keep the local-path fallback (marked failed so
-            // Enroll is no longer blocked waiting on it).
-            Task {
-                if let upgraded = await recorder.upload(
-                    artifact: artifact,
-                    sourceID: localSource.id,
-                    voicedMs: localSource.voicedMs,
-                    store: store
-                ) {
-                    model.markSourceUploaded(id: localSource.id, upgraded: upgraded)
-                } else {
-                    model.markSourceUploadFailed(id: localSource.id)
-                }
-            }
+    private func toggleListening() async {
+        if model.isListening {
+            await model.stopListening(store: store)
         } else {
-            model.beginRecording()
-            let result = await recorder.start(store: store)
-            switch result {
-            case .started:
-                break
-            case .permissionDenied:
-                model.recordingFailed(
-                    "Microphone access is off. Enable it in Settings to record your voice."
-                )
-            case .failed:
-                model.recordingFailed("Could not start recording. Please try again.")
-            }
+            // The recording's segments upload live over the app's gateway
+            // transport (the same one LiveView hands to start()). Revive it
+            // first if it went stale, so the session doesn't record into a
+            // dead socket and end in no_usable_segments.
+            try? await container.ensureConnected()
+            await model.startListening(
+                store: store,
+                recordingTransport: container.transport
+            )
         }
     }
 
@@ -420,8 +376,9 @@ struct OwnerEnrollmentView: View {
 }
 
 /// Inert gateway used only when no Hawky gateway is configured. Every call returns
-/// nil, so the model's submit path fails closed with a clear "could not reach"
-/// message rather than crashing or silently succeeding.
+/// nil (the from-recording method inherits the protocol's nil default), so the
+/// model's submit paths fail closed with a clear "could not reach" message rather
+/// than crashing or silently succeeding.
 private struct InertVoiceprintEnrollmentGateway: VoiceprintEnrollmentGateway {
     func registerVoiceprintAudioArtifact(
         sessionKey: String, audioArtifactID: String, mediaID: String,

@@ -350,9 +350,10 @@ struct LiveVoiceprintOwnerTemplateStatus: Equatable {
     }
 }
 
-/// Result of `identity.voiceprint.enroll_owner` / `add_enrollment_clip` (B3). The
-/// server returns a status ("accepted" on success; "rejected" / "reembedded" /
-/// "needs_reenrollment" otherwise) plus `sourceCount` and the voiced `speechMs`.
+/// Result of `identity.voiceprint.enroll_owner` / `add_enrollment_clip` /
+/// `enroll_owner_from_recording` (B3). The server returns a status ("accepted" on
+/// success; "rejected" / "reembedded" / "needs_reenrollment" otherwise) plus
+/// `sourceCount` and the voiced `speechMs`.
 /// `accepted` is the only success posture the client treats as enrolled.
 struct LiveVoiceprintEnrollmentResult: Equatable {
     var ok: Bool
@@ -361,6 +362,16 @@ struct LiveVoiceprintEnrollmentResult: Equatable {
     var sourceCount: Int?
     var speechMs: Double?
     var reasons: [String]
+    /// Additive counts from `enroll_owner_from_recording` only: how many uploaded
+    /// `.segNNN.mic` segments were considered / actually used / dropped by the
+    /// quality gate / dropped by the selection cap / dropped after a timeline gap.
+    /// All nil on `enroll_owner` / `add_enrollment_clip` responses (which never
+    /// carry them) and on older servers — parsing is optional so nothing breaks.
+    var segmentsConsidered: Int?
+    var segmentsUsed: Int?
+    var segmentsQualityRejected: Int?
+    var segmentsCapped: Int?
+    var segmentsAfterGap: Int?
 
     /// The server's happy path returns `status: "accepted"`. Anything else — a
     /// quality rejection, a too-short clip that slipped past the client floor — is
@@ -399,6 +410,16 @@ struct LiveVoiceprintEnrollmentResult: Equatable {
         } else {
             self.reasons = []
         }
+        self.segmentsConsidered = Self.optionalInt(root["segmentsConsidered"])
+        self.segmentsUsed = Self.optionalInt(root["segmentsUsed"])
+        self.segmentsQualityRejected = Self.optionalInt(root["segmentsQualityRejected"])
+        self.segmentsCapped = Self.optionalInt(root["segmentsCapped"])
+        self.segmentsAfterGap = Self.optionalInt(root["segmentsAfterGap"])
+    }
+
+    private static func optionalInt(_ value: JSONValue?) -> Int? {
+        guard case let .some(.number(number)) = value else { return nil }
+        return Int(number)
     }
 }
 
@@ -1311,6 +1332,30 @@ actor LiveGatewayBridge {
     ) async -> LiveVoiceprintEnrollmentResult? {
         let payload = await invokeMethod(
             "identity.voiceprint.enroll_owner",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEnrollmentResult(payload: payload)
+    }
+
+    /// Enroll the OWNER voiceprint template from a live listening session's
+    /// already-uploaded recording segments (`<recordingBaseId>.segNNN.mic`).
+    /// WHY this path exists: enrollment must capture through the SAME live
+    /// WebRTC pipeline recognition scores — a standalone-recorder template is
+    /// acoustically orthogonal to the recognition domain (see
+    /// docs/voiceprint-architecture.md, "capture-domain mismatch"). `params`
+    /// MUST be built by
+    /// `LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams` so the
+    /// wire keys (`recordingBaseId`, `consent`, `minSpeechMs`) match the server
+    /// parser exactly. Returns nil on transport failure.
+    func enrollVoiceprintOwnerFromRecording(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval = 60
+    ) async -> LiveVoiceprintEnrollmentResult? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.enroll_owner_from_recording",
             params: params,
             sessionKey: sessionKey,
             timeoutSeconds: timeoutSeconds
