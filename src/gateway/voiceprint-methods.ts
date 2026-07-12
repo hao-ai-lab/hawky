@@ -149,6 +149,7 @@ import {
 import {
   deleteOwnerTemplate,
   embedEnrollmentSources,
+  selectEnrollmentSegmentsFromRecording,
   readOwnerTemplateArtifactForEnrollment,
   writeOwnerTemplateFromSources,
 } from "./voiceprint-enrollment.js";
@@ -751,14 +752,24 @@ export function registerVoiceprintMethods(
   // longer be decrypted. The raw key and every embedding are treated as secrets:
   // they are never logged and never echoed in RPC responses.
 
-  server.registerMethod("identity.voiceprint.enroll_owner", async (conn, params) => {
-    const input = parseEnrollOwnerParams(params);
-    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
-    const config = requireEnrollmentScoringConfig(scoring);
-    // Consult the PERSISTED consent ledger (restrict-only) when enforcement is on.
-    // When off/inert (default), this returns the config+inline consent unchanged.
-    assertEnrollmentConsentAudited(config, input.consent, lifecycle, sessionKey);
-
+  /**
+   * The SHARED owner-enrollment flow: embed sources -> assess -> store the
+   * encrypted template, with identical log/audit/serialize handling. Both
+   * `enroll_owner` (explicit clips) and `enroll_owner_from_recording`
+   * (live-session segments) run through this seam so quality gates, the voiced
+   * floor, biometric-minimizing responses, and audit posture cannot drift
+   * between the two entry points. `extraResponseFields` is ADDITIVE only
+   * (segment-selection stats for the recording path).
+   */
+  async function runOwnerEnrollment(input: {
+    sessionKey: string;
+    config: VoiceprintLiveScoringConfig & { ownerTemplateFileSource: VoiceprintTemplateFileSource };
+    sources: readonly EnrollmentAudioSourceInput[];
+    minSpeechMs?: number;
+    logLabel: string;
+    extraResponseFields?: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    const { sessionKey, config, logLabel } = input;
     try {
       const embedded = await embedEnrollmentSources({
         sessionKey,
@@ -771,7 +782,7 @@ export function registerVoiceprintMethods(
         minSpeechMs: input.minSpeechMs,
       });
       if (assessment.status !== "accepted") {
-        log.info("identity.voiceprint.enroll_owner", {
+        log.info(logLabel, {
           session_key: sessionKey,
           status: "rejected",
           reasons: assessment.reasons,
@@ -784,7 +795,10 @@ export function registerVoiceprintMethods(
           outcome: "rejected",
           counts: { sourceCount: assessment.sourceCount },
         });
-        return serializeEnrollmentRejection(sessionKey, assessment);
+        return {
+          ...serializeEnrollmentRejection(sessionKey, assessment),
+          ...input.extraResponseFields,
+        };
       }
 
       const stored = writeOwnerTemplateFromSources({
@@ -793,7 +807,7 @@ export function registerVoiceprintMethods(
         sources: embedded.sources,
         minSpeechMs: input.minSpeechMs,
       });
-      log.info("identity.voiceprint.enroll_owner", {
+      log.info(logLabel, {
         session_key: sessionKey,
         status: "enrolled",
         template_ref: stored.templateRef,
@@ -807,7 +821,10 @@ export function registerVoiceprintMethods(
         templateRef: stored.templateRef,
         counts: { sourceCount: assessment.sourceCount },
       });
-      return serializeEnrollmentSuccess(sessionKey, assessment, stored);
+      return {
+        ...serializeEnrollmentSuccess(sessionKey, assessment, stored),
+        ...input.extraResponseFields,
+      };
     } catch (error) {
       emitVoiceprintAudit(lifecycle, {
         subjectKey: sessionKey,
@@ -816,7 +833,104 @@ export function registerVoiceprintMethods(
       });
       throw voiceprintMethodError(error);
     }
+  }
+
+  server.registerMethod("identity.voiceprint.enroll_owner", async (conn, params) => {
+    const input = parseEnrollOwnerParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    const config = requireEnrollmentScoringConfig(scoring);
+    // Consult the PERSISTED consent ledger (restrict-only) when enforcement is on.
+    // When off/inert (default), this returns the config+inline consent unchanged.
+    assertEnrollmentConsentAudited(config, input.consent, lifecycle, sessionKey);
+    return runOwnerEnrollment({
+      sessionKey,
+      config,
+      sources: input.sources,
+      minSpeechMs: input.minSpeechMs,
+      logLabel: "identity.voiceprint.enroll_owner",
+    });
   });
+
+  // ── Enroll from a live recording (capture-domain parity) ─────────────────
+  //
+  // Builds the owner template from the finalized `.segNNN.mic` segments a live
+  // "listening session" already uploaded — the SAME capture pipeline live
+  // recognition scores, so the template's acoustic domain matches recognition
+  // BY CONSTRUCTION (see docs/voiceprint-architecture.md, "capture-domain
+  // mismatch"). Segments failing the quality gate are DROPPED (conversation
+  // audio legitimately contains silence/echo), and selection is capped; the
+  // response reports considered/used/rejected/capped counts so the client can
+  // say "keep talking N more seconds" instead of surfacing a bare rejection.
+  server.registerMethod(
+    "identity.voiceprint.enroll_owner_from_recording",
+    async (conn, params) => {
+      const input = parseEnrollOwnerFromRecordingParams(params);
+      const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+      const config = requireEnrollmentScoringConfig(scoring);
+      assertEnrollmentConsentAudited(config, input.consent, lifecycle, sessionKey);
+
+      // Only the SELECTION phase gets this catch: runOwnerEnrollment audits its
+      // own faults, so wrapping it too would double-audit the same call.
+      let selection: Awaited<ReturnType<typeof selectEnrollmentSegmentsFromRecording>>;
+      try {
+        selection = await selectEnrollmentSegmentsFromRecording({
+          recordingBaseId: input.recordingBaseId,
+          scoring: config,
+        });
+      } catch (error) {
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey: sessionKey,
+          op: "enroll",
+          outcome: "error",
+        });
+        throw voiceprintMethodError(error);
+      }
+
+      const segmentCounts = {
+        segmentsConsidered: selection.consideredCount,
+        segmentsUsed: selection.selected.length,
+        segmentsQualityRejected: selection.qualityRejectedCount,
+        segmentsCapped: selection.cappedCount,
+        segmentsAfterGap: selection.afterGapCount,
+      };
+      if (selection.selected.length === 0) {
+        // Nothing usable: report a rejection in the same shape the shared flow
+        // produces (never a bare throw at the UI), with an HONEST reason — a
+        // broken segment timeline is not a quality problem.
+        const reasons =
+          selection.qualityRejectedCount > 0 ? ["quality_rejected"] : ["no_usable_segments"];
+        log.info("identity.voiceprint.enroll_owner_from_recording", {
+          session_key: sessionKey,
+          status: "rejected",
+          reasons,
+          ...segmentCounts,
+        });
+        emitVoiceprintAudit(lifecycle, {
+          subjectKey: sessionKey,
+          op: "enroll",
+          outcome: "rejected",
+          counts: { sourceCount: 0 },
+        });
+        return {
+          ok: false,
+          sessionKey,
+          status: "rejected",
+          reasons,
+          speechMs: 0,
+          sourceCount: 0,
+          ...segmentCounts,
+        };
+      }
+      return runOwnerEnrollment({
+        sessionKey,
+        config,
+        sources: selection.selected.map((segment) => ({ audioPath: segment.audioPath })),
+        minSpeechMs: input.minSpeechMs,
+        logLabel: "identity.voiceprint.enroll_owner_from_recording",
+        extraResponseFields: segmentCounts,
+      });
+    },
+  );
 
   server.registerMethod("identity.voiceprint.add_enrollment_clip", async (conn, params) => {
     const input = parseAddEnrollmentClipParams(params);
@@ -1742,6 +1856,34 @@ function parseEnrollOwnerParams(params: unknown): EnrollOwnerParams {
     consent: objectOrUndefined(p.consent) as Partial<VoiceprintConsentSnapshot> | undefined,
     minSpeechMs: clampEnrollmentMinSpeechMs(
       optionalNonNegativeFiniteNumber(p.minSpeechMs ?? p.min_speech_ms, "minSpeechMs"),
+    ),
+  };
+}
+
+interface EnrollOwnerFromRecordingParams {
+  sessionKey?: string;
+  recordingBaseId: string;
+  consent?: Partial<VoiceprintConsentSnapshot>;
+  minSpeechMs?: number;
+}
+
+function parseEnrollOwnerFromRecordingParams(params: unknown): EnrollOwnerFromRecordingParams {
+  const p = objectOrUndefined(params);
+  const recordingBaseId =
+    typeof p?.recordingBaseId === "string" ? p.recordingBaseId.trim()
+    : typeof p?.recording_base_id === "string" ? (p.recording_base_id as string).trim()
+    : "";
+  // The base id names on-disk media; the media-id regex both validates it and
+  // (no path separators / no ':') keeps it incapable of root escape.
+  if (!VOICEPRINT_MEDIA_ID_REGEX.test(recordingBaseId)) {
+    throw new MethodError("INVALID_REQUEST", "recordingBaseId must be a valid media id.");
+  }
+  return {
+    sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
+    recordingBaseId,
+    consent: objectOrUndefined(p?.consent) as Partial<VoiceprintConsentSnapshot> | undefined,
+    minSpeechMs: clampEnrollmentMinSpeechMs(
+      optionalNonNegativeFiniteNumber(p?.minSpeechMs ?? p?.min_speech_ms, "minSpeechMs"),
     ),
   };
 }

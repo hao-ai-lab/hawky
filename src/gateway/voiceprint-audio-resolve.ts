@@ -191,31 +191,24 @@ function safeRealpath(path: string): string | undefined {
  * (contiguous from seg 0, the media writer's invariant); a gap in the segment
  * sequence aborts resolution rather than guessing offsets.
  */
-function resolveVoiceprintSegmentedMediaArtifact(input: {
-  recordingBaseId: string;
-  startMs?: number;
-  endMs?: number;
-  allowedAudioRoots: readonly string[];
-}): { audioPath: string; sampleRate?: number; requestStartMs?: number; requestEndMs?: number } | undefined {
-  if (!VOICEPRINT_MEDIA_ID_REGEX.test(input.recordingBaseId)) {
+/**
+ * Collect the finalized `.segNNN.mic.wav` segments of a live recording across
+ * the allowed roots (root + one directory level), keyed by segment index.
+ * Duplicates reached via nested/overlapping roots dedupe by path/realpath; a
+ * DIFFERENT file claiming the same index is ambiguous → undefined (refuse to
+ * guess). Open (un-finalized), non-audio, and duration-less segments are
+ * excluded. Shared by turn-window resolution and enroll-from-recording.
+ */
+export function collectFinalizedVoiceprintSegments(
+  recordingBaseId: string,
+  allowedAudioRoots: readonly string[],
+): Map<number, { audioPath: string; realPath?: string; durationMs: number; sampleRate?: number }> | undefined {
+  if (!VOICEPRINT_MEDIA_ID_REGEX.test(recordingBaseId)) {
     return undefined;
   }
-  const startMs = input.startMs;
-  const endMs = input.endMs;
-  if (
-    startMs === undefined || endMs === undefined ||
-    !Number.isFinite(startMs) || !Number.isFinite(endMs) ||
-    startMs < 0 || endMs <= startMs
-  ) {
-    return undefined;
-  }
-
-  // Collect finalized audio segments of this recording across the allowed roots
-  // (root + one directory level, same layout resolveVoiceprintMediaArtifactPath
-  // scans). Segment index -> {path, durationMs, sampleRate}.
-  const prefix = `${input.recordingBaseId}`;
+  const prefix = `${recordingBaseId}`;
   const segments = new Map<number, { audioPath: string; realPath?: string; durationMs: number; sampleRate?: number }>();
-  for (const root of input.allowedAudioRoots) {
+  for (const root of allowedAudioRoots) {
     const dirs = [resolve(root)];
     try {
       for (const entry of readdirSync(resolve(root), { withFileTypes: true })) {
@@ -287,7 +280,33 @@ function resolveVoiceprintSegmentedMediaArtifact(input: {
       }
     }
   }
-  if (segments.size === 0) {
+  return segments;
+}
+
+function resolveVoiceprintSegmentedMediaArtifact(input: {
+  recordingBaseId: string;
+  startMs?: number;
+  endMs?: number;
+  allowedAudioRoots: readonly string[];
+}): { audioPath: string; sampleRate?: number; requestStartMs?: number; requestEndMs?: number } | undefined {
+  if (!VOICEPRINT_MEDIA_ID_REGEX.test(input.recordingBaseId)) {
+    return undefined;
+  }
+  const startMs = input.startMs;
+  const endMs = input.endMs;
+  if (
+    startMs === undefined || endMs === undefined ||
+    !Number.isFinite(startMs) || !Number.isFinite(endMs) ||
+    startMs < 0 || endMs <= startMs
+  ) {
+    return undefined;
+  }
+
+  const segments = collectFinalizedVoiceprintSegments(
+    input.recordingBaseId,
+    input.allowedAudioRoots,
+  );
+  if (!segments || segments.size === 0) {
     return undefined;
   }
 
