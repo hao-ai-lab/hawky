@@ -337,6 +337,8 @@ export class VoiceprintAutoScorer {
         session_key: sessionKey,
         skipped: waiting.length,
         transcript_item_ids: waiting.map((turn) => turn.transcriptItemId),
+        audio_artifact_ids: waiting.map((turn) => turn.audioArtifactId ?? null),
+        turn_windows_ms: waiting.map((turn) => [turn.startMs ?? null, turn.endMs ?? null]),
       });
     }
     return ready;

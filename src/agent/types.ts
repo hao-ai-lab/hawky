@@ -933,6 +933,17 @@ export interface HawkyConfig {
        */
       auto_score_finalized?: boolean;
       /**
+       * WS1 auto-scorer A2 evidence hysteresis. Controls how fast an owner
+       * identity establishes and broadcasts to the client. Omit for the default
+       * (flip_threshold 3). Lower flip_threshold => faster push, less anti-flap.
+       * Only relevant when `auto_score_finalized` is true.
+       */
+      evidence?: {
+        flip_threshold?: number;
+        window_size?: number;
+        stale_timeout_ms?: number;
+      };
+      /**
        * A8 replay resistance. TTL (ms) for the single-use liveness nonce a client
        * must attach to a client-supplied embedding submission (see
        * identity/voiceprint/liveness-nonce.ts). Short by design; defaults to 60s.
