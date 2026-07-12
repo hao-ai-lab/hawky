@@ -34,6 +34,16 @@ describe("classifySlackInitError", () => {
     expect(decision.message).not.toContain("@slack/bolt");
   });
 
+  test("surfaces the slack error code for platform errors (#20)", () => {
+    for (const code of ["account_inactive", "token_revoked", "invalid_auth"]) {
+      const decision = classifySlackInitError(`An API error occurred: ${code}`);
+      expect(decision.level).toBe("warn");
+      expect(decision.message).toContain(code);
+      expect(decision.message).toContain("slack channel disabled");
+      expect(decision.data?.code).toBe(code);
+    }
+  });
+
   test("falls through to warn for unrelated runtime errors", () => {
     const raw = "TypeError: foo is not a function";
     const decision = classifySlackInitError(raw);

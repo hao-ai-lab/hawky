@@ -692,11 +692,11 @@ async function main() {
             allowedUserId: slackConfig.default_dm_user,
             botPostFooter: slackConfig.bot_post_footer,
           });
-          channelRegistry.register(slackAdapter);
 
-          // Bind Slack bot DMs → configured session (default: web:general)
+          // Session binding target for Slack bot DMs (default: web:general).
+          // Registration + binding happen only after start() succeeds (below),
+          // so a dead token leaves the channel cleanly disabled (#20).
           const bindTarget = slackConfig.bind_to_session ?? "web:general";
-          sessionBindings.bind("slack", "*", bindTarget);
 
           // Inbound debouncer: coalesce rapid Slack messages into one agent turn
           const debouncer = createInboundDebouncer({
@@ -748,7 +748,12 @@ async function main() {
           // silently drop inbound messages on restart.
           channelShutdownHooks.push(() => debouncer.stop());
 
+          // start() verifies the bot token in an awaited path and rejects on
+          // any credential/connection failure — caught below, where the
+          // channel is left disabled and the gateway keeps serving (#20).
           await slackAdapter.start();
+          channelRegistry.register(slackAdapter);
+          sessionBindings.bind("slack", "*", bindTarget);
           gwLog.info("slack adapter started", {
             bindTo: bindTarget,
             hasUserToken: slackAdapter.hasUserToken(),

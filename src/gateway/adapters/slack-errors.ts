@@ -25,6 +25,14 @@ export interface SlackInitErrorDecision {
 const MISSING_SLACK_PKG = /Cannot find (?:module|package) '(@slack\/[^']+)'/;
 
 /**
+ * Matches @slack/web-api platform errors ("An API error occurred: <code>"),
+ * capturing the Slack error code (group 1) — e.g. `account_inactive`,
+ * `token_revoked`, `invalid_auth`. These are credential/workspace problems,
+ * not bugs: the channel should degrade to disabled-with-a-warning (#20).
+ */
+const SLACK_PLATFORM_ERROR = /An API error occurred: ([a-z0-9_]+)/i;
+
+/**
  * Decide how to surface a Slack adapter initialization failure.
  *
  * The common deployment pitfall: a Slack dependency is declared in
@@ -42,6 +50,17 @@ export function classifySlackInitError(rawMessage: string): SlackInitErrorDecisi
       message:
         `slack adapter disabled: ${pkg} is not installed. ` +
         "Run 'bun install' on the host after pulling a branch that adds Slack support.",
+    };
+  }
+  const platform = SLACK_PLATFORM_ERROR.exec(rawMessage);
+  if (platform) {
+    const code = platform[1]!;
+    return {
+      level: "warn",
+      message:
+        `slack channel disabled for this session: Slack rejected the configured credentials (${code}). ` +
+        "The gateway keeps running without Slack. Fix channels.slack tokens in ~/.hawky/config.json and restart.",
+      data: { code, error: rawMessage },
     };
   }
   return {

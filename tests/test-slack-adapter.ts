@@ -6,16 +6,15 @@ import { describe, test, expect } from "bun:test";
 // We keep these intentionally thin:
 // - The ChannelAdapter contract (outbound + inbound) is exercised by the
 //   channel-relay and channel-wiring integration tests with mock adapters.
-// - The @slack/bolt App instantiated by our real adapter connects on
-//   construction (Socket Mode machinery), so we can't construct a real
-//   SlackAdapter in unit tests without network side effects that leak
-//   unhandled rejections into sibling tests.
 // - Live-connection behavior is covered by manual tests (MANUAL_TESTS.md
 //   section "Slack Integration") with a real workspace.
 //
-// These tests verify only the module-level shape: that the class is
-// exported and its exported options/method signatures compile against
-// the ChannelAdapter interface.
+// Fail-soft regression coverage (#20): bolt's App used to be constructed in
+// the SlackAdapter constructor, which fired auth.test as a floating promise —
+// a dead bot token (account_inactive/token_revoked) became an unhandled
+// rejection that killed the whole gateway at startup. The constructor must
+// stay free of network side effects, and start() must surface token failures
+// as a normal rejection the bootstrap guard in src/index.ts can catch.
 // ---------------------------------------------------------------------------
 
 describe("SlackAdapter module", () => {
@@ -35,6 +34,59 @@ describe("SlackAdapter module", () => {
     // Type-only export; importing the module should not throw.
     const mod = await import("../src/gateway/adapters/slack.js");
     expect(mod).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fail-soft startup (#20): dead token must reject start(), never crash
+// ---------------------------------------------------------------------------
+
+describe("SlackAdapter fail-soft startup (#20)", () => {
+  const makeAdapter = async () => {
+    const { SlackAdapter } = await import("../src/gateway/adapters/slack.js");
+    return new SlackAdapter({
+      botToken: "xoxb-fake-dead-token",
+      appToken: "xapp-fake-token",
+      allowedUserId: "U0000000",
+    });
+  };
+
+  test("constructor has no network side effects (no bolt App, no auth.test)", async () => {
+    // Regression: constructing with a dead token used to fire bolt's
+    // constructor-time auth.test floating promise. Now construction must be
+    // pure — the bolt app must not exist until start().
+    const adapter = await makeAdapter();
+    expect((adapter as any).app).toBeNull();
+    expect(adapter.isReady()).toBe(false);
+  });
+
+  test("start() rejects with the slack error when the bot token is dead", async () => {
+    const adapter = await makeAdapter();
+    // Stub the awaited token-verification call to fail the way @slack/web-api
+    // does for a revoked/inactive token (slack_webapi_platform_error).
+    const platformError = Object.assign(new Error("An API error occurred: account_inactive"), {
+      code: "slack_webapi_platform_error",
+      data: { ok: false, error: "account_inactive" },
+    });
+    (adapter as any).botClient = {
+      auth: { test: async () => { throw platformError; } },
+    };
+
+    // The failure must surface as a normal rejection (catchable by the
+    // bootstrap guard) — not as a floating-promise unhandled rejection.
+    await expect(adapter.start()).rejects.toThrow("account_inactive");
+
+    // And the adapter must be left cleanly disabled.
+    expect(adapter.isReady()).toBe(false);
+    expect((adapter as any).app).toBeNull();
+    expect(adapter.getStatus().lastError).toContain("account_inactive");
+  });
+
+  test("stop() is a no-op when start() never succeeded", async () => {
+    const adapter = await makeAdapter();
+    // Must not throw on the never-started app.
+    await adapter.stop();
+    expect(adapter.isReady()).toBe(false);
   });
 });
 

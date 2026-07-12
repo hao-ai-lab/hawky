@@ -53,7 +53,10 @@ export interface SlackAdapterOpts {
 export class SlackAdapter implements ChannelAdapter {
   readonly channelId = "slack";
 
-  private app: App;
+  /** Bolt app. Constructed lazily in start() — see the fail-soft note there. */
+  private app: App | null = null;
+  private botToken: string;
+  private appToken: string;
   private botClient: WebClient;
   private userClient: WebClient | null;
   private allowedUserId: string | null;
@@ -78,13 +81,15 @@ export class SlackAdapter implements ChannelAdapter {
   private autoRepliedConversations = new Set<string>();
 
   constructor(opts: SlackAdapterOpts) {
-    this.app = new App({
-      token: opts.botToken,
-      appToken: opts.appToken,
-      socketMode: true,
-      // Suppress bolt's default logging — we use our own
-      logLevel: "ERROR" as any,
-    });
+    // IMPORTANT: keep this constructor free of network side effects. Bolt's
+    // `new App(...)` fires `auth.test` as a floating promise (no rejection
+    // handler until the first inbound event), so a dead bot token
+    // (account_inactive / token_revoked / invalid_auth) becomes an unhandled
+    // rejection that kills the whole gateway process. The App is therefore
+    // constructed in start(), after the token has been verified in an
+    // awaited, catchable path.
+    this.botToken = opts.botToken;
+    this.appToken = opts.appToken;
 
     this.botClient = new WebClient(opts.botToken);
     this.userClient = opts.userToken ? new WebClient(opts.userToken) : null;
@@ -95,9 +100,11 @@ export class SlackAdapter implements ChannelAdapter {
       ?? (this.allowedUserId
           ? `_🤖 Automated — replies are not monitored. DM <@${this.allowedUserId}> for questions._`
           : `_🤖 Automated — replies are not monitored._`);
+  }
 
-    // Register message handler
-    this.app.message(async ({ message }) => {
+  /** Register the inbound DM handler on the (lazily constructed) bolt app. */
+  private registerMessageHandler(app: App): void {
+    app.message(async ({ message }) => {
       this._lastEventAt = Date.now();
 
       // Only process real user messages (not bot messages, not subtypes like edits/deletes)
@@ -148,11 +155,37 @@ export class SlackAdapter implements ChannelAdapter {
   // Inbound
   // ---------------------------------------------------------------------------
 
+  /**
+   * Verify the bot token, then construct + start the bolt app.
+   *
+   * Fail-soft contract (#20): every failure mode here — dead bot token, dead
+   * app token, network — rejects this promise so the caller's guard can log
+   * a warning and leave the channel disabled, instead of crashing the
+   * gateway. The awaited `auth.test` below is what makes a dead bot token
+   * catchable: without it, bolt's App constructor would run auth.test as a
+   * floating promise and an `account_inactive` / `token_revoked` /
+   * `invalid_auth` token would become an unhandled rejection that kills the
+   * process. The verified bot identity is passed to the App (botId/botUserId)
+   * and tokenVerificationEnabled is off, so bolt never re-runs auth.test on
+   * its own.
+   */
   async start(): Promise<void> {
     try {
+      const auth = await this.botClient.auth.test();
+      this.app = new App({
+        token: this.botToken,
+        appToken: this.appToken,
+        socketMode: true,
+        botId: auth.bot_id,
+        botUserId: auth.user_id,
+        tokenVerificationEnabled: false,
+        // Suppress bolt's default logging — we use our own
+        logLevel: "ERROR" as any,
+      });
+      this.registerMessageHandler(this.app);
       await this.app.start();
       this.connected = true;
-      log.info("slack adapter started (Socket Mode)");
+      log.info("slack adapter started (Socket Mode)", { botUserId: auth.user_id });
     } catch (err) {
       this._lastError = err instanceof Error ? err.message : String(err);
       log.error("slack adapter start failed", { error: this._lastError });
@@ -337,6 +370,7 @@ export class SlackAdapter implements ChannelAdapter {
 
   async stop(): Promise<void> {
     this.connected = false;
+    if (!this.app) return; // start() never succeeded — nothing to stop
     try {
       await this.app.stop();
       log.info("slack adapter stopped");
