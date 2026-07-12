@@ -1339,16 +1339,17 @@ actor LiveGatewayBridge {
         return LiveVoiceprintEnrollmentResult(payload: payload)
     }
 
-    /// Enroll the OWNER voiceprint template from a live listening session's
-    /// already-uploaded recording segments (`<recordingBaseId>.segNNN.mic`).
-    /// WHY this path exists: enrollment must capture through the SAME live
-    /// WebRTC pipeline recognition scores — a standalone-recorder template is
-    /// acoustically orthogonal to the recognition domain (see
+    /// Enroll the OWNER voiceprint template from one or more live listening
+    /// sessions' already-uploaded recording segments
+    /// (`<recordingBaseId>.segNNN.mic` per take). WHY this path exists:
+    /// enrollment must capture through the SAME live WebRTC pipeline
+    /// recognition scores — a standalone-recorder template is acoustically
+    /// orthogonal to the recognition domain (see
     /// docs/voiceprint-architecture.md, "capture-domain mismatch"). `params`
     /// MUST be built by
     /// `LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams` so the
-    /// wire keys (`recordingBaseId`, `consent`, `minSpeechMs`) match the server
-    /// parser exactly. Returns nil on transport failure.
+    /// wire keys (`recordingBaseIds`, `consent`, `minSpeechMs`) match the
+    /// server parser exactly. Returns nil on transport failure.
     func enrollVoiceprintOwnerFromRecording(
         sessionKey: String,
         params: [String: JSONValue],

@@ -133,7 +133,7 @@ import Foundation
         #expect(gateway.fromRecordingCalls.count == 1)
         let params = gateway.fromRecordingCalls[0]
 
-        #expect(params["recordingBaseId"] == .string("live-20260712-135209"))
+        #expect(params["recordingBaseIds"] == .array([.string("live-20260712-135209")]))
         #expect(params["sessionKey"] == .string("realtime:main"))
         #expect(params["minSpeechMs"] == .number(30_000))
         // NEVER a sources array on this method — the gateway selects segments itself.
@@ -186,10 +186,12 @@ import Foundation
         #expect(gateway.fromRecordingCalls.count == 1)
         // Actionable, not terminal: tooShort so the UI says "keep talking".
         #expect(model.state == .tooShort)
-        // The hint uses the SERVER speechMs (30 - 21 = 9s), not the client's
-        // wall-clock estimate (which cleared the floor).
-        #expect(model.lastRecordingRejection?.speechMs == 21_000)
+        // The hint anchors to the SERVER speechMs (30 - 21 = 9s), not the
+        // client's wall-clock estimate (which cleared the floor) — and the
+        // rejected take is KEPT so "Continue recording" adds to it.
+        #expect(model.serverCountedSpeechMs == 21_000)
         #expect(model.keepTalkingSeconds == 9)
+        #expect(model.capturedRecordingBaseIds == ["live-20260712-135209"])
     }
 
     // MARK: - Actionable failure copy for quality / upload rejections
@@ -230,7 +232,7 @@ import Foundation
         let gateway = FakeRecordingEnrollmentGateway(result: acceptedResult())
         let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
         model.recordListeningCapture(recordingBaseId: nil, elapsedMs: longEnoughElapsedMs)
-        #expect(model.capturedRecordingBaseId == nil)
+        #expect(model.capturedRecordingBaseIds.isEmpty)
         #expect(model.state == .failed("No audio was captured — try again."))
     }
 
@@ -244,9 +246,9 @@ import Foundation
         #expect(model.canSubmitFromRecording)
 
         model.reset()
-        #expect(model.capturedRecordingBaseId == nil)
+        #expect(model.capturedRecordingBaseIds.isEmpty)
         #expect(model.listeningElapsedMs == 0)
-        #expect(model.lastRecordingRejection == nil)
+        #expect(model.serverCountedSpeechMs == nil)
         #expect(model.state == .idle)
         #expect(model.consent.satisfiesGate)   // consent survives a re-take
         #expect(!model.canSubmitFromRecording)
@@ -275,11 +277,13 @@ import Foundation
     @Test func fromRecordingParamsBuilderMatchesServerKeys() {
         let params = LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams(
             sessionKey: "realtime:main",
-            recordingBaseId: "live-20260712-135209",
+            recordingBaseIds: ["live-20260712-135209", "live-20260712-140001"],
             consent: fullConsent,
             minSpeechMs: 30_000
         )
-        #expect(params["recordingBaseId"] == .string("live-20260712-135209"))
+        #expect(params["recordingBaseIds"] == .array([
+            .string("live-20260712-135209"), .string("live-20260712-140001"),
+        ]))
         #expect(params["sessionKey"] == .string("realtime:main"))
         #expect(params["minSpeechMs"] == .number(30_000))
 
@@ -292,7 +296,49 @@ import Foundation
         let data = try? JSONEncoder().encode(frame)
         let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         #expect(json.contains("identity.voiceprint.enroll_owner_from_recording"))
-        #expect(json.contains("recordingBaseId"))
+        #expect(json.contains("recordingBaseIds"))
         #expect(json.contains("biometricAllowed"))
+    }
+
+    // MARK: - Takes accumulate ("Continue recording" keeps prior takes)
+
+    @Test func takesAccumulateAcrossListeningSessionsAndSubmitInOrder() async {
+        let gateway = FakeRecordingEnrollmentGateway(result: acceptedResult())
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+        model.consent = fullConsent
+
+        // Two takes, each individually below the floor, together above it.
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 22_000)
+        #expect(!model.hasEnoughListeningSpeech)
+        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 22_000)
+        #expect(model.capturedRecordingBaseIds == ["live-take-a", "live-take-b"])
+        #expect(model.hasEnoughListeningSpeech)
+
+        _ = await model.submitFromRecording()
+        #expect(gateway.fromRecordingCalls.count == 1)
+        let sent = gateway.fromRecordingCalls.first?["recordingBaseIds"]
+        #expect(sent == .array([.string("live-take-a"), .string("live-take-b")]))
+    }
+
+    // MARK: - Server anchor replaces counted takes' estimates, later takes add on
+
+    @Test func serverAnchorReplacesCountedTakesAndLaterTakesAddOn() async {
+        // The server rejection (not_enough_speech, 16s counted) anchors progress:
+        // it REPLACES the client estimate of the counted take.
+        let gateway = FakeRecordingEnrollmentGateway(
+            result: rejectedResult(reasons: ["not_enough_speech"], speechMs: 16_000)
+        )
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+        model.consent = fullConsent
+        // One take the client estimates at ~33.3s voiced (45s * 0.74) — clears
+        // the client gate so submit actually reaches the server...
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
+        _ = await model.submitFromRecording()
+        #expect(Int(model.speechProgressMs) == 16_000)
+        #expect(model.keepTalkingSeconds == 14)
+        // A NEW take after the anchor adds its client estimate on top; the
+        // anchored take is NOT double-counted.
+        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 10_000)
+        #expect(Int(model.speechProgressMs) == 16_000 + Int(10_000 * 0.74))
     }
 }
