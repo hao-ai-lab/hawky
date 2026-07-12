@@ -255,6 +255,39 @@ import Foundation
         #expect(!model.canSubmitFromRecording)
     }
 
+    // MARK: - Success copy is honest about capping
+
+    @Test func enrolledMessageSaysFirstPortionWhenSegmentsWereCapped() {
+        // The gateway trims selection at its total budget; when that happened
+        // (segmentsCapped > 0) the success copy must say only the FIRST portion
+        // of the speech was used instead of implying all of it enrolled.
+        let capped = acceptedResult(speechMs: 88_000)   // helper payload has segmentsCapped: 1
+        #expect(OwnerEnrollmentModel.enrolledMessage(for: capped)
+            == "Enrolled from the first 88s of your speech — you talked more than needed, so the rest wasn't used. Your voice is set up.")
+
+        // No capping (count absent OR zero) keeps the plain copy.
+        let plain = LiveVoiceprintEnrollmentResult(payload: .object([
+            "status": .string("accepted"), "speechMs": .number(41_000),
+        ]))!
+        #expect(OwnerEnrollmentModel.enrolledMessage(for: plain)
+            == "Enrolled from 41s of your speech. Your voice is set up.")
+
+        let uncapped = LiveVoiceprintEnrollmentResult(payload: .object([
+            "status": .string("accepted"), "speechMs": .number(65_000),
+            "segmentsCapped": .number(0),
+        ]))!
+        #expect(OwnerEnrollmentModel.enrolledMessage(for: uncapped)
+            == "Enrolled from 65s of your speech. Your voice is set up.")
+
+        // Capped but speechMs absent (parse anomaly): drop the duration clause
+        // instead of rendering the self-contradictory "the first 0s of your speech".
+        let cappedNoSpeech = LiveVoiceprintEnrollmentResult(payload: .object([
+            "status": .string("accepted"), "segmentsCapped": .number(1),
+        ]))!
+        #expect(OwnerEnrollmentModel.enrolledMessage(for: cappedNoSpeech)
+            == "Enrolled from the first part of your speech — you talked more than needed, so the rest wasn't used. Your voice is set up.")
+    }
+
     // MARK: - Additive segment-count parsing on the enrollment result
 
     @Test func enrollmentResultParsesAdditiveSegmentCounts() {

@@ -774,6 +774,14 @@ struct LiveSessionConfig: Equatable {
     /// — the live video now surfaces via the PiP/fullscreen preview instead, and
     /// the frames stay an invisible model-input detail. (#415)
     var showVisualFramesInTranscript: Bool = false
+    /// Transient (never persisted — LiveProfileDefaults has no key for it): when
+    /// false, the session leaves NO trace in the conversation record — no app
+    /// chat entries, no session-journal lines, no gateway transcript appends,
+    /// and no session-end memory distill. Set ONLY by temporary config overrides
+    /// (the owner-voiceprint enrollment listening session, which must not leak
+    /// the user's enrollment monologue into their chat history); every
+    /// user-visible session keeps the default (true).
+    var conversationJournalingEnabled: Bool = true
     /// Transient backend-provided startup context for the current Live start.
     /// This is intentionally not persisted in user settings; it is fetched from
     /// the gateway just before the Realtime session is created.
