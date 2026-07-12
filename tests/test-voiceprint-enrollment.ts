@@ -726,5 +726,64 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
     expect(enroll.segmentsQualityRejected).toBe(0);
     expect(enroll.segmentsAfterGap).toBe(1);
   });
+
+  test("multiple takes accumulate: two recordings each below the floor enroll together", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-multi-"));
+    tempDirs.push(dir);
+    // Sidecar counts 16s voiced per segment: one take (1 segment) = 16s < 30s,
+    // two takes = 32s >= 30s. This is exactly the "keep talking -> continue
+    // recording" UX: the second take ADDS to the first instead of replacing it.
+    const scriptPath = writeEnrollSidecar(dir, 16_000);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-multi" };
+
+    const takeA = "live-20260713-000010";
+    const takeB = "live-20260713-000011";
+    writeRecordingSegment(dir, takeA, 0, 1500);
+    writeRecordingSegment(dir, takeB, 0, 1500);
+
+    const short = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseIds: [takeA],
+      consent,
+    });
+    expect(short.status).toBe("rejected");
+    expect(short.reasons).toContain("not_enough_speech");
+
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseIds: [takeA, takeB],
+      consent,
+    });
+    expect(enroll.status).toBe("accepted");
+    expect(enroll.sourceCount).toBe(2);
+    expect(enroll.segmentsUsed).toBe(2);
+    expect(existsSync(scoring.ownerTemplateFileSource!.filePath)).toBe(true);
+  });
+
+  test("recordingBaseIds validation: empty, too many, and duplicates are INVALID_REQUEST", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-val-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, makeScoringConfig(dir, scriptPath));
+    const conn = { sessionKey: "live:enroll-from-recording-val" };
+
+    await expect(
+      server.call("identity.voiceprint.enroll_owner_from_recording", conn, { recordingBaseIds: [], consent }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(
+      server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+        recordingBaseIds: Array.from({ length: 11 }, (_, i) => `live-2026-take${i}`),
+        consent,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(
+      server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+        recordingBaseIds: ["live-2026-dup", "live-2026-dup"],
+        consent,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
 });
 

@@ -871,12 +871,22 @@ export function registerVoiceprintMethods(
 
       // Only the SELECTION phase gets this catch: runOwnerEnrollment audits its
       // own faults, so wrapping it too would double-audit the same call.
-      let selection: Awaited<ReturnType<typeof selectEnrollmentSegmentsFromRecording>>;
+      // Multiple takes ("continue recording" across listening sessions) select
+      // independently and enroll TOGETHER, in take order.
+      const selected: Array<{ audioPath: string; durationMs: number }> = [];
+      const totals = { considered: 0, qualityRejected: 0, capped: 0, afterGap: 0 };
       try {
-        selection = await selectEnrollmentSegmentsFromRecording({
-          recordingBaseId: input.recordingBaseId,
-          scoring: config,
-        });
+        for (const recordingBaseId of input.recordingBaseIds) {
+          const selection = await selectEnrollmentSegmentsFromRecording({
+            recordingBaseId,
+            scoring: config,
+          });
+          selected.push(...selection.selected);
+          totals.considered += selection.consideredCount;
+          totals.qualityRejected += selection.qualityRejectedCount;
+          totals.capped += selection.cappedCount;
+          totals.afterGap += selection.afterGapCount;
+        }
       } catch (error) {
         emitVoiceprintAudit(lifecycle, {
           subjectKey: sessionKey,
@@ -887,22 +897,23 @@ export function registerVoiceprintMethods(
       }
 
       const segmentCounts = {
-        segmentsConsidered: selection.consideredCount,
-        segmentsUsed: selection.selected.length,
-        segmentsQualityRejected: selection.qualityRejectedCount,
-        segmentsCapped: selection.cappedCount,
-        segmentsAfterGap: selection.afterGapCount,
+        segmentsConsidered: totals.considered,
+        segmentsUsed: selected.length,
+        segmentsQualityRejected: totals.qualityRejected,
+        segmentsCapped: totals.capped,
+        segmentsAfterGap: totals.afterGap,
       };
-      if (selection.selected.length === 0) {
+      if (selected.length === 0) {
         // Nothing usable: report a rejection in the same shape the shared flow
         // produces (never a bare throw at the UI), with an HONEST reason — a
         // broken segment timeline is not a quality problem.
         const reasons =
-          selection.qualityRejectedCount > 0 ? ["quality_rejected"] : ["no_usable_segments"];
+          totals.qualityRejected > 0 ? ["quality_rejected"] : ["no_usable_segments"];
         log.info("identity.voiceprint.enroll_owner_from_recording", {
           session_key: sessionKey,
           status: "rejected",
           reasons,
+          takes: input.recordingBaseIds.length,
           ...segmentCounts,
         });
         emitVoiceprintAudit(lifecycle, {
@@ -924,7 +935,7 @@ export function registerVoiceprintMethods(
       return runOwnerEnrollment({
         sessionKey,
         config,
-        sources: selection.selected.map((segment) => ({ audioPath: segment.audioPath })),
+        sources: selected.map((segment) => ({ audioPath: segment.audioPath })),
         minSpeechMs: input.minSpeechMs,
         logLabel: "identity.voiceprint.enroll_owner_from_recording",
         extraResponseFields: segmentCounts,
@@ -1862,25 +1873,46 @@ function parseEnrollOwnerParams(params: unknown): EnrollOwnerParams {
 
 interface EnrollOwnerFromRecordingParams {
   sessionKey?: string;
-  recordingBaseId: string;
+  /** One or more recording bases, in take order. The enrollment UI lets the
+   * user "continue recording" across several listening sessions — each take is
+   * its own recording base — and all takes enroll TOGETHER. */
+  recordingBaseIds: string[];
   consent?: Partial<VoiceprintConsentSnapshot>;
   minSpeechMs?: number;
 }
 
+const ENROLL_FROM_RECORDING_MAX_TAKES = 10;
+
 function parseEnrollOwnerFromRecordingParams(params: unknown): EnrollOwnerFromRecordingParams {
   const p = objectOrUndefined(params);
-  const recordingBaseId =
-    typeof p?.recordingBaseId === "string" ? p.recordingBaseId.trim()
-    : typeof p?.recording_base_id === "string" ? (p.recording_base_id as string).trim()
-    : "";
-  // The base id names on-disk media; the media-id regex both validates it and
-  // (no path separators / no ':') keeps it incapable of root escape.
-  if (!VOICEPRINT_MEDIA_ID_REGEX.test(recordingBaseId)) {
-    throw new MethodError("INVALID_REQUEST", "recordingBaseId must be a valid media id.");
+  // Accept the multi-take array (preferred) and the original single-id field
+  // (back-compat) interchangeably.
+  const rawIds: unknown[] = Array.isArray(p?.recordingBaseIds)
+    ? p.recordingBaseIds
+    : Array.isArray(p?.recording_base_ids)
+      ? (p.recording_base_ids as unknown[])
+      : [p?.recordingBaseId ?? p?.recording_base_id];
+  if (rawIds.length === 0 || rawIds.length > ENROLL_FROM_RECORDING_MAX_TAKES) {
+    throw new MethodError(
+      "INVALID_REQUEST",
+      `recordingBaseIds must contain 1..${ENROLL_FROM_RECORDING_MAX_TAKES} ids.`,
+    );
+  }
+  const recordingBaseIds = rawIds.map((raw) => {
+    const id = typeof raw === "string" ? raw.trim() : "";
+    // The base id names on-disk media; the media-id regex both validates it and
+    // (no path separators / no ':') keeps it incapable of root escape.
+    if (!VOICEPRINT_MEDIA_ID_REGEX.test(id)) {
+      throw new MethodError("INVALID_REQUEST", "recordingBaseId must be a valid media id.");
+    }
+    return id;
+  });
+  if (new Set(recordingBaseIds).size !== recordingBaseIds.length) {
+    throw new MethodError("INVALID_REQUEST", "recordingBaseIds must be distinct.");
   }
   return {
     sessionKey: typeof p?.sessionKey === "string" ? p.sessionKey : undefined,
-    recordingBaseId,
+    recordingBaseIds,
     consent: objectOrUndefined(p?.consent) as Partial<VoiceprintConsentSnapshot> | undefined,
     minSpeechMs: clampEnrollmentMinSpeechMs(
       optionalNonNegativeFiniteNumber(p?.minSpeechMs ?? p?.min_speech_ms, "minSpeechMs"),
