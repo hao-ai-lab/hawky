@@ -75,6 +75,16 @@ export interface SpeakerEvidenceConfig {
   ownerFlipThreshold?: number;
   nonOwnerFlipThreshold?: number;
   /**
+   * INSTANT-ESTABLISH fast path: a single `owner_speaking` turn whose score
+   * (the classifier's normalized confidence) clears this bar establishes
+   * `owner_present` immediately, without waiting for the consecutive streak.
+   * Motivated by cold start: a fresh session otherwise needs K turns before
+   * the identity reaches the agent, and users ask "do you know me?" early.
+   * Safe only because the confidence separation is wide (owner's clean turns
+   * measured 0.85+, different real speakers far below); unset disables it.
+   */
+  instantOwnerConfidence?: number;
+  /**
    * Bounded window over which the majority signal is evaluated and the size of
    * the retained `recent` ring.
    */
@@ -220,7 +230,14 @@ function nextVerdict(
   // outlier turn resets only the relevant streak, never the settled verdict.
   // The two directions may use different K (asymmetric hysteresis — see
   // SpeakerEvidenceConfig.ownerFlipThreshold/nonOwnerFlipThreshold).
-  const ownerConfirmed = ownerStreak >= (cfg.ownerFlipThreshold ?? cfg.flipThreshold);
+  const latest = recent[recent.length - 1];
+  const instantOwner =
+    cfg.instantOwnerConfidence !== undefined &&
+    latest?.decision === "owner_speaking" &&
+    latest.score !== undefined &&
+    latest.score >= cfg.instantOwnerConfidence;
+  const ownerConfirmed =
+    ownerStreak >= (cfg.ownerFlipThreshold ?? cfg.flipThreshold) || instantOwner;
   const nonOwnerConfirmed = nonOwnerStreak >= (cfg.nonOwnerFlipThreshold ?? cfg.flipThreshold);
 
   // A confirmed strong-owner signal always wins over a confirmed non-owner one:

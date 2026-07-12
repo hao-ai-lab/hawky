@@ -384,3 +384,43 @@ describe("asymmetric hysteresis (ownerFlipThreshold / nonOwnerFlipThreshold)", (
     expect(() => fold(["owner_speaking"], { nonOwnerFlipThreshold: 1.5 })).toThrow();
   });
 });
+
+describe("instant-establish fast path (instantOwnerConfidence)", () => {
+  const cfg: Partial<SpeakerEvidenceConfig> = {
+    flipThreshold: 2,
+    ownerFlipThreshold: 2,
+    windowSize: 5,
+    instantOwnerConfidence: 0.85,
+  };
+
+  test("a single high-confidence owner turn establishes immediately", () => {
+    const state = foldSpeakerEvidence([{ decision: "owner_speaking", score: 0.87 }], cfg);
+    expect(state.verdict).toBe("owner_present");
+  });
+
+  test("a below-bar owner turn still needs the streak", () => {
+    expect(foldSpeakerEvidence([{ decision: "owner_speaking", score: 0.8 }], cfg).verdict)
+      .toBe("provisional");
+    expect(
+      foldSpeakerEvidence(
+        [{ decision: "owner_speaking", score: 0.8 }, { decision: "owner_speaking", score: 0.8 }],
+        cfg,
+      ).verdict,
+    ).toBe("owner_present");
+  });
+
+  test("possible_owner and scoreless turns never fast-path", () => {
+    expect(foldSpeakerEvidence([{ decision: "possible_owner", score: 0.99 }], cfg).verdict)
+      .toBe("provisional");
+    expect(foldSpeakerEvidence([{ decision: "owner_speaking" }], cfg).verdict)
+      .toBe("provisional");
+  });
+
+  test("unset (default) disables the fast path", () => {
+    const state = foldSpeakerEvidence(
+      [{ decision: "owner_speaking", score: 0.99 }],
+      { flipThreshold: 2, windowSize: 5 },
+    );
+    expect(state.verdict).toBe("provisional");
+  });
+});
