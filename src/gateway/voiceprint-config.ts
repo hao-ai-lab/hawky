@@ -417,6 +417,10 @@ function resolveVoiceprintAutoScoreTuning(
     evidence.non_owner_flip_threshold ?? evidence.nonOwnerFlipThreshold,
     "voiceprint.live_scoring.evidence.non_owner_flip_threshold",
   );
+  const instantOwnerConfidence = optionalPositiveNumber(
+    evidence.instant_owner_confidence ?? evidence.instantOwnerConfidence,
+    "voiceprint.live_scoring.evidence.instant_owner_confidence",
+  );
   const windowSize = optionalPositiveNumber(
     evidence.window_size ?? evidence.windowSize,
     "voiceprint.live_scoring.evidence.window_size",
@@ -454,6 +458,7 @@ function resolveVoiceprintAutoScoreTuning(
   if (flipThreshold !== undefined) config.flipThreshold = flipThreshold;
   if (ownerFlipThreshold !== undefined) config.ownerFlipThreshold = ownerFlipThreshold;
   if (nonOwnerFlipThreshold !== undefined) config.nonOwnerFlipThreshold = nonOwnerFlipThreshold;
+  if (instantOwnerConfidence !== undefined) config.instantOwnerConfidence = instantOwnerConfidence;
   if (windowSize !== undefined) config.windowSize = windowSize;
   if (staleTimeoutMs !== undefined) config.staleTimeoutMs = staleTimeoutMs;
   const tuning: VoiceprintAutoScoreTuning = {};

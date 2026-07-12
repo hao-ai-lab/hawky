@@ -423,7 +423,10 @@ export class VoiceprintAutoScorer {
       const atMs = this.options.nowMs?.() ?? Date.now();
       state.evidence = reduceSpeakerEvidence(
         state.evidence,
-        { decision, atMs },
+        // The state's normalized confidence rides along as the observation
+        // score so the instant-establish fast path can act on a single
+        // high-confidence owner turn.
+        { decision, score: scored.confidence, atMs },
         this.options.evidenceConfig,
       );
       state.lastDecision = decision;

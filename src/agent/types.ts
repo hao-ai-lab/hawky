@@ -944,6 +944,8 @@ export interface HawkyConfig {
         owner_flip_threshold?: number;
         /** Consecutive clear non-owner turns to overturn owner (slow/sticky). */
         non_owner_flip_threshold?: number;
+        /** A single owner turn at/above this confidence establishes instantly. */
+        instant_owner_confidence?: number;
         window_size?: number;
         stale_timeout_ms?: number;
         /** Turns shorter than this (ms) never vote toward not_owner. */
