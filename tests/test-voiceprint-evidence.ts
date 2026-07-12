@@ -322,3 +322,65 @@ describe("speaker evidence accumulator (session-level hysteresis)", () => {
     expect(next.recent.length).toBe(1);
   });
 });
+
+describe("asymmetric hysteresis (ownerFlipThreshold / nonOwnerFlipThreshold)", () => {
+  test("owner establishes at ownerFlipThreshold while flipThreshold stays higher", () => {
+    const cfg: Partial<SpeakerEvidenceConfig> = { flipThreshold: 4, ownerFlipThreshold: 2, windowSize: 5 };
+    expect(fold(["owner_speaking"], cfg).verdict).toBe("provisional");
+    expect(fold(["owner_speaking", "owner_speaking"], cfg).verdict).toBe("owner_present");
+    // non-owner still needs the symmetric fallback (4)
+    expect(fold(["unknown_speaker", "unknown_speaker", "unknown_speaker"], cfg).verdict).toBe("unknown");
+    expect(
+      fold(["unknown_speaker", "unknown_speaker", "unknown_speaker", "unknown_speaker"], cfg).verdict,
+    ).toBe("not_owner");
+  });
+
+  test("settled owner survives a burst of unknowns below nonOwnerFlipThreshold", () => {
+    const cfg: Partial<SpeakerEvidenceConfig> = {
+      flipThreshold: 2,
+      ownerFlipThreshold: 2,
+      nonOwnerFlipThreshold: 5,
+      windowSize: 6,
+    };
+    const state = fold(
+      [
+        "owner_speaking", "owner_speaking", // establish
+        "unknown_speaker", "unknown_speaker", "unknown_speaker", "unknown_speaker", // 4 < 5 → hold
+      ],
+      cfg,
+    );
+    expect(state.verdict).toBe("owner_present");
+    // the 5th consecutive clear non-owner turn finally overturns
+    const flipped = foldSpeakerEvidence(
+      turns([
+        "owner_speaking", "owner_speaking",
+        "unknown_speaker", "unknown_speaker", "unknown_speaker", "unknown_speaker", "unknown_speaker",
+      ]),
+      cfg,
+    );
+    expect(flipped.verdict).toBe("not_owner");
+  });
+
+  test("an owner turn resets the non-owner streak so mixed speech never overturns", () => {
+    const cfg: Partial<SpeakerEvidenceConfig> = {
+      flipThreshold: 2,
+      nonOwnerFlipThreshold: 4,
+      windowSize: 5,
+    };
+    const state = fold(
+      [
+        "owner_speaking", "owner_speaking", // establish
+        "unknown_speaker", "unknown_speaker", "unknown_speaker",
+        "owner_speaking", // streak reset
+        "unknown_speaker", "unknown_speaker", "unknown_speaker",
+      ],
+      cfg,
+    );
+    expect(state.verdict).toBe("owner_present");
+  });
+
+  test("invalid asymmetric thresholds are rejected", () => {
+    expect(() => fold(["owner_speaking"], { ownerFlipThreshold: 0 })).toThrow();
+    expect(() => fold(["owner_speaking"], { nonOwnerFlipThreshold: 1.5 })).toThrow();
+  });
+});

@@ -59,9 +59,21 @@ export interface SpeakerEvidenceConfig {
   /**
    * Consecutive strong-owner (`owner_speaking`) turns required to flip the
    * verdict to `owner_present`. Also the count of consistent `unknown_speaker`
-   * turns required to flip to `not_owner`.
+   * turns required to flip to `not_owner` — unless the direction-specific
+   * overrides below are set.
    */
   flipThreshold: number;
+  /**
+   * ASYMMETRIC HYSTERESIS overrides. On a personal device "the owner is
+   * speaking" is the default assumption: establishing `owner_present` should be
+   * fast (low `ownerFlipThreshold`) while overturning it should require
+   * sustained clear non-owner evidence (higher `nonOwnerFlipThreshold`) — the
+   * cost of briefly mislabeling the owner as unknown is a broken conversation,
+   * while the cost of a slow guest flip is a few unlabeled guest turns. Each
+   * defaults to `flipThreshold` when unset, preserving symmetric behavior.
+   */
+  ownerFlipThreshold?: number;
+  nonOwnerFlipThreshold?: number;
   /**
    * Bounded window over which the majority signal is evaluated and the size of
    * the retained `recent` ring.
@@ -108,6 +120,15 @@ function resolveConfig(
     throw new Error(
       "SpeakerEvidence flipThreshold must be <= windowSize; otherwise the verdict can never flip.",
     );
+  }
+  for (const key of ["ownerFlipThreshold", "nonOwnerFlipThreshold"] as const) {
+    const value = merged[key];
+    if (value === undefined) {
+      continue;
+    }
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`SpeakerEvidence ${key} must be a positive integer.`);
+    }
   }
   return merged;
 }
@@ -197,8 +218,10 @@ function nextVerdict(
   // flapping: an alternating owner/unknown pattern never reaches K-in-a-row of
   // either, so it cannot oscillate between owner_present and not_owner. A single
   // outlier turn resets only the relevant streak, never the settled verdict.
-  const ownerConfirmed = ownerStreak >= cfg.flipThreshold;
-  const nonOwnerConfirmed = nonOwnerStreak >= cfg.flipThreshold;
+  // The two directions may use different K (asymmetric hysteresis — see
+  // SpeakerEvidenceConfig.ownerFlipThreshold/nonOwnerFlipThreshold).
+  const ownerConfirmed = ownerStreak >= (cfg.ownerFlipThreshold ?? cfg.flipThreshold);
+  const nonOwnerConfirmed = nonOwnerStreak >= (cfg.nonOwnerFlipThreshold ?? cfg.flipThreshold);
 
   // A confirmed strong-owner signal always wins over a confirmed non-owner one:
   // sustained genuine owner turns should hold the owner verdict.

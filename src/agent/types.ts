@@ -940,8 +940,14 @@ export interface HawkyConfig {
        */
       evidence?: {
         flip_threshold?: number;
+        /** Asymmetric hysteresis: consecutive owner turns to establish (fast). */
+        owner_flip_threshold?: number;
+        /** Consecutive clear non-owner turns to overturn owner (slow/sticky). */
+        non_owner_flip_threshold?: number;
         window_size?: number;
         stale_timeout_ms?: number;
+        /** Turns shorter than this (ms) never vote toward not_owner. */
+        min_turn_ms?: number;
       };
       /**
        * A8 replay resistance. TTL (ms) for the single-use liveness nonce a client
