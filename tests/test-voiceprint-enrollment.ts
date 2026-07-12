@@ -504,3 +504,227 @@ function writeSineWav(
   }
   writeFileSync(path, buffer);
 }
+
+// ---------------------------------------------------------------------------
+// enroll_owner_from_recording — capture-domain-parity enrollment from a live
+// recording's finalized segments. Pins: timeline-ordered selection, quality
+// DROP (not reject) for bad segments, the shared enroll seam (floor + template
+// write + biometric-minimized response), and clear failure shapes.
+// ---------------------------------------------------------------------------
+
+function writeRecordingSegment(
+  dir: string,
+  base: string,
+  index: number,
+  durationMs: number,
+  amplitude = 0.16,
+): void {
+  const mediaId = `${base}.seg${String(index).padStart(3, "0")}.mic`;
+  writeSineWav(join(dir, `${mediaId}.wav`), 16000, durationMs, amplitude);
+  writeFileSync(
+    join(dir, `${mediaId}.json`),
+    JSON.stringify({
+      mime: "audio/pcm16;rate=16000",
+      captured_start_iso: createdAt,
+      locked: false,
+      duration_ms: durationMs,
+      final_iso: createdAt,
+    }),
+    "utf8",
+  );
+}
+
+describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
+  test("enrolls from quality-passing segments, drops bad ones, and score_turns resolves the owner", async () => {
+    const server = makeMockServer();
+    const storage = createInMemoryVoiceprintStorage();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, storage, undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording" };
+
+    const base = "live-20260713-000000";
+    writeRecordingSegment(dir, base, 0, 1500);
+    writeRecordingSegment(dir, base, 1, 200); // too short -> quality gate DROPS it
+    writeRecordingSegment(dir, base, 2, 1500);
+
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseId: base,
+      consent,
+    });
+    expect(enroll.ok).toBe(true);
+    expect(enroll.status).toBe("accepted");
+    expect(enroll.templateRef).toBeTruthy();
+    expect(enroll.segmentsConsidered).toBe(3);
+    expect(enroll.segmentsUsed).toBe(2);
+    expect(enroll.segmentsQualityRejected).toBe(1);
+    expect(existsSync(scoring.ownerTemplateFileSource!.filePath)).toBe(true);
+    // Biometric minimization holds on this path too.
+    expect(JSON.stringify(enroll)).not.toContain("\"embedding\"");
+
+    // The enrolled template resolves the owner through the normal score path.
+    const ownerAudio = writeGoodWav(dir, "owner-turn.wav");
+    const scored = await server.call("identity.voiceprint.score_turns", conn, {
+      turns: [{
+        transcriptItemId: "rt_rec_enroll_turn",
+        role: "user",
+        startMs: 0,
+        endMs: 1500,
+        audioArtifactId: "audio_rec_enroll_turn",
+        audioPath: ownerAudio,
+      }],
+      consent,
+      createdAt,
+    });
+    expect(scored.status).toBe("scored");
+    expect(scored.states[0]?.lifecycle).toBe("resolved");
+  });
+
+  test("not enough usable speech rejects with counts (never a bare throw)", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-short-"));
+    tempDirs.push(dir);
+    // Sidecar reports only 10s voiced per segment -> 1 segment = 10s < 30s floor.
+    const scriptPath = writeEnrollSidecar(dir, 10_000);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-short" };
+
+    const base = "live-20260713-000001";
+    writeRecordingSegment(dir, base, 0, 1500);
+
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseId: base,
+      consent,
+    });
+    expect(enroll.ok).toBe(false);
+    expect(enroll.status).toBe("rejected");
+    expect(enroll.reasons).toContain("not_enough_speech");
+    expect(typeof enroll.speechMs).toBe("number");
+    expect(enroll.segmentsUsed).toBe(1);
+    expect(existsSync(scoring.ownerTemplateFileSource!.filePath)).toBe(false);
+  });
+
+  test("all segments quality-rejected reports a rejection, not an error", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-bad-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-bad" };
+
+    const base = "live-20260713-000002";
+    writeRecordingSegment(dir, base, 0, 200);
+    writeRecordingSegment(dir, base, 1, 200);
+
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseId: base,
+      consent,
+    });
+    expect(enroll.ok).toBe(false);
+    expect(enroll.status).toBe("rejected");
+    expect(enroll.reasons).toContain("quality_rejected");
+    expect(enroll.segmentsQualityRejected).toBe(2);
+  });
+
+  test("unknown recording is FAILED_PRECONDITION; missing consent is FORBIDDEN; bad id is INVALID_REQUEST", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-err-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-err" };
+
+    await expect(
+      server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+        recordingBaseId: "live-20260713-nope",
+        consent,
+      }),
+    ).rejects.toMatchObject({ code: "FAILED_PRECONDITION" });
+
+    const base = "live-20260713-000003";
+    writeRecordingSegment(dir, base, 0, 1500);
+    await expect(
+      server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+        recordingBaseId: base,
+        consent: { captureAllowed: true, biometricAllowed: false },
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    await expect(
+      server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+        recordingBaseId: "../escape",
+        consent,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  test("selection caps at ~90s of segment audio and reports capped/afterGap counts honestly", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-cap-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-cap" };
+
+    // Sidecar duration_ms drives the cap budget (the WAVs themselves stay small):
+    // 50s + 50s reaches the 90s budget, so seg002 is capped.
+    const base = "live-20260713-000004";
+    for (const index of [0, 1, 2]) {
+      const mediaId = `${base}.seg${String(index).padStart(3, "0")}.mic`;
+      writeSineWav(join(dir, `${mediaId}.wav`), 16000, 1500, 0.16);
+      writeFileSync(
+        join(dir, `${mediaId}.json`),
+        JSON.stringify({
+          mime: "audio/pcm16;rate=16000",
+          captured_start_iso: createdAt,
+          locked: false,
+          duration_ms: 50_000,
+          final_iso: createdAt,
+        }),
+        "utf8",
+      );
+    }
+
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseId: base,
+      consent,
+    });
+    expect(enroll.segmentsUsed).toBe(2);
+    expect(enroll.segmentsCapped).toBe(1);
+    expect(enroll.segmentsAfterGap).toBe(0);
+    expect(enroll.segmentsConsidered).toBe(3);
+  });
+
+  test("a timeline gap is reported as afterGap (never mislabeled quality_rejected)", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-gap-"));
+    tempDirs.push(dir);
+    // Sidecar reports 40s voiced for the one reachable segment -> floor passes,
+    // proving the gap costs coverage but not the enrollment itself.
+    const scriptPath = writeEnrollSidecar(dir, 40_000);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-gap" };
+
+    const base = "live-20260713-000005";
+    writeRecordingSegment(dir, base, 0, 1500);
+    writeRecordingSegment(dir, base, 2, 1500); // seg001 missing -> gap
+
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseId: base,
+      consent,
+    });
+    expect(enroll.status).toBe("accepted");
+    expect(enroll.segmentsConsidered).toBe(2);
+    expect(enroll.segmentsUsed).toBe(1);
+    expect(enroll.segmentsQualityRejected).toBe(0);
+    expect(enroll.segmentsAfterGap).toBe(1);
+  });
+});
+

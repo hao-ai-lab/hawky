@@ -1,6 +1,9 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { MethodError } from "./methods.js";
-import { resolveAllowedAudioPath } from "./voiceprint-audio-resolve.js";
+import {
+  collectFinalizedVoiceprintSegments,
+  resolveAllowedAudioPath,
+} from "./voiceprint-audio-resolve.js";
 import { assertDiscriminativeVoiceprintModel } from "./voiceprint-config.js";
 import type {
   EmbeddedEnrollmentSources,
@@ -31,6 +34,97 @@ import {
   type VoiceprintTemplateFileSource,
   type VoiceprintTemplateStorageRef,
 } from "../identity/voiceprint/index.js";
+
+/**
+ * Bound on enroll-from-recording template audio. Long conversations can carry
+ * hundreds of segments; ~90s of quality-passing speech is well past the 30s
+ * voiced floor and matches the manually-validated live-domain template
+ * (~60s / 48 clips → owner 0.79-0.84 on a held-out session), so selection
+ * stops there instead of embedding the entire recording.
+ */
+const ENROLL_FROM_RECORDING_MAX_MS = 90_000;
+
+/**
+ * Select the enrollment-usable segments of a live recording: finalized
+ * `.segNNN.mic.wav` files under the allowed roots that clear the audio quality
+ * gate for templateLearning, in timeline order, capped at
+ * {@link ENROLL_FROM_RECORDING_MAX_MS} of audio.
+ *
+ * The quality gate here DROPS a failing segment rather than rejecting the
+ * whole submission (unlike explicit-clip enrollment, where a bad clip rejects):
+ * conversation audio legitimately contains silence, assistant-echo residue,
+ * and noise-only segments — those are exactly what the gate exists to exclude
+ * from a template, not a reason to fail the enrollment.
+ */
+export async function selectEnrollmentSegmentsFromRecording(input: {
+  recordingBaseId: string;
+  scoring: VoiceprintLiveScoringConfig;
+}): Promise<{
+  selected: Array<{ audioPath: string; durationMs: number }>;
+  consideredCount: number;
+  qualityRejectedCount: number;
+  cappedCount: number;
+  /**
+   * Segments unreachable because the contiguous-from-zero timeline broke (a
+   * missing/unfinalized index). Reported — never silently dropped — so
+   * `considered === used + rejected + capped + afterGap` always reconciles.
+   */
+  afterGapCount: number;
+}> {
+  const roots = input.scoring.allowedAudioRoots ?? [];
+  if (roots.length === 0) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      "Voiceprint enrollment from a recording requires configured audio roots.",
+    );
+  }
+  const segments = collectFinalizedVoiceprintSegments(input.recordingBaseId, roots);
+  if (!segments || segments.size === 0) {
+    throw new MethodError(
+      "FAILED_PRECONDITION",
+      `No finalized recording segments found for: ${input.recordingBaseId}.`,
+    );
+  }
+
+  const selected: Array<{ audioPath: string; durationMs: number }> = [];
+  let qualityRejectedCount = 0;
+  let cappedCount = 0;
+  let reachedCount = 0;
+  // Accumulated SEGMENT audio (sidecar duration_ms) — the selection budget.
+  // The 30s VOICED floor is enforced separately downstream from the sidecar's
+  // measured speechMs.
+  let selectedMs = 0;
+  // Timeline order (contiguous from seg 0) so the template reflects the
+  // conversation start-to-finish rather than an arbitrary directory order.
+  for (let index = 0; segments.has(index); index += 1) {
+    reachedCount += 1;
+    const segment = segments.get(index)!;
+    if (selectedMs >= ENROLL_FROM_RECORDING_MAX_MS) {
+      cappedCount += 1;
+      continue;
+    }
+    const audioPath = resolveAllowedAudioPath(segment.audioPath, roots);
+    const audio = await readWavFile(audioPath);
+    const quality = assessVoiceprintAudioQuality(
+      audio.samples,
+      audio.sampleRate,
+      input.scoring.qualityThresholds,
+    );
+    if (quality.status === "rejected" || !quality.allowedUses.templateLearning) {
+      qualityRejectedCount += 1;
+      continue;
+    }
+    selected.push({ audioPath, durationMs: segment.durationMs });
+    selectedMs += segment.durationMs;
+  }
+  return {
+    selected,
+    consideredCount: segments.size,
+    qualityRejectedCount,
+    cappedCount,
+    afterGapCount: segments.size - reachedCount,
+  };
+}
 
 /**
  * Resolve each enrollment audio source to its allowed path (registered artifact
