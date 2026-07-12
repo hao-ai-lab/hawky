@@ -57,6 +57,14 @@ protocol VoiceprintEnrollmentGateway: Sendable {
         params: [String: JSONValue],
         timeoutSeconds: TimeInterval
     ) async -> LiveVoiceprintEnrollmentResult?
+
+    /// Query whether an owner template is already enrolled (+ scalar metadata) so
+    /// the UI can show an "already enrolled" state. Defaulted to nil so inert /
+    /// test gateways need not implement it (the UI then shows the first-time flow).
+    func fetchOwnerTemplateStatus(
+        sessionKey: String,
+        timeoutSeconds: TimeInterval
+    ) async -> LiveVoiceprintOwnerTemplateStatus?
 }
 
 extension LiveGatewayBridge: VoiceprintEnrollmentGateway {}
@@ -71,6 +79,13 @@ extension VoiceprintEnrollmentGateway {
         wavPath: String,
         timeoutSeconds: TimeInterval
     ) async -> Bool { false }
+
+    /// Default: status unknown (nil). Inert/test gateways inherit this, so the UI
+    /// falls back to the first-time enrollment flow.
+    func fetchOwnerTemplateStatus(
+        sessionKey: String,
+        timeoutSeconds: TimeInterval
+    ) async -> LiveVoiceprintOwnerTemplateStatus? { nil }
 }
 
 /// The biometric-consent snapshot for enrollment. All four keys are surfaced to
@@ -245,6 +260,10 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// UI toggles set `biometricAllowed`/`captureAllowed`; the flow refuses to
     /// submit until both are true.
     @Published var consent: OwnerEnrollmentConsent = .denied
+    /// Existing owner-template status queried from the gateway on appear. nil =
+    /// not yet queried / unknown; `.enrolled == false` = first-time flow;
+    /// `.enrolled == true` = show the "already enrolled" summary + re-enroll CTA.
+    @Published private(set) var existingEnrollment: LiveVoiceprintOwnerTemplateStatus?
 
     private let gateway: VoiceprintEnrollmentGateway
     private let sessionKey: String
@@ -260,6 +279,21 @@ final class OwnerEnrollmentModel: ObservableObject {
         self.gateway = gateway
         self.sessionKey = sessionKey
         self.voicedFloorMs = voicedFloorMs
+    }
+
+    /// Query the gateway for an existing owner template so the UI can show an
+    /// "already enrolled" summary instead of a blank first-time flow. Best-effort:
+    /// a nil result (offline / inert gateway / transport failure) simply leaves
+    /// the first-time flow in place. Safe to call repeatedly (e.g. on appear and
+    /// after a successful enroll).
+    func loadEnrollmentStatus() async {
+        let status = await gateway.fetchOwnerTemplateStatus(
+            sessionKey: sessionKey,
+            timeoutSeconds: 15
+        )
+        if let status {
+            existingEnrollment = status
+        }
     }
 
     /// Total estimated VOICED speech across all captured sources (ms).

@@ -1326,6 +1326,56 @@ export function registerVoiceprintMethods(
     }
   });
 
+  // ── Owner enrollment status (metadata only, no biometric material) ───────
+  //
+  // Lets the enrollment UI show "already enrolled" (+ when / how much / quality)
+  // instead of always presenting a blank first-time flow. Returns SCALAR
+  // metadata read from the template's plaintext header — never the centroid or
+  // any embedding (A7 discipline). Gracefully reports `enrolled: false` when
+  // enrollment is not configured or no (non-deleted) template exists, rather
+  // than throwing, so the UI degrades to the first-time flow.
+  server.registerMethod("identity.voiceprint.owner_template_status", (conn, params) => {
+    const input = parseDeleteOwnerTemplateParams(params);
+    const sessionKey = sessionKeyForVoiceprintRequest(conn, input.sessionKey);
+    if (!scoring?.ownerTemplateFileSource) {
+      return { ok: true as const, sessionKey, enrolled: false as const };
+    }
+    try {
+      const fileRef = voiceprintTemplateFileRefFromSource(scoring.ownerTemplateFileSource);
+      if (!existsSync(fileRef.filePath)) {
+        return { ok: true as const, sessionKey, enrolled: false as const };
+      }
+      const artifact = readEncryptedVoiceprintTemplateArtifact(fileRef);
+      if (artifact.template.deletedAt) {
+        return { ok: true as const, sessionKey, enrolled: false as const };
+      }
+      const enrollment = artifact.template.enrollment;
+      const model = artifact.template.model;
+      return {
+        ok: true as const,
+        sessionKey,
+        enrolled: true as const,
+        templateRef: artifact.template.id,
+        enrolledAt: enrollment.createdAt,
+        speechMs: enrollment.speechMs,
+        sourceCount: enrollment.sourceCount,
+        quality: enrollment.quality,
+        embeddingDim: artifact.template.embeddingDim,
+        model: model
+          ? { provider: model.provider, modelId: model.modelId, version: model.version }
+          : undefined,
+      };
+    } catch (error) {
+      // A corrupt/unreadable template must not crash the UI query: report
+      // not-enrolled so the user can re-enroll over it.
+      log.warn("identity.voiceprint.owner_template_status read failed", {
+        session_key: sessionKey,
+        error: errorMessage(error),
+      });
+      return { ok: true as const, sessionKey, enrolled: false as const };
+    }
+  });
+
   // ── A5 model-version-mismatch backfill: re-embed the owner template ──────
   //
   // When the live scoring model was upgraded (new provider/modelId/version), the
