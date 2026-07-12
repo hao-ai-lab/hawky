@@ -1,3 +1,4 @@
+import AVFAudio
 import Foundation
 
 // =============================================================================
@@ -333,6 +334,16 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// not yet queried / unknown; `.enrolled == false` = first-time flow;
     /// `.enrolled == true` = show the "already enrolled" summary + re-enroll CTA.
     @Published private(set) var existingEnrollment: LiveVoiceprintOwnerTemplateStatus?
+    /// The message of the LAST listening-start (or capture) failure, mirrored
+    /// from the `.failed` state it produced. The view uses it to render the
+    /// error INSIDE the Listening section — next to the button the user tapped
+    /// — while submit failures stay under the Enroll button. Cleared whenever
+    /// a new listening attempt, a submit, or a reset begins.
+    @Published private(set) var listeningFailure: String?
+    /// True only when the last listening-start failure was an ACTUAL denied
+    /// microphone permission (checked against AVAudioApplication, never
+    /// guessed). Drives the "Open Settings" affordance next to the error.
+    @Published private(set) var micPermissionDenied = false
 
     // MARK: - Listening-session flow state (enroll from a live recording)
 
@@ -515,6 +526,8 @@ final class OwnerEnrollmentModel: ObservableObject {
         serverCountedSpeechMs = nil
         takeCountAtLastRejection = 0
         listeningElapsedMs = 0
+        listeningFailure = nil
+        micPermissionDenied = false
         state = .idle
         resumePendingWaitersIfSettled()
     }
@@ -703,11 +716,14 @@ final class OwnerEnrollmentModel: ObservableObject {
         recordingTransportProvider: GatewayTransportResolver? = nil
     ) async -> Bool {
         guard !isListening else { return true }
+        // A fresh attempt supersedes any earlier listening failure.
+        listeningFailure = nil
+        micPermissionDenied = false
         // The gateway rejects >maxTakes ids outright; refusing here keeps the
         // user's audio instead of letting an 11th take doom every submit.
         guard !atTakeLimit else { return false }
         guard store.voiceprintEnrollmentGateway() != nil else {
-            state = .failed("Hawky gateway is not reachable — connect first to enroll.")
+            failListening("Hawky gateway is not reachable — connect first to enroll.")
             return false
         }
         // "Continue recording": captured takes and the server-count anchor are
@@ -720,7 +736,15 @@ final class OwnerEnrollmentModel: ObservableObject {
             recordingTransportProvider: recordingTransportProvider
         )
         guard started else {
-            state = .failed("Could not start the listening session. Check the microphone permission and try again.")
+            // Blame the microphone ONLY when its permission is actually denied;
+            // otherwise surface the store's real reason (auth / network /
+            // recording / silence setup) instead of a mic catch-all.
+            let micDenied = AVAudioApplication.shared.recordPermission == .denied
+            micPermissionDenied = micDenied
+            failListening(Self.listeningStartFailureMessage(
+                micPermissionDenied: micDenied,
+                storeReason: store.lastEnrollmentListeningStartFailure
+            ))
             return false
         }
         isListening = true
@@ -754,7 +778,7 @@ final class OwnerEnrollmentModel: ObservableObject {
         // with the take entry.
         listeningElapsedMs = 0
         guard let recordingBaseId, !recordingBaseId.isEmpty else {
-            state = .failed("No audio was captured — try again.")
+            failListening("No audio was captured — try again.")
             return
         }
         // Dedupe guard: the store's base-id accessor falls back to the LAST
@@ -799,6 +823,9 @@ final class OwnerEnrollmentModel: ObservableObject {
             state = .tooShort
             return nil
         }
+        // A submit supersedes any lingering listening failure, so a subsequent
+        // `.failed` unambiguously belongs to the Enroll button.
+        listeningFailure = nil
         state = .submitting
         let params = LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams(
             sessionKey: sessionKey,
@@ -845,6 +872,56 @@ final class OwnerEnrollmentModel: ObservableObject {
             state = .failed(Self.recordingFailureMessage(for: result))
         }
         return result
+    }
+
+    /// Success copy for an accepted enrollment result, honest about capping:
+    /// when the gateway cut selection at its total budget (`segmentsCapped > 0`)
+    /// the template was built from the FIRST portion of the takes, not from
+    /// everything the user said — say so instead of implying all of it was used.
+    nonisolated static func enrolledMessage(for result: LiveVoiceprintEnrollmentResult) -> String {
+        if let capped = result.segmentsCapped, capped > 0 {
+            // A capped enrollment always carries speechMs from serializeEnrollmentSuccess;
+            // only cite the duration when it's actually present, so a parse anomaly that
+            // dropped speechMs can't render "the first 0s of your speech" (self-contradictory
+            // against "you talked more than needed"). Drop the duration clause instead.
+            if let speechMs = result.speechMs {
+                let seconds = Int((speechMs / 1000).rounded())
+                return "Enrolled from the first \(seconds)s of your speech — you talked more than needed, so the rest wasn't used. Your voice is set up."
+            }
+            return "Enrolled from the first part of your speech — you talked more than needed, so the rest wasn't used. Your voice is set up."
+        }
+        let seconds = Int(((result.speechMs ?? 0) / 1000).rounded())
+        return "Enrolled from \(seconds)s of your speech. Your voice is set up."
+    }
+
+    /// Route a listening-flow failure through BOTH surfaces: the state machine
+    /// (existing `.failed` semantics, pinned by tests) and `listeningFailure`,
+    /// which the view uses to place the error next to the listen button.
+    private func failListening(_ message: String) {
+        listeningFailure = message
+        state = .failed(message)
+    }
+
+    /// Accurate copy for a failed listening start. Mentions the microphone ONLY
+    /// when the permission is actually denied; otherwise prefers the store's
+    /// concrete reason (auth failure / no key / network / recording / silence
+    /// setup) over a catch-all that would send the user to the wrong setting.
+    nonisolated static func listeningStartFailureMessage(
+        micPermissionDenied: Bool,
+        storeReason: String?
+    ) -> String {
+        if micPermissionDenied {
+            return "Microphone access is turned off for Hawky. Allow the microphone in Settings, then try again."
+        }
+        if let storeReason, !storeReason.isEmpty {
+            return "Could not start the realtime voice session: \(storeReason)"
+        }
+        // Distinguish the two channels: the gateway control connection can be up
+        // (Settings shows "connected") while the realtime WebRTC/live audio
+        // channel — a SEPARATE connection this session needs — fails to come up.
+        // Conflating them makes the error read as a flat contradiction of the
+        // Settings status.
+        return "Couldn't start the realtime voice session — your gateway is connected, but the live audio channel didn't come up. Check your live provider settings and network, then try again."
     }
 
     /// Actionable copy for a non-accepted `enroll_owner_from_recording` result

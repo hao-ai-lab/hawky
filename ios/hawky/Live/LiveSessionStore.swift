@@ -152,6 +152,14 @@ final class LiveSessionStore {
     private(set) var config: LiveSessionConfig
     private(set) var activeConfig: LiveSessionConfig?
     var liveConfig: LiveSessionConfig { activeConfig ?? config }
+    /// True while the current session's config suppresses the conversation
+    /// record (`conversationJournalingEnabled == false` — the owner-voiceprint
+    /// enrollment listening session). Captured as stored state in start() and
+    /// cleared in stop() because appends bracket the `activeConfig` lifetime on
+    /// both sides ("Connecting…" fires before the snapshot is frozen, "Session
+    /// stopped" after it is cleared) — deriving from `liveConfig` alone would
+    /// leak exactly those bracketing messages into the chat.
+    private var suppressConversationRecord = false
     private(set) var phase: LiveSessionPhase = .idle
     /// Gateway (your Hawky machine) reachability for the active session. Drives the
     /// prominent bridge-offline banner so an unreachable machine no longer produces a
@@ -972,6 +980,14 @@ final class LiveSessionStore {
     /// scoped; cleared by `stopEnrollmentListeningSession()`.
     private(set) var enrollmentListeningActive = false
 
+    /// WHY the last `startEnrollmentListeningSession()` returned false, captured
+    /// before `stop()` clears the phase. This is the enrollment UI's only window
+    /// into the real cause (auth / key / network from `classifyStartFailure`,
+    /// recording never opening, silence setup) — without it the screen can only
+    /// show a catch-all that wrongly blames the microphone. nil while a start is
+    /// in flight or after a successful one.
+    private(set) var lastEnrollmentListeningStartFailure: String?
+
     /// Base id of the current (or, after stop, most recent) Live recording — the
     /// WAV basename, which is byte-identical to the base of the uploaded
     /// `.segNNN.mic` segment media ids (e.g. "live-20260712-135209"). Reads the
@@ -1020,8 +1036,61 @@ final class LiveSessionStore {
         recordingTransport: GatewayTransport? = nil,
         recordingTransportProvider: GatewayTransportResolver? = nil
     ) async -> Bool {
-        guard !phase.isActive else { return false }
-        var override = config
+        lastEnrollmentListeningStartFailure = nil
+        guard !phase.isActive else {
+            lastEnrollmentListeningStartFailure = "A live session is already running — stop it first."
+            return false
+        }
+        let override = Self.enrollmentListeningConfigOverride(from: config)
+        await start(
+            recordingTransport: recordingTransport ?? lastRecordingTransport,
+            recordingTransportProvider: recordingTransportProvider ?? lastRecordingTransportProvider,
+            configOverride: override
+        )
+        guard phase == .connected, let provider else {
+            // Capture the REAL start failure (auth / key / network via
+            // classifyStartFailure) before stop() clears the phase, so the
+            // enrollment UI can report what actually failed.
+            if case .failed(let message) = phase {
+                lastEnrollmentListeningStartFailure = message
+            } else {
+                lastEnrollmentListeningStartFailure = "The live connection did not come up."
+            }
+            await stop()
+            return false
+        }
+        // No recording ⇒ no segments ever reach the gateway ⇒ enrollment can only
+        // end in no_usable_segments. Fail now with the session torn down.
+        guard isRecording else {
+            lastEnrollmentListeningStartFailure = "The session started but its recording did not, so no audio could upload."
+            await stop()
+            return false
+        }
+        do {
+            try await provider.setSilenceMode(true, config: liveConfig)
+        } catch {
+            // Couldn't silence — never run a listening session where the model
+            // may talk over the user's enrollment speech.
+            lastEnrollmentListeningStartFailure = "Could not set up silent listening: \(error.localizedDescription)"
+            await stop()
+            return false
+        }
+        enrollmentListeningActive = true
+        // Deliberately NO system message: with conversationJournalingEnabled off
+        // this session leaves the chat record untouched — the enrollment screen
+        // itself shows the listening state.
+        return true
+    }
+
+    /// The TEMPORARY config override the enrollment listening session runs with
+    /// (see `startEnrollmentListeningSession` for why each knob is forced).
+    /// Extracted as a nonisolated static so the shape — especially the
+    /// journaling suppression that keeps enrollment audio out of the chat
+    /// record — is pinned by unit tests without driving a live session.
+    nonisolated static func enrollmentListeningConfigOverride(
+        from base: LiveSessionConfig
+    ) -> LiveSessionConfig {
+        var override = base
         override.audioInputEnabled = true
         override.mediaPersistenceMode = .liveUpload
         override.visualSource = .off
@@ -1032,32 +1101,12 @@ final class LiveSessionStore {
         override.safetyCheckEnabled = false
         override.speakOnlyWhenSpokenTo = true
         override.openingBehavior = .silent
-        await start(
-            recordingTransport: recordingTransport ?? lastRecordingTransport,
-            recordingTransportProvider: recordingTransportProvider ?? lastRecordingTransportProvider,
-            configOverride: override
-        )
-        guard phase == .connected, let provider else {
-            await stop()
-            return false
-        }
-        // No recording ⇒ no segments ever reach the gateway ⇒ enrollment can only
-        // end in no_usable_segments. Fail now with the session torn down.
-        guard isRecording else {
-            await stop()
-            return false
-        }
-        do {
-            try await provider.setSilenceMode(true, config: liveConfig)
-        } catch {
-            // Couldn't silence — never run a listening session where the model
-            // may talk over the user's enrollment speech.
-            await stop()
-            return false
-        }
-        enrollmentListeningActive = true
-        appendSystemMessage("Voice enrollment: listening silently.", eventType: "voiceprint.enroll_listen.on")
-        return true
+        // The enrollment monologue is BIOMETRIC CAPTURE, not conversation: it
+        // must never journal into the app chat / session history, never append
+        // to the gateway session transcript (latent recognizer), and never
+        // distill into daily memory. One flag gates all of those record paths.
+        override.conversationJournalingEnabled = false
+        return override
     }
 
     /// Stop the enrollment listening session and return the recording base id to
@@ -1761,6 +1810,14 @@ final class LiveSessionStore {
 
         let prepareStartedAt = Date()
         var effectiveConfig = configOverride ?? config
+        // Latch record suppression BEFORE the first append ("Connecting…") so a
+        // record-suppressed session (enrollment listening) never writes its
+        // connect-time system messages into the chat. Every start() re-latches,
+        // so a normal session always restores journaling.
+        suppressConversationRecord = Self.conversationRecordSuppressed(
+            activeConfig: effectiveConfig,
+            draftConfig: effectiveConfig
+        )
         audioOutputPlayer.updateDestination(effectiveConfig.audioOutputDestination)
         if effectiveConfig.provider == .openAIRealtime {
             effectiveConfig.openAICredentialMode = .directAPIKey
@@ -2179,6 +2236,9 @@ final class LiveSessionStore {
         guard phase.isActive || provider != nil else {
             phase = .idle
             bridgeStatus = .idle
+            // A failed record-suppressed start (enrollment listening) lands here;
+            // release the latch so later idle-time messages journal normally.
+            suppressConversationRecord = false
             return
         }
         let stopStartedAt = Date()
@@ -2260,9 +2320,16 @@ final class LiveSessionStore {
         // Memory feature (#653): auto-distill the just-ended session into the
         // daily log. Detached + best-effort so it never delays teardown or blocks
         // the UI; failures (no gateway, no transcript) are swallowed.
-        Task.detached { [weak self, endedSessionKey] in
-            await self?.distillEndedSessionIntoDailyMemory(sessionKey: endedSessionKey)
+        // SKIPPED for record-suppressed sessions (enrollment listening): the
+        // enrollment monologue is biometric capture and must not reach memory.
+        if !suppressConversationRecord {
+            Task.detached { [weak self, endedSessionKey] in
+                await self?.distillEndedSessionIntoDailyMemory(sessionKey: endedSessionKey)
+            }
         }
+        // Release the latch LAST — "Session stopped" above must stay suppressed
+        // for a record-suppressed session.
+        suppressConversationRecord = false
     }
 
     func pause() async {
@@ -4853,11 +4920,40 @@ final class LiveSessionStore {
         draftConfig: LiveSessionConfig
     ) -> LiveTranscriptAppendRuntimeTarget? {
         let cfg = activeConfig ?? draftConfig
+        // conversationJournalingEnabled == false (enrollment listening session):
+        // the user's turns are biometric capture, not conversation — they must
+        // not append to the gateway session transcript either.
         guard cfg.modeLatentIntentionEnabled,
+              cfg.conversationJournalingEnabled,
               let sessionKey = resolvedRuntimeGatewayBridgeSessionKey(from: cfg) else {
             return nil
         }
         return LiveTranscriptAppendRuntimeTarget(sessionKey: sessionKey, modeRaw: cfg.mode.rawValue)
+    }
+
+    /// Whether the given session shape keeps the conversation record untouched
+    /// (no app chat entries, no journal lines, no session-end memory distill).
+    /// Same activeConfig-over-draft precedence as the runtime-target helpers so
+    /// a mid-session settings edit can never flip journaling for the running
+    /// session. FAIL-CLOSED default: only an explicit override suppresses.
+    nonisolated static func conversationRecordSuppressed(
+        activeConfig: LiveSessionConfig?,
+        draftConfig: LiveSessionConfig
+    ) -> Bool {
+        !(activeConfig ?? draftConfig).conversationJournalingEnabled
+    }
+
+    /// Whether a session's free-text lock-screen line — a system message's
+    /// `detailLine` or a user turn's "You: …" contextLine — may be persisted to
+    /// the cross-process WidgetStatusStore / lock-screen widget. Record
+    /// suppression (enrollment listening) must gate this the same way it gates
+    /// the chat record: the enrollment session's bracketing status text
+    /// ("Connecting …", the bridge session key, "Session stopped") and any user
+    /// turn text is session content that a bystander must not see on the lock
+    /// screen and that must leave no persisted trace. FAIL-CLOSED: suppress
+    /// whenever the record is suppressed.
+    nonisolated static func widgetDetailLinePersistAllowed(recordSuppressed: Bool) -> Bool {
+        !recordSuppressed
     }
 
     nonisolated static func voiceprintRealtimeRuntimeTarget(
@@ -5299,11 +5395,22 @@ final class LiveSessionStore {
 
     private func appendUserMessage(_ message: String) {
         appendConversation(role: .user, text: message, level: .info, isStreaming: false)
-        updateWidgetStatus(contextLine: "You: \(message)")
+        // Record-suppressed session (enrollment listening): the chat entry is
+        // already dropped by appendConversation's central guard, so keep the
+        // user text off the cross-process widget context line too. Routes through
+        // the same persist gate as the system detailLine, matching the sibling
+        // suppression in finishUserTranscript, so a future path that injects a
+        // typed turn during a suppressed session leaves no lock-screen trace.
+        if Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) {
+            updateWidgetStatus(contextLine: "You: \(message)")
+        }
         currentAssistantEntryID = nil
     }
 
     private func appendVisualFrame(_ data: Data) {
+        // Record-suppressed session (enrollment listening): no frame bubbles.
+        // (Enrollment forces the camera off; this is the fail-closed belt.)
+        guard !suppressConversationRecord else { return }
         let detail = """
         {
           "type": "input_image",
@@ -5392,6 +5499,9 @@ final class LiveSessionStore {
 
     private func appendAssistantDelta(itemID: String?, phase: String? = nil, delta: String, detail: String?, eventType: String?) {
         guard !delta.isEmpty else { return }
+        // Record-suppressed session (enrollment listening): nothing enters the
+        // chat record. (The model is silenced anyway; this is the belt.)
+        guard !suppressConversationRecord else { return }
         // Prefer keying by the Realtime output item_id: one item == one bubble,
         // even across multiple deltas/redeliveries. Fall back to the single
         // "current" entry only when no item_id is provided (e.g. mock provider).
@@ -5464,7 +5574,16 @@ final class LiveSessionStore {
             // Stop the bubble reading the holder; it now shows the committed text.
             streamingText.text[id] = nil
             journal(conversation[index])
-            updateWidgetStatus(contextLine: "Agent: \(conversation[index].text)")
+            // Record-suppressed session (enrollment listening): the chat entry is
+            // dropped by appendConversation's central guard, so keep the assistant
+            // text off the cross-process widget context line too. Routes through
+            // the same persist gate as the sibling user paths (appendUserMessage,
+            // finishUserTranscript) and the system detailLine, so a provider
+            // greeting that slips past speakOnlyWhenSpokenTo leaves no lock-screen
+            // trace during a silent enrollment listening session.
+            if Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) {
+                updateWidgetStatus(contextLine: "Agent: \(conversation[index].text)")
+            }
         } else if let fallbackText, !fallbackText.isEmpty {
             var entry = appendConversation(role: .assistant, text: fallbackText, level: .info, isStreaming: false, detail: detail, eventType: eventType)
             if let phase, let index = conversation.firstIndex(where: { $0.id == entry.id }) {
@@ -5473,7 +5592,14 @@ final class LiveSessionStore {
                 journal(entry)
             }
             if let itemID { assistantEntryByItemID[itemID] = entry.id }
-            updateWidgetStatus(contextLine: "Agent: \(entry.text)")
+            // Record-suppressed session (enrollment listening): a lone response.done
+            // carrying a transcript reaches this fallback branch independent of any
+            // prior deltas; the bubble is already dropped by appendConversation's
+            // central guard, so gate the widget context line the same way. Fail
+            // closed so the silenced model's words never persist on the lock screen.
+            if Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) {
+                updateWidgetStatus(contextLine: "Agent: \(entry.text)")
+            }
             return
         }
         currentAssistantEntryID = nil
@@ -5481,6 +5607,9 @@ final class LiveSessionStore {
 
     private func appendUserTranscriptDelta(itemID: String, delta: String, detail: String?, eventType: String?) {
         guard !delta.isEmpty else { return }
+        // Record-suppressed session (enrollment listening): the user's words are
+        // biometric capture, never conversation — keep them out of the record.
+        guard !suppressConversationRecord else { return }
         if let entryID = transcriptEntryByItemID[itemID],
            let index = conversation.firstIndex(where: { $0.id == entryID }) {
             conversation[index].text += delta
@@ -5520,12 +5649,22 @@ final class LiveSessionStore {
             conversation[index].isStreaming = false
             conversation[index].detail = detail ?? conversation[index].detail
             conversation[index].eventType = eventType ?? conversation[index].eventType
-            journal(conversation[index])
-            updateWidgetStatus(contextLine: "You: \(conversation[index].text)")
-        } else if !transcript.isEmpty {
+            // Record-suppressed session (enrollment listening): never journal the turn
+            // or leak it onto the lock-screen widget. Today this branch is unreachable
+            // under suppression because appendUserTranscriptDelta (the sole populator of
+            // transcriptEntryByItemID) early-returns before writing the key — but guard
+            // here too, matching every sibling append path, so a future path that
+            // populates the map some other way can't leak an enrollment turn.
+            if !suppressConversationRecord {
+                journal(conversation[index])
+                updateWidgetStatus(contextLine: "You: \(conversation[index].text)")
+            }
+        } else if !transcript.isEmpty, !suppressConversationRecord {
+            // Record-suppressed session (enrollment listening): the finalized turn
+            // stays out of the chat AND off the widget context line.
             appendConversation(role: .user, text: transcript, level: .info, isStreaming: false, detail: detail, eventType: eventType)
             updateWidgetStatus(contextLine: "You: \(transcript)")
-        } else if eventType == "input_audio_buffer.speech_stopped" {
+        } else if eventType == "input_audio_buffer.speech_stopped", !suppressConversationRecord {
             let unavailableDetail = detail ?? "No transcription text was provided for this spoken turn."
             appendConversation(role: .user, text: "", level: .warning, isStreaming: false, detail: unavailableDetail, eventType: eventType)
             updateWidgetStatus(contextLine: "You spoke")
@@ -5573,6 +5712,8 @@ final class LiveSessionStore {
     }
 
     private func finishCurrentAudioTurn(byteCount: Int) {
+        // Record-suppressed session (enrollment listening): no "Audio turn" rows.
+        guard !suppressConversationRecord else { return }
         let cfg = liveConfig
         if cfg.inputTranscriptionEnabled {
             if currentUserAudioEntryID == nil {
@@ -5605,6 +5746,8 @@ final class LiveSessionStore {
         arguments: String? = nil,
         output: String? = nil
     ) {
+        // Record-suppressed session (enrollment listening): no tool bubbles.
+        guard !suppressConversationRecord else { return }
         let now = Date()
         // Update an existing bubble for this call id.
         if let callID, let id = toolEntryByCallID[callID],
@@ -5706,6 +5849,14 @@ final class LiveSessionStore {
     ) {
         guard conversation.last?.text != message || conversation.last?.role != .system else { return }
         appendConversation(role: .system, text: message, level: level, isStreaming: false, detail: detail, eventType: eventType)
+        // `detailLine` is free-text session content (e.g. "Connecting OpenAI…",
+        // the bridge session key, "Session stopped"). Under record suppression
+        // (enrollment listening) it must NOT reach the cross-process
+        // WidgetStatusStore / lock-screen widget — the enrollment session's whole
+        // purpose is to leave no trace. Legitimate liveState/recordingState widget
+        // updates route through their own direct updateWidgetStatus calls and are
+        // unaffected. Fail closed: suppress the persisted detailLine here too.
+        guard Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) else { return }
         updateWidgetStatus(detailLine: message)
     }
 
@@ -5726,6 +5877,9 @@ final class LiveSessionStore {
             detail: detail,
             eventType: eventType
         )
+        // Record-suppressed session (enrollment listening): return the entry
+        // unappended so callers no-op instead of writing to the chat record.
+        guard !suppressConversationRecord else { return entry }
         conversation.append(entry)
         journal(entry)
         trimConversation()
@@ -5965,6 +6119,9 @@ final class LiveSessionStore {
     }
 
     private func journal(_ entry: LiveConversationEntry) {
+        // Record-suppressed session (enrollment listening): no journal lines —
+        // session history must not retain any trace of the enrollment monologue.
+        guard !suppressConversationRecord else { return }
         guard let session = localSessions.first(where: { $0.id == currentSessionID }) else { return }
         LiveSessionArchive.append(entry: entry, to: session)
         scheduleSessionMetadataSave()
@@ -5976,6 +6133,9 @@ final class LiveSessionStore {
         json: String,
         providerLabel: String? = nil
     ) {
+        // Record-suppressed session (enrollment listening): the raw event log
+        // carries the same transcript payloads — keep it out of history too.
+        guard !suppressConversationRecord else { return }
         guard let session = localSessions.first(where: { $0.id == currentSessionID }) else { return }
         let entry = LiveRawLogEntry(
             provider: providerLabel ?? config.provider.label,
