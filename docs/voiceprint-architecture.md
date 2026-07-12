@@ -3,8 +3,12 @@
 How hawky recognizes **who is speaking** in a live ambient session, end to end:
 from the phone microphone to the answering LLM knowing it is talking to the
 device owner. This documents the architecture as shipped on `rich-localbuild`
-(2026-07-12), the design decisions behind it, and what was learned getting it
-to pass device acceptance.
+(2026-07-13, converged voiceprint v1), the design decisions behind it, and what
+was learned getting it to pass device acceptance.
+
+Companion docs: `voiceprint-modules.md` (per-file structure reference across all
+layers) and `voiceprint-enrollment.md` (the enrollment flow, capture-domain
+parity, and the `enroll_owner_from_recording` RPC contract).
 
 ## What it does
 
@@ -92,6 +96,13 @@ must not flap:
 
 - **Fast establish**: `owner_flip_threshold` consecutive `owner_speaking`
   turns (production config: 2, ≈5s of speech).
+- **Instant establish** (fast path): a *single* `owner_speaking` turn whose
+  score clears `instant_owner_confidence` establishes `owner_present`
+  immediately, without waiting for the streak. Motivated by cold start — users
+  ask "do you know me?" in the first turn, before K turns can accumulate. Safe
+  only because the confidence separation is wide (owner clean turns 0.85+,
+  different real speakers far below); unset disables it. See
+  `SpeakerEvidenceConfig.instantOwnerConfidence` in `evidence.ts`.
 - **Sticky hold**: overturning to `not_owner` needs
   `non_owner_flip_threshold` consecutive clear non-owner turns (production: 4);
   a single owner turn resets the streak.
@@ -121,32 +132,82 @@ See `ios/hawky/Live/LiveVoiceprintIdentity.swift`.
 |---|---|---|
 | Speaker model | `fixtures/voiceprint/models/campplus.onnx` | 3D-Speaker CAM++ (192-dim, ~0.65% EER on VoxCeleb) |
 | Embedding sidecar | `services/voiceprint/embed.py` | Python subprocess, JSON protocol; `onnx` (sherpa-onnx) + `reference` (deterministic test) backends; embeds ≥200ms slices |
-| Core library | `src/identity/voiceprint/` (41 modules) | wav/quality/similarity/thresholds/turn-scoring, evidence (A2), as-norm (A3), consent-ledger (A4), model-lifecycle (A5), telemetry (A7), liveness-nonce (A8), memory-bridge (A9), calibration (A10), live-* realtime plumbing, encrypted template store |
-| Gateway RPC | `src/gateway/voiceprint-methods.ts` | 17 `identity.voiceprint.*` methods: realtime_event/reset, score_turns, enroll/add_clip/delete/reembed, audio_artifact.register, consent CRUD + purge, telemetry/audit reads |
+| Core library | `src/identity/voiceprint/` (41 modules) | wav/quality/similarity/thresholds/turn-scoring, evidence (A2), as-norm (A3), consent-ledger (A4), model-lifecycle (A5), telemetry (A7), liveness-nonce (A8), memory-bridge (A9), calibration (A10), live-* realtime plumbing, encrypted template store. See `voiceprint-modules.md` for per-file roles. |
+| Gateway RPC | `src/gateway/voiceprint-methods.ts` (+ `voiceprint-config/-enrollment/-audio-resolve/-lifecycle/-liveness/-param-utils/-realtime.ts`) | 19 `identity.voiceprint.*` methods (see RPC list below): realtime_event/reset, request_embedding_challenge, audio_artifact.register, score_turns, apply_bundle, enroll_owner/enroll_owner_from_recording/add_enrollment_clip/delete/reembed, owner_template_status, bridge_memory_candidate, consent CRUD + purge, telemetry/audit reads |
 | Auto-scorer | `src/gateway/voiceprint-auto-score.ts` | WS1: per-session single-flight batching, wait-for-audio, evidence fold, edge-triggered broadcast + response piggyback |
-| iOS enrollment | `ios/hawky/Voiceprint/` | Guided owner enrollment (`.measurement` capture, quality-aware, ≥30s voiced) |
-| iOS live | `ios/hawky/Live/` | Parallel mic tap + chunk upload, realtime event forwarding, identity receive (broadcast + piggyback), UI label, agent injection |
+| iOS enrollment | `ios/hawky/Voiceprint/` | Owner enrollment through a **silent live listening session** (multi-take, capture-domain-parity, ≥30s server-voiced floor with a 60s guided target); see `voiceprint-enrollment.md` |
+| iOS live | `ios/hawky/Live/` | Parallel mic tap + chunk upload, realtime event forwarding, identity receive (broadcast + piggyback), UI label, agent injection; `LiveVoiceprintIdentity.swift` owns the edge-triggered identity state machine + injection wording |
 
 ## Configuration (`voiceprint.live_scoring`)
 
-Key fields (see `src/agent/types.ts` for the full schema):
+Full schema in `src/agent/types.ts` (`config.voiceprint`); resolved and
+validated in `src/gateway/voiceprint-config.ts`. All keys accept both
+`snake_case` (config files) and `camelCase`. Key fields:
 
 ```jsonc
 {
   "enabled": true,
+  // A5 production guards (default false — PRODUCTION MUST set the first two):
+  "require_discriminative_model": true,     // hard-reject the reference backend at load + score
+  "model_sha256": "<lowercase hex>",        // integrity-pin the .onnx model file
+  "model_path": "…/campplus.onnx",          // file to hash (else sidecar env VOICEPRINT_MODEL)
+  "dev_reference_backend": false,           // dev-only; non-discriminative reference backend
+
   "sidecar": { "command": ".venv/bin/python3", "args": ["services/voiceprint/embed.py"],
-               "env": { "VOICEPRINT_BACKEND": "onnx", "VOICEPRINT_MODEL": ".../campplus.onnx" } },
+               "env": { "VOICEPRINT_BACKEND": "onnx", "VOICEPRINT_MODEL": "…/campplus.onnx" } },
   "allowed_audio_roots": ["~/.hawky", "/tmp", "~/.hawky/workspace/media"],
-  "owner_template": { "file_path": "...", "key_path": "...", "create_key_if_missing": true },
+  "owner_template": { "file_path": "…", "key_path": "…", "create_key_if_missing": true },
+  "consent": { "capture_allowed": true, "biometric_allowed": true /* …per-scope */ },
   "thresholds": { "owner_accept": 0.55, "owner_possible": 0.45 },   // CAM++ raw cosine
-  "auto_score_finalized": true,                                       // WS1 opt-in
-  "evidence": { "owner_flip_threshold": 2, "non_owner_flip_threshold": 4,
-                "min_turn_ms": 2000, "stale_timeout_ms": 600000 }
+  // quality_thresholds, target_sample_rate, timeout_ms, expected_model — see types.ts
+
+  "auto_score_finalized": true,             // WS1 opt-in; default false
+  "evidence": {
+    "owner_flip_threshold": 2,              // consecutive owner turns to establish (fast)
+    "non_owner_flip_threshold": 4,          // consecutive clear non-owner turns to overturn (sticky)
+    "instant_owner_confidence": 0.85,       // a SINGLE owner turn >= this establishes instantly
+    "min_turn_ms": 2000,                    // sub-2s turns never vote toward not_owner
+    "stale_timeout_ms": 600000,             // 10 min of silence decays the verdict to unknown
+    "window_size": 5, "flip_threshold": 3   // symmetric fallback when the overrides are unset
+  },
+
+  // Phase 2 (on-device embeddings) — OPT-IN, default OFF:
+  "accept_client_embeddings": false,        // trust-boundary move: score a client vector directly
+  "liveness_nonce_ttl_ms": 60000,           // A8 single-use nonce TTL
+  "as_norm": { "enabled": false /* cohort + normalized_thresholds — NOT production-ready */ }
 }
 ```
 
 Thresholds are model-specific. Measured with CAM++ on real device audio:
 owner in-domain 0.6–0.85, different real speaker ~0.38, TTS ~0.10.
+
+## RPC surface (`identity.voiceprint.*`)
+
+19 methods, registered in `src/gateway/voiceprint-methods.ts` via
+`server.registerMethod(...)` (verify: `grep -n 'registerMethod("identity'`).
+All are opt-in / consent-gated where they touch biometric data.
+
+| Method | Role |
+|---|---|
+| `realtime_event` | Ingest one OpenAI-shaped realtime event; drives turn tracking + (when `auto_score_finalized`) the WS1 auto-scorer; piggybacks identity on the response. |
+| `realtime_reset` | Clear per-session realtime + auto-score state (evidence, pending buffer, queue). |
+| `request_embedding_challenge` | A8: issue a fresh single-use, session-bound liveness nonce (Phase 2 client-embedding path). |
+| `audio_artifact.register` | Explicit tier-1 artifact registration `(sessionKey, audioArtifactId)` → segment-relative window. |
+| `score_turns` | Score a batch of turns against the owner template (audio → sidecar, or a client embedding when opted in). |
+| `apply_bundle` | Apply an externally-produced scoring bundle (offline/replay + benchmark seam). |
+| `enroll_owner` | Enroll the owner template from explicit audio sources. |
+| `enroll_owner_from_recording` | **Converged live-capture enrollment**: build the template from finalized `.segNNN.mic` segments of 1..10 listening takes. See `voiceprint-enrollment.md`. |
+| `add_enrollment_clip` | Append one clip to an existing enrollment. |
+| `delete_owner_template` | Delete the owner template (right-to-erasure of the template artifact). |
+| `owner_template_status` | Report whether an owner template exists (drives the iOS "already enrolled" banner). |
+| `reembed_owner_template` | Re-embed the template from retained sources (model migration / staleness). |
+| `bridge_memory_candidate` | A9: bridge a reviewed owner tag into the memory-candidate path (opt-in, default off). |
+| `record_consent` | A4: append a consent grant/update to the ledger. |
+| `get_consent` | Read effective consent for a subject. |
+| `withdraw_consent` | A4: atomic withdraw-and-purge (append withdrawal + purge derived records). |
+| `purge_expired` | A4: retention sweep of expired biometric-derived records. |
+| `get_audit_log` | Read the A4 biometric-processing audit log. |
+| `get_score_telemetry` | A7: read the privacy-safe scalar scoring-decision telemetry. |
 
 ## Security & privacy properties
 
@@ -176,8 +237,10 @@ owner in-domain 0.6–0.85, different real speaker ~0.38, TTS ~0.10.
    ORTHOGONAL (cosine 0.01–0.14) to live WebRTC-tapped audio (AGC/AEC/NS) for
    the same person, while each domain is self-consistent (~0.6–0.7). Enrollment
    MUST capture through the same path recognition scores, or the template must
-   be built from live-captured audio. (Fixed operationally by re-enrolling from
-   live segments; iOS enrollment-through-live-path is the tracked follow-up.)
+   be built from live-captured audio. **Fixed in v1**: iOS enrollment now runs a
+   silent live listening session and builds the template from those live segments
+   via `enroll_owner_from_recording` — the standalone `.measurement` recorder is
+   retired. See `voiceprint-enrollment.md` ("capture-domain parity").
 2. **Turn timestamps and media timelines are different clocks.** Turns are
    recording-relative; segment files are 3s each. Slicing a segment with
    recording offsets yields empty audio ("segment too short" from the model).
@@ -216,3 +279,63 @@ against the real `score_turns` seam (no phone needed):
 Suggested order: (2) first (cheap, immediately tunes production config), then
 (1) with a small recorded multi-speaker set, then (3) as part of the benchmark
 repo.
+
+## Convergence record (voiceprint v1)
+
+### Acceptance timeline
+
+The path from "recognizes nobody" to "the model naturally knows the owner",
+in the order each blocker was found and closed on device:
+
+**Capture-domain mismatch** (template orthogonal to live audio, cosine 0.01–0.14)
+→ **live-domain template** (re-enroll from the same voice-processed capture path
+recognition scores, `enroll_owner_from_recording`; owner in-domain climbs to
+0.79–0.84) → **sticky evidence** (asymmetric hysteresis so the owner establishes
+fast and short "unknown" turns can't overturn mid-conversation) → **attributed
+injection** (tell the model *Hawky's voiceprint verified it*, defeating the
+model's trained prior to disclaim voice recognition) → **instant establish**
+(one high-confidence owner turn establishes immediately, so "do you know me?"
+in the first turn is answered right).
+
+### Final production config
+
+The block below is the converged v1 production shape (`config.voiceprint`).
+`require_discriminative_model` + `model_sha256` are mandatory in production;
+`evidence` values are the device-validated operating point.
+
+```jsonc
+{
+  "consent_retention_days": 365,
+  "live_scoring": {
+    "enabled": true,
+    "require_discriminative_model": true,
+    "model_sha256": "<pinned lowercase-hex sha256 of campplus.onnx>",
+    "model_path": "…/campplus.onnx",
+    "sidecar": {
+      "command": ".venv/bin/python3",
+      "args": ["services/voiceprint/embed.py"],
+      "env": { "VOICEPRINT_BACKEND": "onnx", "VOICEPRINT_MODEL": "…/campplus.onnx" }
+    },
+    "allowed_audio_roots": ["~/.hawky", "~/.hawky/workspace/media", "/tmp"],
+    "owner_template": {
+      "file_path": "…/state/voiceprint/owner-template.enc.json",
+      "key_path": "…/state/voiceprint/owner-template.key",
+      "create_key_if_missing": true
+    },
+    "consent": { "capture_allowed": true, "biometric_allowed": true },
+    "thresholds": { "owner_accept": 0.55, "owner_possible": 0.45 },
+    "auto_score_finalized": true,
+    "evidence": {
+      "owner_flip_threshold": 2,
+      "non_owner_flip_threshold": 4,
+      "instant_owner_confidence": 0.85,
+      "min_turn_ms": 2000,
+      "stale_timeout_ms": 600000
+    }
+  }
+}
+```
+
+Phase 2 knobs (`accept_client_embeddings`, `liveness_nonce_ttl_ms`, `as_norm`)
+stay OFF in v1: the on-device embedding path and a calibrated AS-Norm cohort are
+tracked follow-ups, not shipped defaults.
