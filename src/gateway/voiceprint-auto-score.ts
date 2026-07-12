@@ -103,7 +103,8 @@ export interface VoiceprintAutoScoreTuning {
    * non-owner evidence lets the owner's own "mm-hm"s flip the verdict to
    * not_owner. Positive decisions (owner/possible) always vote: clearing the
    * owner threshold DESPITE little audio is strong evidence, and possible_owner
-   * never resets streaks. The state still reaches the piggyback/UI either way.
+   * (which resets both streaks but cannot hard-flip) cannot overturn a settled
+   * verdict. The state still reaches the piggyback/UI either way.
    */
   minEvidenceTurnMs?: number;
   /** Bound on the per-session pending piggyback buffer (default 32). */
@@ -404,10 +405,18 @@ export class VoiceprintAutoScorer {
       }
       // Short-turn "unknown" is "could not tell", not "someone else": it neither
       // votes toward not_owner NOR resets the owner streak (skipping the fold
-      // entirely keeps it perfectly neutral). See minEvidenceTurnMs.
+      // keeps it perfectly neutral). It DOES refresh the evidence timestamp:
+      // otherwise a stretch of only short turns longer than staleTimeoutMs would
+      // decay a settled owner to unknown — the exact mid-conversation flap this
+      // neutrality exists to prevent. A state whose duration is unknowable (not
+      // in this batch — currently unreachable) votes normally: voting can only
+      // move the verdict toward not_owner, the fail-safe direction.
+      // See minEvidenceTurnMs.
       if (decision === "unknown_speaker" && minEvidenceTurnMs > 0) {
         const durationMs = turnDurations.get(scored.transcriptItemId);
         if (durationMs !== undefined && durationMs < minEvidenceTurnMs) {
+          const atMs = this.options.nowMs?.() ?? Date.now();
+          state.evidence = { ...state.evidence, updatedAtMs: atMs };
           continue;
         }
       }

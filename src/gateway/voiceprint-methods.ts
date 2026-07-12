@@ -702,6 +702,27 @@ function resolveVoiceprintAutoScoreTuning(
     evidence.min_turn_ms ?? evidence.minTurnMs,
     "voiceprint.live_scoring.evidence.min_turn_ms",
   );
+  // FAIL-FAST: the evidence reducer re-validates on every fold, and a fold-time
+  // throw lands inside the auto-scorer's batch catch — every batch would log
+  // "batch failed" and recognition would be silently dead. Surface a config
+  // typo here, at load time, instead.
+  for (const [name, value] of [
+    ["flip_threshold", flipThreshold],
+    ["owner_flip_threshold", ownerFlipThreshold],
+    ["non_owner_flip_threshold", nonOwnerFlipThreshold],
+    ["window_size", windowSize],
+  ] as const) {
+    if (value !== undefined && !Number.isInteger(value)) {
+      throw new Error(`voiceprint.live_scoring.evidence.${name} must be a positive integer.`);
+    }
+  }
+  const effectiveFlip = flipThreshold ?? 3;
+  const effectiveWindow = windowSize ?? 5;
+  if (effectiveFlip > effectiveWindow) {
+    throw new Error(
+      "voiceprint.live_scoring.evidence.flip_threshold must be <= window_size.",
+    );
+  }
   const config: NonNullable<VoiceprintAutoScoreTuning["evidenceConfig"]> = {};
   if (flipThreshold !== undefined) config.flipThreshold = flipThreshold;
   if (ownerFlipThreshold !== undefined) config.ownerFlipThreshold = ownerFlipThreshold;
@@ -4583,7 +4604,34 @@ function resolveLiveTurnAudioArtifact(input: {
       mediaId,
       allowedAudioRoots: input.allowedAudioRoots,
     });
-    return { audioPath: resolved.audioPath, sampleRate: resolved.sampleRate, source: "segment" };
+    // A whole file named by the recording base is only usable when it IS the
+    // full recording: the turn window is RECORDING-relative, so it is
+    // file-relative here iff the file covers it. Return the window EXPLICITLY —
+    // leaving it undefined would let the scoring queue's `?? turn.startMs`
+    // fallback re-derive the same offsets against whatever file this is, which
+    // is wrong for anything shorter than the full recording. A window beyond
+    // the file's sidecar duration means this file is NOT the full recording
+    // (e.g. an unrelated equally-named upload): fall through to the segmented
+    // timeline instead of slicing air.
+    const sidecar = readVoiceprintMediaSidecar(resolved.sidecarPath);
+    const durationMs = typeof sidecar.duration_ms === "number" && Number.isFinite(sidecar.duration_ms)
+      ? sidecar.duration_ms
+      : undefined;
+    if (
+      input.startMs !== undefined && input.endMs !== undefined &&
+      Number.isFinite(input.startMs) && Number.isFinite(input.endMs) &&
+      input.startMs >= 0 && input.endMs > input.startMs &&
+      durationMs !== undefined &&
+      input.endMs <= durationMs + VOICEPRINT_SEGMENT_DRIFT_TOLERANCE_MS
+    ) {
+      return {
+        audioPath: resolved.audioPath,
+        sampleRate: resolved.sampleRate,
+        requestStartMs: input.startMs,
+        requestEndMs: Math.min(input.endMs, durationMs),
+        source: "segment",
+      };
+    }
   } catch {
     // Fall through to segmented resolution below.
   }
@@ -4605,6 +4653,21 @@ function resolveLiveTurnAudioArtifact(input: {
 }
 
 const VOICEPRINT_SEGMENT_SUFFIX_REGEX = /^\.seg(\d{1,6})\.mic$/;
+
+/**
+ * Allowed drift (ms) between recording-aligned turn stamps (the phone's audio
+ * frame counter) and the segment timeline (cumulative sidecar `duration_ms`).
+ */
+const VOICEPRINT_SEGMENT_DRIFT_TOLERANCE_MS = 250;
+
+/** realpath that returns undefined instead of throwing (broken symlink, race). */
+function safeRealpath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Map a recording-aligned turn window onto the finalized live segments of a
@@ -4642,7 +4705,7 @@ function resolveVoiceprintSegmentedMediaArtifact(input: {
   // (root + one directory level, same layout resolveVoiceprintMediaArtifactPath
   // scans). Segment index -> {path, durationMs, sampleRate}.
   const prefix = `${input.recordingBaseId}`;
-  const segments = new Map<number, { audioPath: string; durationMs: number; sampleRate?: number }>();
+  const segments = new Map<number, { audioPath: string; realPath?: string; durationMs: number; sampleRate?: number }>();
   for (const root of input.allowedAudioRoots) {
     const dirs = [resolve(root)];
     try {
@@ -4696,12 +4759,19 @@ function resolveVoiceprintSegmentedMediaArtifact(input: {
         if (durationMs === undefined || durationMs <= 0) {
           continue;
         }
-        if (segments.has(index)) {
-          // Same segment index in two allowed roots — ambiguous, refuse to guess.
+        const existing = segments.get(index);
+        if (existing) {
+          // The same physical file can be reached twice via nested/overlapping
+          // allowed roots — that is a duplicate, not a conflict. Only a
+          // DIFFERENT file claiming the same segment index is ambiguous.
+          if (existing.audioPath === audioPath || existing.realPath === safeRealpath(audioPath)) {
+            continue;
+          }
           return undefined;
         }
         segments.set(index, {
           audioPath,
+          realPath: safeRealpath(audioPath),
           durationMs,
           sampleRate: sampleRateFromMime(sidecar.mime),
         });
@@ -4726,7 +4796,12 @@ function resolveVoiceprintSegmentedMediaArtifact(input: {
     if (overlapEnd <= overlapStart) {
       continue;
     }
-    if (endMs <= segEnd) {
+    // Tolerance absorbs ms-level drift between the phone's frame-counter turn
+    // stamps and the sidecars' measured durations, so a session's FINAL turn
+    // (whose endMs can land a hair past the last finalized segment) still
+    // resolves instead of being dropped after the retry loop. A turn missing
+    // MORE than the tolerance is genuinely un-uploaded audio → stay not-ready.
+    if (endMs <= segEnd + VOICEPRINT_SEGMENT_DRIFT_TOLERANCE_MS) {
       turnEndCovered = true;
     }
     const overlapMs = overlapEnd - overlapStart;
