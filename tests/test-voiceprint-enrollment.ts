@@ -663,7 +663,7 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
   });
 
-  test("selection caps at ~90s of segment audio and reports capped/afterGap counts honestly", async () => {
+  test("selection caps at ~180s of segment audio and reports capped/afterGap counts honestly", async () => {
     const server = makeMockServer();
     const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-cap-"));
     tempDirs.push(dir);
@@ -673,7 +673,7 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
     const conn = { sessionKey: "live:enroll-from-recording-cap" };
 
     // Sidecar duration_ms drives the cap budget (the WAVs themselves stay small):
-    // 50s + 50s reaches the 90s budget, so seg002 is capped.
+    // 100s + 100s reaches the 180s budget, so seg002 is capped.
     const base = "live-20260713-000004";
     for (const index of [0, 1, 2]) {
       const mediaId = `${base}.seg${String(index).padStart(3, "0")}.mic`;
@@ -684,7 +684,7 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
           mime: "audio/pcm16;rate=16000",
           captured_start_iso: createdAt,
           locked: false,
-          duration_ms: 50_000,
+          duration_ms: 100_000,
           final_iso: createdAt,
         }),
         "utf8",
@@ -786,7 +786,7 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
   });
 
-  test("the ~90s selection budget is TOTAL across takes, not per take", async () => {
+  test("the ~180s selection budget is TOTAL across takes, not per take", async () => {
     const server = makeMockServer();
     const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-totalcap-"));
     tempDirs.push(dir);
@@ -795,9 +795,10 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
     registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
     const conn = { sessionKey: "live:enroll-from-recording-totalcap" };
 
-    // Two takes whose sidecar durations are 50s each: within each take the
-    // per-recording cap admits the segment, but across takes the SECOND take's
-    // second segment must be cut by the global budget (50+50 >= 90).
+    // Two takes whose sidecar durations are 100s each: within each take the
+    // per-recording cap admits both segments (100 < 180 when seg1 is checked),
+    // but across takes the SECOND take must be cut by the global budget
+    // (100+100 >= 180 before its first segment is reached).
     const takeA = "live-20260713-000020";
     const takeB = "live-20260713-000021";
     for (const [take, indices] of [[takeA, [0, 1]], [takeB, [0, 1]]] as const) {
@@ -810,7 +811,7 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
             mime: "audio/pcm16;rate=16000",
             captured_start_iso: createdAt,
             locked: false,
-            duration_ms: 50_000,
+            duration_ms: 100_000,
             final_iso: createdAt,
           }),
           "utf8",
@@ -821,8 +822,8 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
       recordingBaseIds: [takeA, takeB],
       consent,
     });
-    // takeA seg0 (50s) + takeA seg1 capped per-recording; takeB seg0 (50s -> total 100s over
-    // budget after admit) then takeB seg1 cut by the GLOBAL budget.
+    // takeA seg0+seg1 admitted (per-recording budget never trips); takeB seg0
+    // and seg1 both cut by the GLOBAL budget (200s already selected >= 180s).
     expect(enroll.segmentsUsed).toBeLessThanOrEqual(3);
     expect(enroll.segmentsCapped).toBeGreaterThanOrEqual(1);
     expect(enroll.segmentsUsed + enroll.segmentsCapped + enroll.segmentsQualityRejected + enroll.segmentsAfterGap)
