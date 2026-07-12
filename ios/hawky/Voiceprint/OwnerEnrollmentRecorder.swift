@@ -6,6 +6,16 @@ import Foundation
 // to a local WAV via LiveRecordingSink, registers it as a voiceprint audio
 // artifact, and returns an OwnerEnrollmentSource for the enrollment flow.
 //
+// CAPTURE-DOMAIN PARITY (the whole reason this recorder is not a bespoke tap):
+// live recognition scores audio captured through `MicAudioSource(voiceProcessing:
+// true)` — Apple's voice-processing I/O (AEC/AGC/NS). A template enrolled from
+// RAW (`.measurement`) audio is acoustically ORTHOGONAL to that domain for the
+// SAME speaker (measured cosine 0.01-0.14 cross-domain vs ~0.6-0.7 in-domain),
+// so the owner never matches at recognition time. Enrollment therefore captures
+// through the EXACT same MicAudioSource + voice-capture session config that
+// `LiveSessionStore.startParallelMicRecording` uses. See
+// docs/voiceprint-architecture.md ("capture-domain mismatch").
+//
 // Real mic capture is device-only; this exists so OwnerEnrollmentView has a
 // concrete recorder. The testable enrollment LOGIC lives in OwnerEnrollmentModel
 // and does not depend on this type — tests feed OwnerEnrollmentSource values
@@ -26,18 +36,15 @@ final class OwnerEnrollmentRecorder {
     private let sink = LiveRecordingSink()
     private var startedAt: Date?
     private var elapsedTimer: Timer?
-    private let engine = AVAudioEngine()
-    private var tapInstalled = false
+    /// The SAME mic source live recognition records through (voice-processing I/O
+    /// on) so the enrolled template shares the recognition acoustic domain.
+    private var mic: MicAudioSource?
+    private var captureTask: Task<Void, Never>?
 
     /// Fraction of clip wall-clock time counted as VOICED speech. Mirrors the
     /// server sidecar's ~74% voiced-duration estimate so the client's guided floor
     /// tracks the server's VOICED floor.
     static let voicedFraction: Double = 0.74
-
-    /// Frames per input tap buffer (a common AVAudioEngine tap size, ~256 ms at
-    /// 16 kHz). The callback re-chunks whatever length it receives, so this only
-    /// trades callback frequency against buffer size.
-    private static let tapBufferFrames: AVAudioFrameCount = 4_096
 
     /// Outcome of a start attempt so the caller can distinguish "recording" from a
     /// denied-permission / setup failure and reset UI state accordingly.
@@ -47,68 +54,73 @@ final class OwnerEnrollmentRecorder {
         case failed
     }
 
-    /// Begin capturing mic audio into a local WAV. Requests microphone permission and
-    /// configures/activates a record-capable AVAudioSession before touching the engine,
-    /// mirroring the app's other mic paths. Returns whether recording actually began.
+    /// Begin capturing mic audio into a local WAV through the live recognition
+    /// capture path (voice-processing I/O). Configures the same voice-capture
+    /// AVAudioSession live uses, then streams `MicAudioSource` chunks into the
+    /// recording sink. Returns whether recording actually began.
     @discardableResult
     func start(store: LiveSessionStore) async -> StartResult {
         guard !isRecording else { return .started }
         sink.clearLastRecordingResult()
 
-        // Fail closed: never capture (and never write a silent WAV that the ~74%
-        // voiced estimate would count as speech) without an explicit mic grant.
-        guard await Self.requestMicPermission() else {
-            print("[OwnerEnrollmentRecorder] microphone permission denied")
-            return .permissionDenied
-        }
-
-        // Put the shared session into a record category before reading the input
-        // format; another feature may have left it in .ambient/.playback, which makes
-        // the input node report a 0 Hz format and crashes installTap.
+        // Match the live recognition session (mode .voiceChat) so the
+        // voice-processing I/O engages the same way it does during scoring; the
+        // input node also reports a valid record format afterward. Another
+        // feature may have left the session in .ambient/.playback.
         do {
-            try Self.activateRecordSession()
+            try Self.activateVoiceCaptureSession()
         } catch {
             print("[OwnerEnrollmentRecorder] session activation failed: \(error)")
             return .failed
         }
 
-        let input = engine.inputNode
-        guard let tapFormat = Self.resolveTapFormat(for: input) else {
-            print("[OwnerEnrollmentRecorder] no valid input format available")
-            Self.deactivateSession()
-            return .failed
-        }
-        let sampleRate = tapFormat.sampleRate
-
-        // Audio-only: hasVideo is false so `source` is unused by the sink; pass a
-        // valid case (the enum has no "none").
-        sink.start(
-            transport: nil,
-            hasVideo: false,
-            source: .iPhone,
-            audioSampleRate: sampleRate
-        )
-
-        installTapIfNeeded(on: input, format: tapFormat)
-
+        // Fail closed on permission (MicAudioSource throws .notAuthorized), and
+        // fall back to a clear failure on any other engine/route error rather
+        // than writing a silent WAV the ~74% voiced estimate would count as speech.
+        let mic = MicAudioSource(enableVoiceProcessing: true)
         do {
-            engine.prepare()
-            try engine.start()
-            startedAt = Date()
-            isRecording = true
-            startElapsedTimer()
-            return .started
-        } catch {
-            print("[OwnerEnrollmentRecorder] engine start failed: \(error)")
-            if tapInstalled {
-                input.removeTap(onBus: 0)
-                tapInstalled = false
-            }
-            await sink.stop()
+            try await mic.start()
+        } catch AudioError.notAuthorized {
+            print("[OwnerEnrollmentRecorder] microphone permission denied")
             Self.deactivateSession()
-            isRecording = false
+            return .permissionDenied
+        } catch {
+            print("[OwnerEnrollmentRecorder] mic start failed: \(error)")
+            Self.deactivateSession()
             return .failed
         }
+        self.mic = mic
+
+        // Drain mic chunks into the sink on the main actor (this type is
+        // @MainActor, so the Task inherits it). The WAV opens lazily on the first
+        // chunk at the tap's hardware rate — the sink needs a concrete rate.
+        captureTask = Task { [weak self] in
+            var sinkStarted = false
+            for await chunk in mic.samples {
+                guard let self else { break }
+                if !sinkStarted {
+                    sinkStarted = true
+                    // Audio-only: hasVideo false so `source` is unused; pass a
+                    // valid case (the enum has no "none").
+                    self.sink.start(
+                        transport: nil,
+                        hasVideo: false,
+                        source: .iPhone,
+                        audioSampleRate: chunk.sampleRate
+                    )
+                }
+                self.sink.ingestAudio(LiveAudioChunk(
+                    data: chunk.pcm,
+                    formatDescription: "pcm16/mono/\(Int(chunk.sampleRate))",
+                    capturedAt: Date()
+                ))
+            }
+        }
+
+        startedAt = Date()
+        isRecording = true
+        startElapsedTimer()
+        return .started
     }
 
     /// Result of stopping a capture: a source that can be shown IMMEDIATELY (with the
@@ -131,11 +143,15 @@ final class OwnerEnrollmentRecorder {
         guard isRecording else { return nil }
         isRecording = false
         stopElapsedTimer()
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
+
+        // Stop the mic first so its stream finishes, THEN drain the capture task
+        // so the sink has ingested every chunk before we finalize the WAV.
+        if let mic {
+            await mic.stop()
         }
-        engine.stop()
+        mic = nil
+        await captureTask?.value
+        captureTask = nil
         Self.deactivateSession()
 
         let artifact = sink.currentAudioArtifact
@@ -237,100 +253,22 @@ final class OwnerEnrollmentRecorder {
         elapsedTimer = nil
     }
 
-    // MARK: - Tap format / install
+    // MARK: - Session
 
-    /// Resolve a tap format for the input node. installTap raises an uncatchable
-    /// NSException on a 0 Hz / 0-channel format, so validate the node's format and
-    /// fall back to a known-good format if it has not yet settled on a valid record
-    /// format. Returns nil only if even the fallback format cannot be built.
-    private static func resolveTapFormat(for input: AVAudioInputNode) -> AVAudioFormat? {
-        let inputFormat = input.outputFormat(forBus: 0)
-        if inputFormat.sampleRate > 0, inputFormat.channelCount > 0 {
-            return inputFormat
-        }
-        return AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: LiveRecordingSink.defaultSampleRate,
-            channels: 1,
-            interleaved: false
-        )
-    }
-
-    /// Install the mic tap once, re-chunking each buffer to pcm16 and forwarding it
-    /// to the sink on the main actor. No-op if a tap is already installed.
-    private func installTapIfNeeded(on input: AVAudioInputNode, format tapFormat: AVAudioFormat) {
-        guard !tapInstalled else { return }
-        input.installTap(onBus: 0, bufferSize: Self.tapBufferFrames, format: tapFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            let chunk = Self.pcm16Chunk(from: buffer)
-            guard !chunk.isEmpty else { return }
-            Task { @MainActor [weak self] in
-                self?.sink.ingestAudio(LiveAudioChunk(
-                    data: chunk,
-                    formatDescription: "pcm16",
-                    capturedAt: Date()
-                ))
-            }
-        }
-        tapInstalled = true
-    }
-
-    // MARK: - Permission / session
-
-    /// Request (or read the already-resolved) microphone permission. Mirrors
-    /// MicAudioSource.requestMicPermission so enrollment shows the standard prompt.
-    private static func requestMicPermission() async -> Bool {
-        if #available(iOS 17.0, *) {
-            switch AVAudioApplication.shared.recordPermission {
-            case .granted: return true
-            case .denied:  return false
-            case .undetermined:
-                return await AVAudioApplication.requestRecordPermission()
-            @unknown default:
-                return false
-            }
-        } else {
-            let session = AVAudioSession.sharedInstance()
-            switch session.recordPermission {
-            case .granted: return true
-            case .denied:  return false
-            case .undetermined:
-                return await withCheckedContinuation { cont in
-                    session.requestRecordPermission { cont.resume(returning: $0) }
-                }
-            @unknown default:
-                return false
-            }
-        }
-    }
-
-    /// Put the shared session into a record-capable category and activate it, so the
-    /// input node reports a valid record format.
-    ///
-    /// Uses `.measurement` mode — the standard raw-capture mode for analysis/ASR —
-    /// rather than `.default`. `.default` applies input AGC/processing that boosts
-    /// normal/close speech to full scale, which drove the enrollment WAVs to ~4.8%
-    /// clipping (peak pinned at 1.0) and got them rejected by the server quality gate.
-    /// `.measurement` disables that processing so normal speech lands with headroom.
-    /// As a belt-and-suspenders, if the input gain is settable, lower it toward a safe
-    /// level; both are best-effort so a hardware route that rejects them still records.
-    private static func activateRecordSession() throws {
+    /// Configure the shared session for voice capture, matching
+    /// `LiveAudioSampleRecorder.activateSession` (mode `.voiceChat`) so that when
+    /// `MicAudioSource(voiceProcessing: true)` engages Apple's voice-processing
+    /// I/O it does so in the SAME configuration recognition captures under. The
+    /// old `.measurement` (raw) mode is what created the enrollment↔live domain
+    /// mismatch; voice-processing AGC also keeps levels off the clipping ceiling
+    /// (the reason `.measurement` was adopted) without disabling the processing.
+    private static func activateVoiceCaptureSession() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord,
-            mode: .measurement,
+            mode: .voiceChat,
             options: [.defaultToSpeaker, .allowBluetoothHFP]
         )
-        // Best-effort headroom: lower the input gain if the route allows it. This is
-        // secondary to `.measurement` mode and must never block recording, so failures
-        // are swallowed and capture proceeds.
-        if session.isInputGainSettable {
-            do {
-                try session.setInputGain(0.7)
-            } catch {
-                print("[OwnerEnrollmentRecorder] input gain set failed (non-fatal): \(error)")
-            }
-        }
         try session.setActive(true)
     }
 
@@ -346,21 +284,5 @@ final class OwnerEnrollmentRecorder {
                 print("[OwnerEnrollmentRecorder] session deactivate failed: \(error)")
             }
         }
-    }
-
-    private static func pcm16Chunk(from buffer: AVAudioPCMBuffer) -> Data {
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return Data() }
-        if let int16 = buffer.int16ChannelData {
-            return Data(bytes: int16[0], count: frameLength * MemoryLayout<Int16>.size)
-        }
-        guard let floatData = buffer.floatChannelData else { return Data() }
-        var pcm = [Int16](repeating: 0, count: frameLength)
-        let channel = floatData[0]
-        for i in 0..<frameLength {
-            let clamped = max(-1, min(1, channel[i]))
-            pcm[i] = Int16(clamped * Float(Int16.max))
-        }
-        return pcm.withUnsafeBytes { Data($0) }
     }
 }
