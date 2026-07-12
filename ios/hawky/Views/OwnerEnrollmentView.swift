@@ -219,7 +219,7 @@ struct OwnerEnrollmentView: View {
     /// server's count is final.
     private var speechIndicator: some View {
         let seconds = Int((model.speechProgressMs / 1000).rounded())
-        let floorSeconds = Int(OwnerEnrollmentModel.serverVoicedFloorMs / 1000)
+        let floorSeconds = Int(OwnerEnrollmentModel.guidedVoicedTargetMs / 1000)
         let enough = model.hasEnoughListeningSpeech
         let serverAnchored = model.serverCountedSpeechMs != nil
         return HStack(spacing: 8) {
@@ -241,7 +241,7 @@ struct OwnerEnrollmentView: View {
         seconds: Int, floorSeconds: Int, enough: Bool, serverAnchored: Bool
     ) -> String {
         if enough {
-            return "About \(seconds)s captured — 30s is the minimum; closer to a minute makes recognition noticeably stronger."
+            return "About \(seconds)s captured — that's enough for strong recognition."
         }
         if serverAnchored {
             return "\(seconds)s / \(floorSeconds)s — keep talking about \(model.keepTalkingSeconds) more seconds"

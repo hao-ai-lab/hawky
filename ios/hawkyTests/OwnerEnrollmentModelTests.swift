@@ -84,7 +84,8 @@ import Foundation
 
     /// A wall-clock listening duration whose ~74% voiced estimate clears the 30s
     /// server floor (30_000 / 0.74 ≈ 40.5s → use 45s).
-    private let longEnoughElapsedMs: Double = 45_000
+    // Clears the 60s guided target: 85s * 0.74 = 62.9s voiced estimate.
+    private let longEnoughElapsedMs: Double = 85_000
 
     // MARK: - Consent gate blocks submitFromRecording (fail-closed)
 
@@ -167,8 +168,8 @@ import Foundation
         #expect(gateway.fromRecordingCalls.isEmpty)
 
         // The keep-talking hint (no server rejection yet → client estimate):
-        // ~30 - 14.8 = 15.2 → rounded up to 16.
-        #expect(model.keepTalkingSeconds == 16)
+        // 60s target - 14.8 = 45.2 → rounded up to 46.
+        #expect(model.keepTalkingSeconds == 46)
     }
 
     // MARK: - not_enough_speech rejection → tooShort with server-counted hint
@@ -186,11 +187,11 @@ import Foundation
         #expect(gateway.fromRecordingCalls.count == 1)
         // Actionable, not terminal: tooShort so the UI says "keep talking".
         #expect(model.state == .tooShort)
-        // The hint anchors to the SERVER speechMs (30 - 21 = 9s), not the
+        // The hint anchors to the SERVER speechMs (60s target - 21 = 39s), not the
         // client's wall-clock estimate (which cleared the floor) — and the
         // rejected take is KEPT so "Continue recording" adds to it.
         #expect(model.serverCountedSpeechMs == 21_000)
-        #expect(model.keepTalkingSeconds == 9)
+        #expect(model.keepTalkingSeconds == 39)
         #expect(model.capturedRecordingBaseIds == ["live-20260712-135209"])
     }
 
@@ -307,10 +308,10 @@ import Foundation
         let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
         model.consent = fullConsent
 
-        // Two takes, each individually below the floor, together above it.
-        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 22_000)
+        // Two takes, each individually below the 60s target, together above it.
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
         #expect(!model.hasEnoughListeningSpeech)
-        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 22_000)
+        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 45_000)
         #expect(model.capturedRecordingBaseIds == ["live-take-a", "live-take-b"])
         #expect(model.hasEnoughListeningSpeech)
 
@@ -330,12 +331,12 @@ import Foundation
         )
         let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
         model.consent = fullConsent
-        // One take the client estimates at ~33.3s voiced (45s * 0.74) — clears
+        // One take the client estimates at ~62.9s voiced (85s * 0.74) — clears
         // the client gate so submit actually reaches the server...
-        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 85_000)
         _ = await model.submitFromRecording()
         #expect(Int(model.speechProgressMs) == 16_000)
-        #expect(model.keepTalkingSeconds == 14)
+        #expect(model.keepTalkingSeconds == 44)
         // A NEW take after the anchor adds its client estimate on top; the
         // anchored take is NOT double-counted.
         model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 10_000)
@@ -350,18 +351,19 @@ import Foundation
         )
         let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
         model.consent = fullConsent
-        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 85_000)
         _ = await model.submitFromRecording()
         #expect(Int(model.speechProgressMs) == 16_000)
 
-        // Continue recording, then the server counts BOTH takes at 24s total.
-        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 20_000)
+        // Continue recording enough to clear the 60s gate again (16s anchor +
+        // 65s*0.74 = 64.1s), then the server counts BOTH takes at 24s total.
+        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 65_000)
         gateway.result = rejectedResult(reasons: ["not_enough_speech"], speechMs: 24_000)
         _ = await model.submitFromRecording()
         // REPLACED (24s), not summed (16+24); the anchor now covers both takes,
         // so no client estimate is added on top.
         #expect(Int(model.speechProgressMs) == 24_000)
-        #expect(model.keepTalkingSeconds == 6)
+        #expect(model.keepTalkingSeconds == 36)
         #expect(model.capturedRecordingBaseIds == ["live-take-a", "live-take-b"])
     }
 
@@ -371,7 +373,7 @@ import Foundation
         let gateway = FakeRecordingEnrollmentGateway(result: acceptedResult())
         let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
         model.consent = fullConsent
-        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 85_000)
         _ = await model.submitFromRecording()
         guard case .enrolled = model.state else {
             Issue.record("expected enrolled state"); return
