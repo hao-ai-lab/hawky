@@ -211,17 +211,20 @@ enum LiveVoiceprintEnrollmentRequest {
         return params
     }
 
-    /// `identity.voiceprint.enroll_owner_from_recording` params: the base id of
-    /// a live listening session's recording (e.g. "live-20260712-135209", the
-    /// base of the uploaded `.segNNN.mic` segments) plus the same consent object.
+    /// `identity.voiceprint.enroll_owner_from_recording` params: the ordered base
+    /// ids of the live listening sessions ("takes") to enroll together (e.g.
+    /// "live-20260712-135209", the base of the uploaded `.segNNN.mic` segments)
+    /// plus the same consent object. The server accepts 1..10 DISTINCT ids under
+    /// the `recordingBaseIds` wire key; the stop/continue flow accumulates one
+    /// per listening session.
     static func enrollOwnerFromRecordingParams(
         sessionKey: String?,
-        recordingBaseId: String,
+        recordingBaseIds: [String],
         consent: OwnerEnrollmentConsent,
         minSpeechMs: Double? = nil
     ) -> [String: JSONValue] {
         var params: [String: JSONValue] = [
-            "recordingBaseId": .string(recordingBaseId),
+            "recordingBaseIds": .array(recordingBaseIds.map { .string($0) }),
             "consent": .object(consent.jsonObject),
         ]
         params.setOptionalString("sessionKey", sessionKey)
@@ -321,20 +324,32 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// True while a silent live listening session is running (the store owns the
     /// actual session; this mirrors it for the UI + gate logic).
     @Published private(set) var isListening = false
-    /// Wall-clock listening time (ms). Advanced by a main-actor timer while
-    /// listening (mirrors OwnerEnrollmentRecorder's elapsed counter — UI only,
-    /// never the audio thread) and frozen to the measured total on stop.
+    /// Wall-clock time of the IN-PROGRESS take only (ms). Advanced by a
+    /// main-actor timer while listening (mirrors OwnerEnrollmentRecorder's
+    /// elapsed counter — UI only, never the audio thread) and folded into
+    /// `takeElapsedMs` when the take is committed on stop.
     @Published private(set) var listeningElapsedMs: Double = 0
-    /// Base id of the captured live recording (e.g. "live-20260712-135209" — the
-    /// base of the `.segNNN.mic` segments the session uploaded). Non-nil only
-    /// after a listening session stopped with an open recording; it is what
-    /// `submitFromRecording()` hands to `enroll_owner_from_recording`.
-    @Published private(set) var capturedRecordingBaseId: String?
-    /// The last `enroll_owner_from_recording` rejection whose reasons included
-    /// `not_enough_speech`. Kept so the UI can render "keep talking ~N more
-    /// seconds" from the SERVER-counted `speechMs` (authoritative, unlike the
-    /// client's wall-clock estimate). Cleared on the next listen / accept / reset.
-    @Published private(set) var lastRecordingRejection: LiveVoiceprintEnrollmentResult?
+    /// Ordered base ids of every captured take (e.g. "live-20260712-135209" —
+    /// the base of the `.segNNN.mic` segments each listening session uploaded).
+    /// Takes ACCUMULATE across stop/continue — "Continue recording" keeps what
+    /// was recorded and adds to it — and `submitFromRecording()` enrolls them
+    /// ALL together via `recordingBaseIds`. Only "Start over" / reset discards.
+    @Published private(set) var capturedRecordingBaseIds: [String] = []
+    /// Wall-clock duration (ms) of each captured take, parallel to
+    /// `capturedRecordingBaseIds`. Feeds the client-side voiced estimate for
+    /// takes the server has not counted yet. Always mutated alongside the
+    /// published take list, so the UI republishes with it.
+    private(set) var takeElapsedMs: [Double] = []
+    /// SERVER-counted voiced speech (ms) from the last `not_enough_speech`
+    /// rejection — the authoritative anchor the progress row is rebuilt on. It
+    /// REPLACES the client estimates of the takes it counted (the first
+    /// `takeCountAtLastRejection` takes); only takes recorded AFTER the
+    /// rejection still contribute client estimates. Cleared on accept / reset.
+    @Published private(set) var serverCountedSpeechMs: Double?
+    /// How many leading takes `serverCountedSpeechMs` covers: the take count at
+    /// the moment the server rejected. Takes at index >= this are newer than
+    /// the anchor and keep their client estimates.
+    private(set) var takeCountAtLastRejection: Int = 0
 
     private var listeningTimer: Timer?
     private var listeningStartedAt: Date?
@@ -473,14 +488,17 @@ final class OwnerEnrollmentModel: ObservableObject {
     }
 
     /// Discard all captured sources and reset to idle (does not touch consent so the
-    /// user's opt-in choice survives a re-record). Clears upload tracking, the
-    /// listening capture, and unblocks any parked Enroll waiter so it does not hang
-    /// after a reset.
+    /// user's opt-in choice survives a re-record). Clears upload tracking, EVERY
+    /// captured take, the server-count anchor, and unblocks any parked Enroll
+    /// waiter so it does not hang after a reset. This is the "Start over" action —
+    /// the ONLY path that discards accumulated takes.
     func reset() {
         sources.removeAll()
         uploadStates.removeAll()
-        capturedRecordingBaseId = nil
-        lastRecordingRejection = nil
+        capturedRecordingBaseIds.removeAll()
+        takeElapsedMs.removeAll()
+        serverCountedSpeechMs = nil
+        takeCountAtLastRejection = 0
         listeningElapsedMs = 0
         state = .idle
         resumePendingWaitersIfSettled()
@@ -503,10 +521,11 @@ final class OwnerEnrollmentModel: ObservableObject {
             state = .recording
             return
         }
-        // Listening-session flow: a captured live recording gates on the SAME
-        // consent, then on the server's voiced floor applied to the client's
-        // wall-clock estimate. (The clip-based `sources` flow below is untouched.)
-        if capturedRecordingBaseId != nil, sources.isEmpty {
+        // Listening-session flow: captured live takes gate on the SAME consent,
+        // then on the server's voiced floor applied to the accumulated progress
+        // (server anchor + client estimates). (The clip-based `sources` flow
+        // below is untouched.)
+        if !capturedRecordingBaseIds.isEmpty, sources.isEmpty {
             if !consent.satisfiesGate {
                 state = .needsConsent
                 return
@@ -611,36 +630,40 @@ final class OwnerEnrollmentModel: ObservableObject {
 
     // MARK: - Listening-session flow (enroll from a live recording)
 
-    /// Estimated VOICED speech captured by the listening session so far (ms).
-    /// Wall clock × the sidecar's ~74% voiced fraction — guidance only; the
-    /// server's `speechMs` is authoritative at submit time.
-    var listeningVoicedMs: Double {
-        listeningElapsedMs * Self.voicedFraction
+    /// The ONE speech-progress number every UI surface renders (ms). Built from:
+    /// - the SERVER-counted voiced ms of the last `not_enough_speech` rejection,
+    ///   which REPLACES the client estimates of the takes it counted (the first
+    ///   `takeCountAtLastRejection` takes), plus
+    /// - the client estimate (wall clock × ~0.74 voiced fraction) of any takes
+    ///   recorded AFTER that rejection, plus
+    /// - the in-progress take while listening.
+    /// Guidance only until submit — the server's count stays authoritative.
+    var speechProgressMs: Double {
+        let anchoredTakeCount = serverCountedSpeechMs != nil ? takeCountAtLastRejection : 0
+        let unanchoredElapsedMs = takeElapsedMs
+            .dropFirst(min(anchoredTakeCount, takeElapsedMs.count))
+            .reduce(0, +)
+        return (serverCountedSpeechMs ?? 0)
+            + (unanchoredElapsedMs + listeningElapsedMs) * Self.voicedFraction
     }
 
-    /// Whether the listening capture's voiced estimate clears the server floor.
+    /// Whether the accumulated speech progress clears the server floor.
     var hasEnoughListeningSpeech: Bool {
-        listeningVoicedMs >= Self.serverVoicedFloorMs
+        speechProgressMs >= Self.serverVoicedFloorMs
     }
 
     /// Seconds of extra TALKING (voiced speech) still needed before the floor is
-    /// met. Prefers the SERVER-counted shortfall from the last not_enough_speech
-    /// rejection (exact), falling back to the client wall-clock estimate.
+    /// met. Computed from the same accumulated progress the row renders, so a
+    /// server rejection's exact count automatically drives the hint.
     var keepTalkingSeconds: Int {
-        let shortfallMs: Double
-        if let serverSpeechMs = lastRecordingRejection?.speechMs {
-            shortfallMs = max(0, Self.serverVoicedFloorMs - serverSpeechMs)
-        } else {
-            shortfallMs = max(0, Self.serverVoicedFloorMs - listeningVoicedMs)
-        }
-        return Int((shortfallMs / 1000).rounded(.up))
+        Int((max(0, Self.serverVoicedFloorMs - speechProgressMs) / 1000).rounded(.up))
     }
 
-    /// Whether "Enroll my voice" may submit the captured recording: same
-    /// fail-closed consent gate as the clip flow, plus a capture that exists,
-    /// clears the guided floor, and is not still being listened to.
+    /// Whether "Enroll my voice" may submit the captured takes: same fail-closed
+    /// consent gate as the clip flow, plus at least one captured take, progress
+    /// clearing the guided floor, and no take still being listened to.
     var canSubmitFromRecording: Bool {
-        capturedRecordingBaseId != nil
+        !capturedRecordingBaseIds.isEmpty
             && consent.satisfiesGate
             && hasEnoughListeningSpeech
             && !isListening
@@ -662,9 +685,9 @@ final class OwnerEnrollmentModel: ObservableObject {
             state = .failed("Hawky gateway is not reachable — connect first to enroll.")
             return false
         }
-        // A new capture replaces the previous one (re-listening is a fresh take).
-        capturedRecordingBaseId = nil
-        lastRecordingRejection = nil
+        // "Continue recording": captured takes and the server-count anchor are
+        // KEPT — this session opens a fresh recording that accumulates on top.
+        // Only the in-progress counter restarts; reset() is the discard path.
         listeningElapsedMs = 0
         state = .recording
         let started = await store.startEnrollmentListeningSession(
@@ -694,34 +717,48 @@ final class OwnerEnrollmentModel: ObservableObject {
         recordListeningCapture(recordingBaseId: baseID, elapsedMs: measuredMs)
     }
 
-    /// Commit a finished listening capture and re-evaluate the gates. Split out of
+    /// Commit a finished listening take and re-evaluate the gates. Split out of
     /// `stopListening(store:)` so the flow is unit-testable without a live session.
-    /// A nil base id means the recording never opened (mic warm-up failure) —
-    /// surface that as a clear failure instead of a dead-end idle state.
+    /// The take APPENDS to the captured list — earlier takes are never discarded
+    /// here. A nil base id means the recording never opened (mic warm-up failure)
+    /// — surface that as a clear failure (prior takes stay enrollable) instead of
+    /// a dead-end idle state.
     func recordListeningCapture(recordingBaseId: String?, elapsedMs: Double) {
-        listeningElapsedMs = elapsedMs
+        // The take is committed (or dropped), so the in-progress counter must
+        // stop contributing to speechProgressMs — its time now lives (or dies)
+        // with the take entry.
+        listeningElapsedMs = 0
         guard let recordingBaseId, !recordingBaseId.isEmpty else {
-            capturedRecordingBaseId = nil
             state = .failed("No audio was captured — try again.")
             return
         }
-        capturedRecordingBaseId = recordingBaseId
+        // Dedupe guard: the store's base-id accessor falls back to the LAST
+        // recording's URL, so a session whose recording never opened could
+        // re-yield a take already captured. The server requires distinct ids
+        // (a duplicate would double-enroll the same audio), and its segments —
+        // and estimate — are already counted, so drop the repeat entirely.
+        guard !capturedRecordingBaseIds.contains(recordingBaseId) else {
+            refreshGateState()
+            return
+        }
+        capturedRecordingBaseIds.append(recordingBaseId)
+        takeElapsedMs.append(max(0, elapsedMs))
         refreshGateState()
     }
 
-    /// Submit `enroll_owner_from_recording` for the captured listening session.
-    /// Same FAIL-CLOSED consent gate as `submit()`: the RPC is NEVER sent unless
-    /// `biometricAllowed && captureAllowed`. Returns the parsed result, or nil if
-    /// the submission was blocked (still listening / no capture / no consent /
-    /// too little speech) or the transport failed.
+    /// Submit `enroll_owner_from_recording` for ALL captured takes together, in
+    /// the order they were recorded. Same FAIL-CLOSED consent gate as `submit()`:
+    /// the RPC is NEVER sent unless `biometricAllowed && captureAllowed`. Returns
+    /// the parsed result, or nil if the submission was blocked (still listening /
+    /// no capture / no consent / too little speech) or the transport failed.
     @discardableResult
     func submitFromRecording(minSpeechMs: Double? = nil) async -> LiveVoiceprintEnrollmentResult? {
         // 1. The listening session must be fully stopped — its final segments only
         //    finish uploading on stop, so submitting mid-listen would enroll a
         //    truncated recording.
         guard !isListening else { return nil }
-        // 2. Must have a captured recording to enroll from.
-        guard let recordingBaseId = capturedRecordingBaseId else {
+        // 2. Must have at least one captured take to enroll from.
+        guard !capturedRecordingBaseIds.isEmpty else {
             state = .idle
             return nil
         }
@@ -740,7 +777,7 @@ final class OwnerEnrollmentModel: ObservableObject {
         state = .submitting
         let params = LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams(
             sessionKey: sessionKey,
-            recordingBaseId: recordingBaseId,
+            recordingBaseIds: capturedRecordingBaseIds,
             consent: consent,
             minSpeechMs: minSpeechMs
         )
@@ -756,14 +793,17 @@ final class OwnerEnrollmentModel: ObservableObject {
             return nil
         }
         if result.accepted {
-            lastRecordingRejection = nil
+            serverCountedSpeechMs = nil
+            takeCountAtLastRejection = 0
             state = .enrolled(result)
         } else if result.reasons.contains("not_enough_speech") {
-            // The recording uploaded fine but did not contain 30s of VOICED speech.
-            // Keep the server-counted speechMs so the UI can say exactly how much
-            // more talking the next take needs, and route to tooShort (actionable)
-            // rather than failed (terminal).
-            lastRecordingRejection = result
+            // The takes uploaded fine but did not contain 30s of VOICED speech.
+            // Anchor progress on the SERVER-counted speechMs — it replaces the
+            // client estimates of every take counted so far (Continue-recording
+            // takes after this rejection estimate on top of it) — and KEEP all
+            // takes: tooShort is actionable ("Continue recording"), not terminal.
+            serverCountedSpeechMs = result.speechMs ?? 0
+            takeCountAtLastRejection = capturedRecordingBaseIds.count
             state = .tooShort
         } else {
             state = .failed(Self.recordingFailureMessage(for: result))

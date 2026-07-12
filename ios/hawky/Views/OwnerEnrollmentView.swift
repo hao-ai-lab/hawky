@@ -155,6 +155,14 @@ struct OwnerEnrollmentView: View {
         }
     }
 
+    /// Contextual label for the primary listening action: a first take starts
+    /// fresh, a later take CONTINUES (keeps what was recorded and adds to it),
+    /// and an active session stops.
+    private var listenButtonTitle: String {
+        if model.isListening { return "Stop listening" }
+        return model.capturedRecordingBaseIds.isEmpty ? "Start listening" : "Continue recording"
+    }
+
     private var listeningSection: some View {
         Section {
             Button {
@@ -162,7 +170,7 @@ struct OwnerEnrollmentView: View {
             } label: {
                 HStack {
                     Image(systemName: model.isListening ? "stop.circle.fill" : "ear")
-                    Text(model.isListening ? "Stop listening" : "Start listening")
+                    Text(listenButtonTitle)
                     Spacer()
                     if model.isListening {
                         ProgressView()
@@ -174,9 +182,15 @@ struct OwnerEnrollmentView: View {
             .disabled(isSubmitting)
             .accessibilityIdentifier("voiceprint.enroll.listen")
 
+            if !model.isListening, !model.capturedRecordingBaseIds.isEmpty {
+                Text("Keeps what you've recorded and adds to it.")
+                    .font(DesignTokens.Font.meta)
+                    .foregroundStyle(.secondary)
+            }
+
             speechIndicator
 
-            if model.capturedRecordingBaseId != nil, !model.isListening {
+            if !model.capturedRecordingBaseIds.isEmpty, !model.isListening {
                 Button(role: .destructive) {
                     model.reset()
                 } label: {
@@ -186,7 +200,7 @@ struct OwnerEnrollmentView: View {
                 .disabled(isSubmitting)
                 .accessibilityIdentifier("voiceprint.enroll.startOver")
 
-                Text("Not happy with the take? Start over to discard it and listen again.")
+                Text("Not happy with the takes? Start over to discard everything and listen again.")
                     .font(DesignTokens.Font.meta)
                     .foregroundStyle(.secondary)
             }
@@ -197,24 +211,42 @@ struct OwnerEnrollmentView: View {
         }
     }
 
-    /// Live progress line: "Xs / 30s of speech" against the server's voiced
-    /// floor. Climbs in real time from the model's main-actor timer while
-    /// listening (wall clock × the ~0.74 voiced fraction); frozen after stop.
+    /// The ONE progress row every state renders — "Xs / 30s of speech" against
+    /// the server's voiced floor, from the model's single accumulated
+    /// `speechProgressMs` (server-counted anchor + client estimates + the live
+    /// take). Orange with an exact "keep talking" hint once the server has
+    /// rejected a count; the green "enough" state hedges because only the
+    /// server's count is final.
     private var speechIndicator: some View {
-        let seconds = Int((model.listeningVoicedMs / 1000).rounded())
+        let seconds = Int((model.speechProgressMs / 1000).rounded())
         let floorSeconds = Int(OwnerEnrollmentModel.serverVoicedFloorMs / 1000)
         let enough = model.hasEnoughListeningSpeech
+        let serverAnchored = model.serverCountedSpeechMs != nil
         return HStack(spacing: 8) {
             Image(systemName: enough ? "checkmark.circle.fill" : "waveform")
-                .foregroundStyle(enough ? DesignTokens.Status.success : .secondary)
-            Text(enough
-                ? "Enough speech captured (\(seconds)s)"
-                : "\(seconds)s / \(floorSeconds)s of speech")
+                .foregroundStyle(enough
+                    ? DesignTokens.Status.success
+                    : serverAnchored ? DesignTokens.Status.warning : .secondary)
+            Text(speechIndicatorText(seconds: seconds, floorSeconds: floorSeconds,
+                                     enough: enough, serverAnchored: serverAnchored))
                 .font(DesignTokens.Font.rowDetail)
+                .foregroundStyle(!enough && serverAnchored ? DesignTokens.Status.warning : .primary)
             Spacer()
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("voiceprint.enroll.speechIndicator")
+    }
+
+    private func speechIndicatorText(
+        seconds: Int, floorSeconds: Int, enough: Bool, serverAnchored: Bool
+    ) -> String {
+        if enough {
+            return "About \(seconds)s captured — the server makes the final count."
+        }
+        if serverAnchored {
+            return "\(seconds)s / \(floorSeconds)s — keep talking about \(model.keepTalkingSeconds) more seconds"
+        }
+        return "\(seconds)s / \(floorSeconds)s of speech"
     }
 
     private var consentSection: some View {
@@ -316,7 +348,7 @@ struct OwnerEnrollmentView: View {
         if model.isListening {
             return "Keep talking — Hawky is listening silently."
         }
-        if !model.hasEnoughListeningSpeech || model.capturedRecordingBaseId == nil {
+        if !model.hasEnoughListeningSpeech || model.capturedRecordingBaseIds.isEmpty {
             return "Step 1 — tap Start listening and talk for about 40 seconds."
         }
         if !model.consent.satisfiesGate {
@@ -343,7 +375,7 @@ struct OwnerEnrollmentView: View {
         if model.isListening {
             return "Hawky is listening silently — it won't speak or respond. Keep talking until the counter fills."
         }
-        if model.capturedRecordingBaseId != nil, model.hasEnoughListeningSpeech {
+        if !model.capturedRecordingBaseIds.isEmpty, model.hasEnoughListeningSpeech {
             return "You have enough speech. Grant consent below, then enroll."
         }
         return "Hawky will listen silently for about 40 seconds while you talk. Do this alone in a quiet place — it should only hear your voice."
