@@ -303,6 +303,15 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// to compute the "keep talking ~N more seconds" hint.
     nonisolated static let serverVoicedFloorMs: Double = 30_000
 
+    /// The GUIDED voiced target (ms) the UI gates on — twice the server's 30s
+    /// minimum. Measured on device: a template enrolled at the bare 30s floor
+    /// scores live turns in the possible_owner grey band (0.74-0.76) and the
+    /// owner never establishes, while ~60s scores 0.79-0.84 and establishes in
+    /// seconds. The server still ACCEPTS anything over its 30s floor (a
+    /// server-counted 45s take enrolls fine); this target only drives the
+    /// client gate, the progress denominator, and the keep-talking hint.
+    nonisolated static let guidedVoicedTargetMs: Double = 60_000
+
     /// The gateway rejects submissions with more than this many takes
     /// (enroll_owner_from_recording accepts 1..10 recordingBaseIds). The model
     /// enforces the same bound so the UI blocks an 11th take with honest copy
@@ -655,14 +664,14 @@ final class OwnerEnrollmentModel: ObservableObject {
 
     /// Whether the accumulated speech progress clears the server floor.
     var hasEnoughListeningSpeech: Bool {
-        speechProgressMs >= Self.serverVoicedFloorMs
+        speechProgressMs >= Self.guidedVoicedTargetMs
     }
 
     /// Seconds of extra TALKING (voiced speech) still needed before the floor is
     /// met. Computed from the same accumulated progress the row renders, so a
     /// server rejection's exact count automatically drives the hint.
     var keepTalkingSeconds: Int {
-        Int((max(0, Self.serverVoicedFloorMs - speechProgressMs) / 1000).rounded(.up))
+        Int((max(0, Self.guidedVoicedTargetMs - speechProgressMs) / 1000).rounded(.up))
     }
 
     /// True when the gateway's take bound is reached: no further takes may be
