@@ -609,3 +609,117 @@ describe("voiceprint gateway auto-score (WS1: auto_score_finalized)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// minEvidenceTurnMs — short-turn "unknown" is NEUTRAL evidence (unit-level,
+// stub scoring seam; no sidecar). A short turn's unknown_speaker must neither
+// vote toward not_owner nor reset the owner streak, while a LONG unknown still
+// votes and a short OWNER hit still counts.
+// ---------------------------------------------------------------------------
+import { createVoiceprintAutoScorer, type VoiceprintAutoScoreTurn } from "../src/gateway/voiceprint-auto-score.js";
+import type { VoiceprintTranscriptIdentityState } from "../src/identity/voiceprint/index.js";
+
+function stubState(
+  transcriptItemId: string,
+  result: "owner_speaking" | "possible_owner" | "unknown_speaker",
+): VoiceprintTranscriptIdentityState {
+  return {
+    version: 1,
+    id: `vpstate_${transcriptItemId}` as VoiceprintTranscriptIdentityState["id"],
+    source: "voiceprint",
+    sessionKey: "unit:min-turn",
+    transcriptItemId,
+    lifecycle: result === "owner_speaking" ? "resolved" : "unknown",
+    policyState: "none",
+    createdAt: "2026-07-12T00:00:00.000Z",
+    updatedAt: "2026-07-12T00:00:00.000Z",
+    result,
+  };
+}
+
+function unitTurn(id: string, durationMs: number): VoiceprintAutoScoreTurn {
+  return { transcriptItemId: id, role: "user", startMs: 0, endMs: durationMs };
+}
+
+async function foldViaScorer(
+  plan: Array<{ id: string; durationMs: number; result: "owner_speaking" | "possible_owner" | "unknown_speaker" }>,
+  minEvidenceTurnMs: number,
+): Promise<{ broadcasts: Array<Record<string, unknown>> }> {
+  const broadcasts: Array<Record<string, unknown>> = [];
+  const settled: Array<() => void> = [];
+  const scorer = createVoiceprintAutoScorer({
+    scoreTurns: async (_sessionKey, turns) => ({
+      states: turns.map((turn) => {
+        const spec = plan.find((p) => p.id === turn.transcriptItemId)!;
+        return stubState(turn.transcriptItemId, spec.result);
+      }),
+    }),
+    isTurnAudioReady: () => true,
+    broadcast: (_event, payload) => { broadcasts.push(payload); },
+    evidenceConfig: { flipThreshold: 2, windowSize: 5 },
+    minEvidenceTurnMs,
+    onBatchSettled: () => { settled.pop()?.(); },
+  });
+  for (const spec of plan) {
+    await new Promise<void>((resolve) => {
+      settled.push(resolve);
+      scorer.enqueue("unit:min-turn", [unitTurn(spec.id, spec.durationMs)]);
+    });
+  }
+  return { broadcasts };
+}
+
+describe("auto-score minEvidenceTurnMs (short turns are neutral)", () => {
+  test("short unknowns between owner turns cannot overturn the owner verdict", async () => {
+    const { broadcasts } = await foldViaScorer(
+      [
+        { id: "t1", durationMs: 3000, result: "owner_speaking" },
+        { id: "t2", durationMs: 3000, result: "owner_speaking" }, // establish → 1 broadcast
+        { id: "t3", durationMs: 800, result: "unknown_speaker" }, // short → neutral
+        { id: "t4", durationMs: 900, result: "unknown_speaker" }, // short → neutral
+        { id: "t5", durationMs: 700, result: "unknown_speaker" }, // short → neutral
+      ],
+      2000,
+    );
+    expect(broadcasts.length).toBe(1);
+    expect(broadcasts[0]!.verdict).toBe("owner_present");
+  });
+
+  test("LONG unknowns still vote and can overturn", async () => {
+    const { broadcasts } = await foldViaScorer(
+      [
+        { id: "t1", durationMs: 3000, result: "owner_speaking" },
+        { id: "t2", durationMs: 3000, result: "owner_speaking" }, // → owner_present
+        { id: "t3", durationMs: 3000, result: "unknown_speaker" },
+        { id: "t4", durationMs: 3000, result: "unknown_speaker" }, // 2 long unknowns → not_owner
+      ],
+      2000,
+    );
+    expect(broadcasts.map((b) => b.verdict)).toEqual(["owner_present", "not_owner"]);
+  });
+
+  test("a SHORT owner hit still counts toward establishing", async () => {
+    const { broadcasts } = await foldViaScorer(
+      [
+        { id: "t1", durationMs: 800, result: "owner_speaking" },
+        { id: "t2", durationMs: 900, result: "owner_speaking" },
+      ],
+      2000,
+    );
+    expect(broadcasts.length).toBe(1);
+    expect(broadcasts[0]!.verdict).toBe("owner_present");
+  });
+
+  test("minEvidenceTurnMs unset (default 0): short unknowns vote as before", async () => {
+    const { broadcasts } = await foldViaScorer(
+      [
+        { id: "t1", durationMs: 3000, result: "owner_speaking" },
+        { id: "t2", durationMs: 3000, result: "owner_speaking" },
+        { id: "t3", durationMs: 800, result: "unknown_speaker" },
+        { id: "t4", durationMs: 900, result: "unknown_speaker" },
+      ],
+      0,
+    );
+    expect(broadcasts.map((b) => b.verdict)).toEqual(["owner_present", "not_owner"]);
+  });
+});

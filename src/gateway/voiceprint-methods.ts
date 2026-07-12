@@ -682,6 +682,14 @@ function resolveVoiceprintAutoScoreTuning(
     evidence.flip_threshold ?? evidence.flipThreshold,
     "voiceprint.live_scoring.evidence.flip_threshold",
   );
+  const ownerFlipThreshold = optionalPositiveNumber(
+    evidence.owner_flip_threshold ?? evidence.ownerFlipThreshold,
+    "voiceprint.live_scoring.evidence.owner_flip_threshold",
+  );
+  const nonOwnerFlipThreshold = optionalPositiveNumber(
+    evidence.non_owner_flip_threshold ?? evidence.nonOwnerFlipThreshold,
+    "voiceprint.live_scoring.evidence.non_owner_flip_threshold",
+  );
   const windowSize = optionalPositiveNumber(
     evidence.window_size ?? evidence.windowSize,
     "voiceprint.live_scoring.evidence.window_size",
@@ -690,14 +698,23 @@ function resolveVoiceprintAutoScoreTuning(
     evidence.stale_timeout_ms ?? evidence.staleTimeoutMs,
     "voiceprint.live_scoring.evidence.stale_timeout_ms",
   );
+  const minTurnMs = optionalPositiveNumber(
+    evidence.min_turn_ms ?? evidence.minTurnMs,
+    "voiceprint.live_scoring.evidence.min_turn_ms",
+  );
   const config: NonNullable<VoiceprintAutoScoreTuning["evidenceConfig"]> = {};
   if (flipThreshold !== undefined) config.flipThreshold = flipThreshold;
+  if (ownerFlipThreshold !== undefined) config.ownerFlipThreshold = ownerFlipThreshold;
+  if (nonOwnerFlipThreshold !== undefined) config.nonOwnerFlipThreshold = nonOwnerFlipThreshold;
   if (windowSize !== undefined) config.windowSize = windowSize;
   if (staleTimeoutMs !== undefined) config.staleTimeoutMs = staleTimeoutMs;
-  if (Object.keys(config).length === 0) {
+  const tuning: VoiceprintAutoScoreTuning = {};
+  if (Object.keys(config).length > 0) tuning.evidenceConfig = config;
+  if (minTurnMs !== undefined) tuning.minEvidenceTurnMs = minTurnMs;
+  if (Object.keys(tuning).length === 0) {
     return undefined;
   }
-  return { evidenceConfig: config };
+  return tuning;
 }
 
 function resolveConfiguredVoiceprintAsNormThresholds(

@@ -95,6 +95,17 @@ export interface VoiceprintAutoScoreTuning {
   audioRetryDelayMs?: number;
   /** A2 evidence reducer overrides (default DEFAULT_SPEAKER_EVIDENCE_CONFIG). */
   evidenceConfig?: Partial<SpeakerEvidenceConfig>;
+  /**
+   * Minimum turn duration (ms) for an `unknown_speaker` decision to VOTE in the
+   * evidence reducer (default 0 = every decision votes). Sub-2s utterances carry
+   * too little speech for a reliable speaker embedding, so a short turn's
+   * "unknown" means "could not tell", NOT "someone else" — counting it as
+   * non-owner evidence lets the owner's own "mm-hm"s flip the verdict to
+   * not_owner. Positive decisions (owner/possible) always vote: clearing the
+   * owner threshold DESPITE little audio is strong evidence, and possible_owner
+   * never resets streaks. The state still reaches the piggyback/UI either way.
+   */
+  minEvidenceTurnMs?: number;
   /** Bound on the per-session pending piggyback buffer (default 32). */
   maxPendingScoredStates?: number;
   /** Test hook: called after a background batch loop fully settles. Never awaited. */
@@ -289,7 +300,7 @@ export class VoiceprintAutoScorer {
         if (this.sessions.get(sessionKey) !== state) {
           return;
         }
-        this.fold(sessionKey, state, result.states);
+        this.fold(sessionKey, state, result.states, ready);
       } catch (error) {
         // FAIL-SAFE: the whole batch is skipped and logged. No state is fed to
         // the evidence reducer, so a scoring fault can never move the verdict
@@ -371,6 +382,7 @@ export class VoiceprintAutoScorer {
     sessionKey: string,
     state: SessionAutoScoreState,
     states: readonly VoiceprintTranscriptIdentityState[],
+    turns: readonly VoiceprintAutoScoreTurn[],
   ): void {
     if (states.length === 0) {
       return;
@@ -381,10 +393,23 @@ export class VoiceprintAutoScorer {
       state.pendingScoredStates.splice(0, state.pendingScoredStates.length - cap);
     }
 
+    const minEvidenceTurnMs = this.options.minEvidenceTurnMs ?? 0;
+    const turnDurations = new Map(
+      turns.map((turn) => [turn.transcriptItemId, turn.endMs - turn.startMs]),
+    );
     for (const scored of states) {
       const decision = scoredStateDecision(scored);
       if (!decision) {
         continue;
+      }
+      // Short-turn "unknown" is "could not tell", not "someone else": it neither
+      // votes toward not_owner NOR resets the owner streak (skipping the fold
+      // entirely keeps it perfectly neutral). See minEvidenceTurnMs.
+      if (decision === "unknown_speaker" && minEvidenceTurnMs > 0) {
+        const durationMs = turnDurations.get(scored.transcriptItemId);
+        if (durationMs !== undefined && durationMs < minEvidenceTurnMs) {
+          continue;
+        }
       }
       const atMs = this.options.nowMs?.() ?? Date.now();
       state.evidence = reduceSpeakerEvidence(
