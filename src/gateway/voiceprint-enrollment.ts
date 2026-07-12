@@ -36,11 +36,12 @@ import {
 } from "../identity/voiceprint/index.js";
 
 /**
- * Bound on enroll-from-recording template audio. Long conversations can carry
- * hundreds of segments; ~90s of quality-passing speech is well past the 30s
- * voiced floor and matches the manually-validated live-domain template
- * (~60s / 48 clips → owner 0.79-0.84 on a held-out session), so selection
- * stops there instead of embedding the entire recording.
+ * PER-RECORDING selection bound. Long conversations can carry hundreds of
+ * segments; ~90s of quality-passing speech is well past the 30s voiced floor
+ * and matches the manually-validated live-domain template (~60s / 48 clips →
+ * owner 0.79-0.84 on a held-out session). The TOTAL budget across a multi-take
+ * submission is enforced separately by the RPC
+ * (ENROLL_FROM_RECORDING_TOTAL_MAX_MS in voiceprint-methods.ts).
  */
 const ENROLL_FROM_RECORDING_MAX_MS = 90_000;
 

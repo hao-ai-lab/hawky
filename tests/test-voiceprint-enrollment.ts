@@ -785,5 +785,48 @@ describe("enroll_owner_from_recording (live capture-domain enrollment)", () => {
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
   });
+
+  test("the ~90s selection budget is TOTAL across takes, not per take", async () => {
+    const server = makeMockServer();
+    const dir = mkdtempSync(join(tmpdir(), "voiceprint-enroll-rec-totalcap-"));
+    tempDirs.push(dir);
+    const scriptPath = writeEnrollSidecar(dir, 40_000);
+    const scoring = makeScoringConfig(dir, scriptPath);
+    registerVoiceprintMethods(server as any, createInMemoryVoiceprintStorage(), undefined, scoring);
+    const conn = { sessionKey: "live:enroll-from-recording-totalcap" };
+
+    // Two takes whose sidecar durations are 50s each: within each take the
+    // per-recording cap admits the segment, but across takes the SECOND take's
+    // second segment must be cut by the global budget (50+50 >= 90).
+    const takeA = "live-20260713-000020";
+    const takeB = "live-20260713-000021";
+    for (const [take, indices] of [[takeA, [0, 1]], [takeB, [0, 1]]] as const) {
+      for (const index of indices) {
+        const mediaId = `${take}.seg${String(index).padStart(3, "0")}.mic`;
+        writeSineWav(join(dir, `${mediaId}.wav`), 16000, 1500, 0.16);
+        writeFileSync(
+          join(dir, `${mediaId}.json`),
+          JSON.stringify({
+            mime: "audio/pcm16;rate=16000",
+            captured_start_iso: createdAt,
+            locked: false,
+            duration_ms: 50_000,
+            final_iso: createdAt,
+          }),
+          "utf8",
+        );
+      }
+    }
+    const enroll = await server.call("identity.voiceprint.enroll_owner_from_recording", conn, {
+      recordingBaseIds: [takeA, takeB],
+      consent,
+    });
+    // takeA seg0 (50s) + takeA seg1 capped per-recording; takeB seg0 (50s -> total 100s over
+    // budget after admit) then takeB seg1 cut by the GLOBAL budget.
+    expect(enroll.segmentsUsed).toBeLessThanOrEqual(3);
+    expect(enroll.segmentsCapped).toBeGreaterThanOrEqual(1);
+    expect(enroll.segmentsUsed + enroll.segmentsCapped + enroll.segmentsQualityRejected + enroll.segmentsAfterGap)
+      .toBe(enroll.segmentsConsidered);
+  });
 });
 

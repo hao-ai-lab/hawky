@@ -179,7 +179,7 @@ struct OwnerEnrollmentView: View {
                 .frame(maxWidth: .infinity)
             }
             .primaryPanelActionCompat()
-            .disabled(isSubmitting)
+            .disabled(isSubmitting || (!model.isListening && model.atTakeLimit))
             .accessibilityIdentifier("voiceprint.enroll.listen")
 
             if !model.isListening, !model.capturedRecordingBaseIds.isEmpty {
@@ -348,8 +348,11 @@ struct OwnerEnrollmentView: View {
         if model.isListening {
             return "Keep talking — Hawky is listening silently."
         }
-        if !model.hasEnoughListeningSpeech || model.capturedRecordingBaseIds.isEmpty {
+        if model.capturedRecordingBaseIds.isEmpty {
             return "Step 1 — tap Start listening and talk for about 40 seconds."
+        }
+        if !model.hasEnoughListeningSpeech {
+            return "Keep going — tap Continue recording and talk about \(model.keepTalkingSeconds) more seconds."
         }
         if !model.consent.satisfiesGate {
             return "Step 2 — turn on biometric consent below."
@@ -372,11 +375,16 @@ struct OwnerEnrollmentView: View {
     }
 
     private var listeningFooter: String {
+        if !model.isListening, model.atTakeLimit {
+            return "Take limit reached — enroll what you've recorded, or start over."
+        }
         if model.isListening {
             return "Hawky is listening silently — it won't speak or respond. Keep talking until the counter fills."
         }
         if !model.capturedRecordingBaseIds.isEmpty, model.hasEnoughListeningSpeech {
-            return "You have enough speech. Grant consent below, then enroll."
+            return model.consent.satisfiesGate
+                ? "You have enough speech. Tap Enroll my voice below."
+                : "You have enough speech. Grant consent below, then enroll."
         }
         return "Hawky will listen silently for about 40 seconds while you talk. Do this alone in a quiet place — it should only hear your voice."
     }
