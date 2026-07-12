@@ -723,3 +723,132 @@ describe("auto-score minEvidenceTurnMs (short turns are neutral)", () => {
     expect(broadcasts.map((b) => b.verdict)).toEqual(["owner_present", "not_owner"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Segmented live media resolution (commit 89f0ed2 regression pins): the live
+// path uploads `<base>.segNNN.mic.wav` chunks while turns reference
+// `<base>:<joinId>` with RECORDING-relative windows. These tests drive the real
+// score_turns seam (reference sidecar) against on-disk segments and pin:
+// timeline mapping, drift tolerance at the recording tail, duplicate-root
+// dedupe, and the fail-safe skip for genuinely missing audio.
+// ---------------------------------------------------------------------------
+import { writeFileSync as writeFileSyncSeg, mkdirSync as mkdirSyncSeg } from "node:fs";
+
+function writeSegment(root: string, base: string, index: number, freqHz: number, durationMs: number): void {
+  const mediaId = `${base}.seg${String(index).padStart(3, "0")}.mic`;
+  writeSineWav(join(root, `${mediaId}.wav`), freqHz, durationMs, 16000);
+  writeFileSyncSeg(
+    join(root, `${mediaId}.json`),
+    JSON.stringify({
+      mime: "audio/pcm16;rate=16000",
+      captured_start_iso: "2026-07-12T00:00:00.000Z",
+      locked: false,
+      duration_ms: durationMs,
+      final_iso: "2026-07-12T00:00:01.000Z",
+    }),
+    "utf8",
+  );
+}
+
+async function scoreSegmentedTurn(input: {
+  roots: string[];
+  audioArtifactId: string;
+  startMs: number;
+  endMs: number;
+  ownerAudioPath: string;
+}): Promise<{ status: string; lifecycle?: string; skipReason?: string; error?: string }> {
+  const server = makeMockServer();
+  const storage = createInMemoryVoiceprintStorage();
+  const ownerVector = await enrollOwnerEmbedding(input.ownerAudioPath);
+  registerVoiceprintMethods(server as any, storage, undefined, {
+    sidecar: referenceSidecar(),
+    ownerEmbeddings: [ownerVector],
+    allowedAudioRoots: input.roots,
+    consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true, exportAllowed: false },
+  });
+  const conn = { sessionKey: "live:segmented-regression" };
+  const scored = await server.call("identity.voiceprint.score_turns", conn, {
+    turns: [{
+      transcriptItemId: "seg_turn_1",
+      role: "user",
+      text: "segmented regression turn",
+      startMs: input.startMs,
+      endMs: input.endMs,
+      audioArtifactId: input.audioArtifactId,
+    }],
+    consent: { captureAllowed: true, biometricAllowed: true, memoryPromotionAllowed: true },
+    createdAt: "2026-07-12T00:00:02.000Z",
+    updatedAt: "2026-07-12T00:00:02.000Z",
+  });
+  const state = scored.states?.[0];
+  return {
+    status: scored.status,
+    lifecycle: state?.lifecycle,
+    skipReason: state?.skipReason,
+    error: state?.error?.message,
+  };
+}
+
+describe("segmented live media resolution (recording-relative turn windows)", () => {
+  test("a mid-recording window maps into the right segment and scores", async () => {
+    const dir = tempDir("voiceprint-segmented-");
+    const base = "live-20260712-000000";
+    for (const index of [0, 1, 2]) writeSegment(dir, base, index, 220, 1500);
+    // window [1600,2900] lives entirely in seg001 [1500,3000) — recording offsets
+    // beyond seg000's length are the exact case the un-sliced fallback broke.
+    const result = await scoreSegmentedTurn({
+      roots: [dir],
+      audioArtifactId: `${base}:webrtc_voice_regression`,
+      startMs: 1600,
+      endMs: 2900,
+      ownerAudioPath: join(dir, `${base}.seg001.mic.wav`),
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.skipReason).toBeUndefined();
+    expect(result.status).toBe("scored");
+  });
+
+  test("tail drift within tolerance still resolves; beyond it skips fail-safe", async () => {
+    const dir = tempDir("voiceprint-segmented-");
+    const base = "live-20260712-000001";
+    for (const index of [0, 1]) writeSegment(dir, base, index, 220, 1500);
+    // total recorded 3000ms; endMs 3200 is 200ms past — inside the 250ms tolerance.
+    // (start early enough that the clamped in-segment slice clears the quality
+    // gate's minimum duration — the drift only affects the END of the window.)
+    const within = await scoreSegmentedTurn({
+      roots: [dir],
+      audioArtifactId: `${base}:t`,
+      startMs: 1600,
+      endMs: 3200,
+      ownerAudioPath: join(dir, `${base}.seg000.mic.wav`),
+    });
+    expect(within.status).toBe("scored");
+    // endMs 3600 is 600ms past — genuinely missing audio, must skip (never guess).
+    const beyond = await scoreSegmentedTurn({
+      roots: [dir],
+      audioArtifactId: `${base}:t`,
+      startMs: 1600,
+      endMs: 3600,
+      ownerAudioPath: join(dir, `${base}.seg000.mic.wav`),
+    });
+    expect(beyond.status).not.toBe("scored");
+    expect(beyond.skipReason).toBe("missing_audio_artifact");
+  });
+
+  test("the same segment reachable via overlapping roots dedupes instead of going ambiguous", async () => {
+    const parent = tempDir("voiceprint-segmented-");
+    const sub = join(parent, "media");
+    mkdirSyncSeg(sub, { recursive: true });
+    const base = "live-20260712-000002";
+    for (const index of [0, 1]) writeSegment(sub, base, index, 220, 1500);
+    // parent scans one level deep (finds media/*), sub lists the same files.
+    const result = await scoreSegmentedTurn({
+      roots: [parent, sub],
+      audioArtifactId: `${base}:t`,
+      startMs: 200,
+      endMs: 1300,
+      ownerAudioPath: join(sub, `${base}.seg000.mic.wav`),
+    });
+    expect(result.status).toBe("scored");
+  });
+});
