@@ -38,6 +38,14 @@ protocol GatewayTransport: Sendable {
     // True iff a successful hello has been received and no subsequent send/read error or disconnect
     // has been observed. Used by callers to short-circuit RPCs on a known-dead socket.
     var isConnected: Bool { get }
+    /// Register a callback fired at most once per established connection when the
+    /// socket dies WITHOUT the client asking for it (gateway restart, network drop,
+    /// read/send error). Never fired for `disconnect()` or handshake failures — those
+    /// surface synchronously to the caller. This is the seam AppContainer uses to
+    /// supervise the main ("ios:main") connection and reconnect with backoff; without
+    /// it a gateway restart silently killed the lifeline until the app was force-quit.
+    /// Default implementation is a no-op (mocks / wrappers that don't detect closes).
+    func setUnexpectedCloseHandler(_ handler: @escaping @Sendable (_ code: Int, _ reason: String) -> Void)
 }
 
 typealias GatewayTransportResolver = @MainActor @Sendable () async -> GatewayTransport?
@@ -50,4 +58,9 @@ extension GatewayTransport {
     }
 
     var isConnected: Bool { false }
+
+    /// Default: no close detection. Concrete transports that own a real socket
+    /// (URLSessionGatewayTransport) override this and invoke the handler from
+    /// their read/send failure paths.
+    func setUnexpectedCloseHandler(_ handler: @escaping @Sendable (_ code: Int, _ reason: String) -> Void) {}
 }

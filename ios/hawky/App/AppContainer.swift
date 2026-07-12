@@ -52,6 +52,40 @@ final class AppContainer {
     // Test seam — directly install a transport without connecting, to drive switchSession flows.
     func _testInstallTransport(_ t: GatewayTransport?) { self.transport = t }
 
+    // ---------------------------------------------------------------------
+    // Main-connection reconnect supervision (task #19).
+    //
+    // The main "ios:main" socket is THE lifeline: chat, session RPCs, and
+    // media.chunk.upload all ride it. Before this existed, a gateway restart
+    // killed the socket silently — the read loop finished, ConnectionStore
+    // stayed .connected, handleForegroundTransition therefore skipped start(),
+    // and the app never reconnected until force-quit (observed repeatedly on
+    // device while the live bridge sockets happily auto-reconnected).
+    //
+    // Backoff: full jitter, delay = random(0, min(cap, base * 2^attempt)) —
+    // the same policy as NodeRunner and hawky src/node/runner.ts (1s base,
+    // 30s cap), for the same reasons documented in ReconnectingTransport
+    // (doubling-only backoff without jitter thundering-herds a restarting
+    // gateway). Retries FOREVER: unlike ReconnectingTransport's 15-minute
+    // connect budget, an ambient agent's main connection has no give-up point.
+    // ---------------------------------------------------------------------
+
+    nonisolated static let reconnectBaseDelay: TimeInterval = 1
+    nonisolated static let reconnectCapDelay: TimeInterval = 30
+
+    // Non-nil while the reconnect loop is alive. At most one loop runs at a
+    // time; deliberate teardown paths (re-auth, settings change, clearToken)
+    // cancel it via cancelReconnectLoop().
+    private var reconnectTask: Task<Void, Never>?
+
+    // Bumped on every successful connect. Close notifications carry the
+    // generation they were armed with, so a straggler close from a socket we
+    // already replaced can never trigger a bogus reconnect of the new one.
+    private var connectionGeneration = 0
+
+    // Test seam — whether the supervision loop is currently running.
+    var _testIsReconnectLoopRunning: Bool { reconnectTask != nil }
+
     private var currentAssistantId: UUID?
     private let launchConfiguration: LaunchConfiguration
     private let seedData: LaunchSeedData?
@@ -97,6 +131,13 @@ final class AppContainer {
     private func buildAndConnect(token: String, platform: String) async throws {
         let transport = transportFactory()
         self.transport = transport
+        try await connectAndWire(transport: transport, token: token, platform: platform)
+    }
+
+    // Shared connect+hello+wiring used by both the build path above and the
+    // reconnect loop (which re-dials the EXISTING transport instance — see
+    // attemptReconnect for why identity preservation matters).
+    private func connectAndWire(transport: GatewayTransport, token: String, platform: String) async throws {
         let params = ConnectParams(
             version: "1",
             platform: platform,
@@ -107,12 +148,123 @@ final class AppContainer {
         let hello = try await transport.connect(url: websocketURL, connectParams: params)
         connectionStore.markConnected(connId: hello.connId)
         self.chatClient = ChatClient(transport: transport, sessionKey: sessionStore.activeSessionKey)
+        superviseConnection(transport)
+    }
+
+    // Arm the unexpected-close seam for the connection just established. The
+    // generation token makes closes from superseded sockets (settings change,
+    // re-auth, an earlier reconnect) inert — only the CURRENT connection may
+    // kick the reconnect loop.
+    private func superviseConnection(_ transport: GatewayTransport) {
+        connectionGeneration += 1
+        let generation = connectionGeneration
+        transport.setUnexpectedCloseHandler { [weak self] code, reason in
+            Task { @MainActor [weak self] in
+                self?.handleUnexpectedClose(generation: generation, code: code, reason: reason)
+            }
+        }
+    }
+
+    // Entry point for transport-reported unexpected closes. Ignores stale
+    // generations and no-ops if a loop is already running (the transport fires
+    // at most once per connection, but the send-path and a foreground kick can
+    // race here).
+    private func handleUnexpectedClose(generation: Int, code: Int, reason: String) {
+        guard generation == connectionGeneration else { return }
+        guard reconnectTask == nil else { return }
+        guard launchConfiguration.gateway != .seededLocal else { return }
+        NSLog("ios: main gateway connection closed unexpectedly (code=\(code), reason=\(reason)); starting reconnect loop")
+        // Surface via the status dot the UI already renders — no new UI.
+        connectionStore.markConnecting()
+        startReconnectLoop()
+    }
+
+    // (Re)start the supervision loop. First attempt fires immediately — callers
+    // use a restart to force a prompt retry (app foreground) without waiting
+    // out a pending backoff sleep; the attempt counter (and thus the backoff)
+    // resets as a side effect, which is exactly what a fresh-network signal
+    // like foregrounding should do.
+    private func startReconnectLoop() {
+        reconnectTask?.cancel()
+        reconnectTask = Task { [weak self] in
+            var attempt = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await self.attemptReconnect() {
+                    if !Task.isCancelled { self.reconnectTask = nil }
+                    return
+                }
+                attempt += 1
+                // Full jitter: random(0, min(cap, base * 2^attempt)).
+                let ceiling = min(Self.reconnectCapDelay, Self.reconnectBaseDelay * pow(2.0, Double(attempt)))
+                let delay = Double.random(in: 0..<ceiling)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+    }
+
+    // Cancel supervision. Called by every deliberate teardown/rebuild path
+    // (re-auth, gateway settings change, clearToken, ensureConnected, start) —
+    // those own the connection lifecycle themselves and must not race a
+    // background loop dialing the old configuration.
+    private func cancelReconnectLoop() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        // Invalidate any close notification still in flight from the connection
+        // being torn down — the next successful connect re-arms supervision with
+        // a fresh generation.
+        connectionGeneration += 1
+    }
+
+    // One reconnect attempt: token (cached or re-acquired) → connect → re-run
+    // the post-connect handshake (session list + head refresh) that start()
+    // performs, so the app state converges as if this were a fresh launch.
+    // Returns true on success.
+    private func attemptReconnect() async -> Bool {
+        do {
+            let token: String
+            if let cached = try? KeychainStore.load(for: gatewayURL), !cached.isEmpty {
+                token = cached
+            } else {
+                token = try await deviceAuth.acquireAndStore()
+            }
+            let platform = UserDefaults.standard.string(forKey: "deviceName") ?? "mobile"
+            if let transport {
+                // Re-dial the SAME transport instance instead of building a fresh
+                // one: long-lived holders capture the reference once (Uploader /
+                // LiveRecordingSink at recording start), so preserving identity
+                // lets their queued media.chunk.upload traffic resume the moment
+                // isConnected flips back on — a rebuilt instance would leave them
+                // holding a dead socket for the rest of the recording.
+                try await connectAndWire(transport: transport, token: token, platform: platform)
+            } else {
+                try await buildAndConnect(token: token, platform: platform)
+            }
+            do { try await refreshSessionList() } catch {
+                NSLog("ios: refreshSessionList failed after reconnect: \(error)")
+            }
+            // Bypass the foreground debounce — after an outage the head is stale
+            // by definition.
+            lastForegroundRefreshAt = nil
+            await refreshHeadIfNeeded(for: sessionStore.activeSessionKey)
+            NSLog("ios: main gateway connection re-established")
+            return true
+        } catch GatewayTransportError.unauthorized {
+            // Gateway restart may have rotated/invalidated the device token.
+            // Drop the cached one so the next attempt re-runs device auth.
+            try? KeychainStore.delete(for: gatewayURL)
+            return false
+        } catch {
+            NSLog("ios: reconnect attempt failed: \(error)")
+            return false
+        }
     }
 
     // Rebuilds the transport when the current one is stale (ENOTCONN / closed socket).
     // Callers (e.g. switchSession) use this before RPCs to avoid NSPOSIXErrorDomain 57.
     func ensureConnected() async throws {
         if transport?.isConnected == true { return }
+        cancelReconnectLoop()
         await transport?.disconnect()
         self.transport = nil
         self.chatClient = nil
@@ -209,6 +361,9 @@ final class AppContainer {
         }
 
         NSLog("ios: starting with gateway \(gatewayURL.absoluteString)")
+        // start() owns the connection lifecycle from here — a background
+        // reconnect loop dialing in parallel would double-connect.
+        cancelReconnectLoop()
         connectionStore.markConnecting()
         do {
             let token: String
@@ -250,6 +405,7 @@ final class AppContainer {
     // Clear Keychain, fetch a fresh token, rebuild transport, reconnect.
     // Called from Settings "Re-authenticate" button.
     func reauthenticate() async {
+        cancelReconnectLoop()
         try? KeychainStore.delete(for: gatewayURL)
         await transport?.disconnect()
         self.transport = nil
@@ -272,6 +428,7 @@ final class AppContainer {
         UserDefaults.standard.set(newGatewayURL.absoluteString, forKey: "gatewayURL")
         UserDefaults.standard.set(trimmedName, forKey: "deviceName")
 
+        cancelReconnectLoop()
         await stopNode()
         await transport?.disconnect()
         self.transport = nil
@@ -713,13 +870,33 @@ final class AppContainer {
         if case .connected = connectionStore.status { isConnected = true } else { isConnected = false }
 
         if !isConnected {
-            await start()
+            if reconnectTask != nil {
+                // A reconnect loop is already running, possibly parked in a
+                // backoff sleep of up to reconnectCapDelay. Restart it so the
+                // first attempt fires immediately — the user returning to the
+                // app is a strong "network is probably fine now" signal and
+                // must not wait out the remaining backoff.
+                startReconnectLoop()
+            } else {
+                await start()
+            }
+            return
+        }
+        // Belt-and-braces: the store can still say .connected while the socket
+        // died during suspension — iOS kills idle sockets without waking the
+        // read loop, so the unexpected-close handler may not have fired yet.
+        // Trust the transport over the mirror and reconnect proactively rather
+        // than letting the next RPC discover the corpse.
+        if transport?.isConnected != true {
+            connectionStore.markConnecting()
+            startReconnectLoop()
             return
         }
         await refreshHeadIfNeeded(for: sessionStore.activeSessionKey)
     }
 
     func clearToken() async {
+        cancelReconnectLoop()
         try? KeychainStore.delete(for: gatewayURL)
         await transport?.disconnect()
         self.transport = nil

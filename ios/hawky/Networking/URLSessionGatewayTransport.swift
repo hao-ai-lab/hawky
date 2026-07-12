@@ -19,6 +19,12 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
         var eventStream: AsyncStream<EventFrame>?
         var closed = false
         var connected = false
+        // Reconnect supervision (task #19): fired at most once per established
+        // connection when the socket dies without disconnect() being called.
+        // `closeNotified` dedupes the two failure paths (read loop vs send) that
+        // can both observe the same dead socket.
+        var closeHandler: (@Sendable (Int, String) -> Void)?
+        var closeNotified = false
     }
     private let state = OSAllocatedUnfairLock<State>(initialState: State())
 
@@ -43,12 +49,25 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
 
         let (stream, continuation) = AsyncStream<EventFrame>.makeStream()
 
-        state.withLock {
-            $0.task = ws
-            $0.eventStream = stream
-            $0.eventContinuation = continuation
-            $0.closed = false
+        // connect() is intentionally re-callable on the same instance (used by the
+        // AppContainer reconnect loop after a gateway restart) so long-lived holders
+        // of this transport — Uploader / LiveRecordingSink capture it at recording
+        // start — resume flushing the moment isConnected flips back on, instead of
+        // silently holding a dead socket for the rest of the recording. Tear down
+        // any prior task/read-loop before installing the fresh ones.
+        let previous = state.withLock { s -> (URLSessionWebSocketTask?, Task<Void, Never>?) in
+            let prev = (s.task, s.readLoopTask)
+            s.task = ws
+            s.readLoopTask = nil
+            s.eventStream = stream
+            s.eventContinuation = continuation
+            s.closed = false
+            s.connected = false
+            s.closeNotified = false
+            return prev
         }
+        previous.1?.cancel()
+        previous.0?.cancel(with: .normalClosure, reason: nil)
 
         ws.resume()
         startReadLoop(ws: ws)
@@ -171,6 +190,13 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
             try await ws.send(encoded.message)
         } catch {
             state.withLock { $0.connected = false }
+            // A failed socket send means the connection is dead (ENOTCONN et
+            // al). The read loop usually observes the same death, but whichever
+            // path gets there first fires the (once-only) unexpected-close
+            // handler so the owner can start reconnecting instead of waiting on
+            // a receive() parked on a zombie socket after app resume.
+            let closeHandler = noteClosedAndTakeHandler(for: ws)
+            closeHandler?(ws.closeCode.rawValue, "send failed: \(error)")
             Self.logSend(
                 method: frame.method,
                 ok: false,
@@ -228,6 +254,10 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
         }
     }
 
+    func setUnexpectedCloseHandler(_ handler: @escaping @Sendable (_ code: Int, _ reason: String) -> Void) {
+        state.withLock { $0.closeHandler = handler }
+    }
+
     func events() -> AsyncStream<EventFrame> {
         state.withLock { s in
             if let existing = s.eventStream { return existing }
@@ -258,6 +288,21 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
     }
 
     // MARK: - internals
+
+    /// Atomically record that `ws` died and decide whether to notify. Returns the
+    /// close handler exactly once per established connection: only when the dead
+    /// socket is still the current one, the hello had completed (`connected`), the
+    /// close was not client-initiated (`closed`), and nobody notified yet.
+    private func noteClosedAndTakeHandler(for ws: URLSessionWebSocketTask) -> (@Sendable (Int, String) -> Void)? {
+        state.withLock { s -> (@Sendable (Int, String) -> Void)? in
+            guard s.task === ws else { return nil }
+            let shouldNotify = s.connected && !s.closed && !s.closeNotified
+            s.connected = false
+            guard shouldNotify else { return nil }
+            s.closeNotified = true
+            return s.closeHandler
+        }
+    }
 
     private func encodeAndSend(frame: RequestFrame, on ws: URLSessionWebSocketTask) async throws {
         try await ws.send(try encode(frame: frame).message)
@@ -294,18 +339,29 @@ final class URLSessionGatewayTransport: GatewayTransport, @unchecked Sendable {
                     }
                     await self.handleIncoming(data: data)
                 } catch {
+                    // Loop cancelled because connect() re-dialed this instance — the
+                    // fresh connection owns the state now; touch nothing and exit.
+                    if Task.isCancelled { return }
                     // Socket closed / errored — propagate to correlator and exit.
                     let closeCode = ws.closeCode.rawValue
                     let reason = (ws.closeReason.flatMap { String(data: $0, encoding: .utf8) }) ?? "\(error)"
                     await self.correlator.rejectAll(error: GatewayTransportError.closed(code: closeCode, reason: reason))
                     let cont = self.state.withLock { s -> AsyncStream<EventFrame>.Continuation? in
+                        // Guard on task identity: a stale loop for a superseded socket
+                        // must never finish the NEW connection's event stream.
+                        guard s.task === ws else { return nil }
                         let c = s.eventContinuation
                         s.eventContinuation = nil
                         s.eventStream = nil
-                        s.connected = false
                         return c
                     }
                     cont?.finish()
+                    // Fire the unexpected-close seam (once per connection) so the
+                    // owner (AppContainer) can reconnect. Suppressed for deliberate
+                    // disconnect() (closed=true) and handshake failures (connected
+                    // never became true) — those already surface to their callers.
+                    let handler = self.noteClosedAndTakeHandler(for: ws)
+                    handler?(closeCode, reason)
                     return
                 }
             }

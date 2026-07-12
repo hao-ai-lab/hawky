@@ -48,6 +48,7 @@
 		3B165EA1F9214992DFCD7F07 /* URLSessionGatewayTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CBC07F142586099542EADED /* URLSessionGatewayTransport.swift */; };
 		3B65F247025644B32A1BD41B /* LaunchConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28E9E4705E75C7A90C4E728A /* LaunchConfiguration.swift */; };
 		3C436A29A12D5453D131215B /* RecordingLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DB65A85F32566BF9740AF31 /* RecordingLibrary.swift */; };
+		3C4F069602933516334029BA /* MainConnectionReconnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 719CE5264E6C20778DF30B7D /* MainConnectionReconnectTests.swift */; };
 		3ED26D8001764B2A1088245D /* AgentConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A070054F7D391E912A2BA740 /* AgentConfigStore.swift */; };
 		41C97F7A1AA2FC9E18BB9310 /* ConnectDTOs.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA946A046DD6138C0CEE260 /* ConnectDTOs.swift */; };
 		4338D191DA09D19577978FDD /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FF6B16B2B636E2FDF19B80A /* SessionStore.swift */; };
@@ -348,6 +349,7 @@
 		70A14EB8E23B447CD82F8137 /* LiveSummarySheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSummarySheet.swift; sourceTree = "<group>"; };
 		70AFEB1CAFD21396FED74150 /* DefaultSecrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DefaultSecrets.swift; sourceTree = "<group>"; };
 		710681BBD89F13F06211D1E5 /* ConnectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStore.swift; sourceTree = "<group>"; };
+		719CE5264E6C20778DF30B7D /* MainConnectionReconnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainConnectionReconnectTests.swift; sourceTree = "<group>"; };
 		71BC9AAFBAE7BD0CC87BA3A2 /* testAssistantFinalized.1.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = testAssistantFinalized.1.png; sourceTree = "<group>"; };
 		727EDD77B9DF0BED314D586C /* AudioSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSink.swift; sourceTree = "<group>"; };
 		7387FF2CB0F757632CB92622 /* HazardClassifierClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HazardClassifierClient.swift; sourceTree = "<group>"; };
@@ -730,6 +732,7 @@
 				6EF232360A1D3152B4166965 /* LiveRealtimeSessionConfigStatusTests.swift */,
 				F45B37589489D1758582D850 /* LiveSendPhotoToolTests.swift */,
 				84E38F3E3024E68B6F9F8254 /* LiveStartFailureClassificationTests.swift */,
+				719CE5264E6C20778DF30B7D /* MainConnectionReconnectTests.swift */,
 				19F8BFE0FF53EE6632C76212 /* NodeCapabilitiesTests.swift */,
 				B7B76FB840014EAE9BE45069 /* NodeRunnerTests.swift */,
 				02EF1C257E56F3C2AF6C4DBA /* OwnerEnrollmentModelTests.swift */,
@@ -958,11 +961,11 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					3CD4250F4C85588402A444E6 = {
-						DevelopmentTeam = NGS8R78A9C;
+						DevelopmentTeam = H36Q343HS8;
 						ProvisioningStyle = Automatic;
 					};
 					796A44CF7DB3AC77F305BCF6 = {
-						DevelopmentTeam = NGS8R78A9C;
+						DevelopmentTeam = H36Q343HS8;
 						ProvisioningStyle = Automatic;
 					};
 					A289C97CAD5242E6B6F0D803 = {
@@ -1074,6 +1077,7 @@
 				43BE5AF5729247F82534EE96 /* LiveRealtimeSessionConfigStatusTests.swift in Sources */,
 				C1DD0371D25630D02F68AC56 /* LiveSendPhotoToolTests.swift in Sources */,
 				7B6B063F39AF2BB540F79CFF /* LiveStartFailureClassificationTests.swift in Sources */,
+				3C4F069602933516334029BA /* MainConnectionReconnectTests.swift in Sources */,
 				C71001ECA05A8C549BE1BB33 /* NodeCapabilitiesTests.swift in Sources */,
 				C0B942CD09B0AA6521DFB17B /* NodeRunnerTests.swift in Sources */,
 				B174B282E8460B62C808D36A /* OwnerEnrollmentModelTests.swift in Sources */,
@@ -1313,7 +1317,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawkyLockScreenWidget/hawkyLockScreenWidget.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = NGS8R78A9C;
+				DEVELOPMENT_TEAM = H36Q343HS8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawkyLockScreenWidget/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1415,7 +1419,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawky/hawky.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = NGS8R78A9C;
+				DEVELOPMENT_TEAM = H36Q343HS8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawky/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1504,7 +1508,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawky/hawky.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = NGS8R78A9C;
+				DEVELOPMENT_TEAM = H36Q343HS8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawky/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1529,7 +1533,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawkyLockScreenWidget/hawkyLockScreenWidget.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = NGS8R78A9C;
+				DEVELOPMENT_TEAM = H36Q343HS8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawkyLockScreenWidget/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
