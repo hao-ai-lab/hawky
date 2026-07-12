@@ -782,12 +782,16 @@ export function registerVoiceprintMethods(
         minSpeechMs: input.minSpeechMs,
       });
       if (assessment.status !== "accepted") {
+        // extraResponseFields (segment-selection stats) are logged too: without
+        // them the log cannot distinguish "user spoke too little" from "the
+        // selection budget capped the takes" (the bug that hid the 90s cap).
         log.info(logLabel, {
           session_key: sessionKey,
           status: "rejected",
           reasons: assessment.reasons,
           source_count: assessment.sourceCount,
           speech_ms: assessment.speechMs,
+          ...input.extraResponseFields,
         });
         emitVoiceprintAudit(lifecycle, {
           subjectKey: sessionKey,
@@ -813,6 +817,7 @@ export function registerVoiceprintMethods(
         template_ref: stored.templateRef,
         source_count: assessment.sourceCount,
         speech_ms: assessment.speechMs,
+        ...input.extraResponseFields,
       });
       emitVoiceprintAudit(lifecycle, {
         subjectKey: sessionKey,
@@ -875,7 +880,7 @@ export function registerVoiceprintMethods(
       // independently and enroll TOGETHER, in take order.
       const selected: Array<{ audioPath: string; durationMs: number }> = [];
       const totals = { considered: 0, qualityRejected: 0, capped: 0, afterGap: 0 };
-      // The ~90s selection budget is a TOTAL across takes, not per take: each
+      // The ~180s selection budget is a TOTAL across takes, not per take: each
       // rejection->continue->resubmit re-embeds every prior take through the
       // sidecar, so without a global cap ten takes could feed 15 minutes of
       // audio per submission. Later takes past the budget count as capped.
@@ -1895,8 +1900,14 @@ interface EnrollOwnerFromRecordingParams {
 
 const ENROLL_FROM_RECORDING_MAX_TAKES = 10;
 
-/** Total selection budget across ALL takes of one submission (see the RPC). */
-const ENROLL_FROM_RECORDING_TOTAL_MAX_MS = 90_000;
+/**
+ * Total selection budget across ALL takes of one submission (see the RPC).
+ * 180s of SEGMENT audio: conversation segments run ~0.47-0.53 voiced (measured
+ * on real enrollments), so this yields ~85-95s of voiced speech — past which a
+ * CAM++ centroid sees diminishing returns. The previous 90s budget silently
+ * pinned every enrollment at ~41s voiced no matter how long the user talked.
+ */
+const ENROLL_FROM_RECORDING_TOTAL_MAX_MS = 180_000;
 
 function parseEnrollOwnerFromRecordingParams(params: unknown): EnrollOwnerFromRecordingParams {
   const p = objectOrUndefined(params);

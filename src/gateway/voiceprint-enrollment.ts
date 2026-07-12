@@ -37,13 +37,16 @@ import {
 
 /**
  * PER-RECORDING selection bound. Long conversations can carry hundreds of
- * segments; ~90s of quality-passing speech is well past the 30s voiced floor
- * and matches the manually-validated live-domain template (~60s / 48 clips →
- * owner 0.79-0.84 on a held-out session). The TOTAL budget across a multi-take
- * submission is enforced separately by the RPC
- * (ENROLL_FROM_RECORDING_TOTAL_MAX_MS in voiceprint-methods.ts).
+ * segments; conversation segments run ~0.47-0.53 voiced, so ~180s of
+ * quality-passing SEGMENT audio yields ~85-95s voiced — well past the 30s
+ * voiced floor and the manually-validated live-domain template (~60s / 48
+ * clips → owner 0.79-0.84 on a held-out session), with diminishing returns
+ * beyond that for a CAM++ centroid. Must stay >= the TOTAL budget across a
+ * multi-take submission, which the RPC enforces separately
+ * (ENROLL_FROM_RECORDING_TOTAL_MAX_MS in voiceprint-methods.ts) — otherwise
+ * this per-recording bound would silently re-cap a single long take.
  */
-const ENROLL_FROM_RECORDING_MAX_MS = 90_000;
+const ENROLL_FROM_RECORDING_MAX_MS = 180_000;
 
 /**
  * Select the enrollment-usable segments of a live recording: finalized
