@@ -21,7 +21,7 @@ import Foundation
     private final class FakeRecordingEnrollmentGateway: VoiceprintEnrollmentGateway, @unchecked Sendable {
         private let lock = NSLock()
         private(set) var fromRecordingCalls: [[String: JSONValue]] = []
-        private let result: LiveVoiceprintEnrollmentResult?
+        var result: LiveVoiceprintEnrollmentResult?
 
         init(result: LiveVoiceprintEnrollmentResult?) {
             self.result = result
@@ -340,5 +340,56 @@ import Foundation
         // anchored take is NOT double-counted.
         model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 10_000)
         #expect(Int(model.speechProgressMs) == 16_000 + Int(10_000 * 0.74))
+    }
+
+    // MARK: - A second rejection re-anchors (replaces, never sums)
+
+    @Test func secondRejectionReplacesAnchorAndCoversAllTakes() async {
+        let gateway = FakeRecordingEnrollmentGateway(
+            result: rejectedResult(reasons: ["not_enough_speech"], speechMs: 16_000)
+        )
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+        model.consent = fullConsent
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
+        _ = await model.submitFromRecording()
+        #expect(Int(model.speechProgressMs) == 16_000)
+
+        // Continue recording, then the server counts BOTH takes at 24s total.
+        model.recordListeningCapture(recordingBaseId: "live-take-b", elapsedMs: 20_000)
+        gateway.result = rejectedResult(reasons: ["not_enough_speech"], speechMs: 24_000)
+        _ = await model.submitFromRecording()
+        // REPLACED (24s), not summed (16+24); the anchor now covers both takes,
+        // so no client estimate is added on top.
+        #expect(Int(model.speechProgressMs) == 24_000)
+        #expect(model.keepTalkingSeconds == 6)
+        #expect(model.capturedRecordingBaseIds == ["live-take-a", "live-take-b"])
+    }
+
+    // MARK: - Accept clears the takes (post-success screen is coherent)
+
+    @Test func acceptedSubmissionClearsTakesAndAnchor() async {
+        let gateway = FakeRecordingEnrollmentGateway(result: acceptedResult())
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+        model.consent = fullConsent
+        model.recordListeningCapture(recordingBaseId: "live-take-a", elapsedMs: 45_000)
+        _ = await model.submitFromRecording()
+        guard case .enrolled = model.state else {
+            Issue.record("expected enrolled state"); return
+        }
+        #expect(model.capturedRecordingBaseIds.isEmpty)
+        #expect(model.serverCountedSpeechMs == nil)
+        #expect(!model.canSubmitFromRecording)
+    }
+
+    // MARK: - Take limit matches the gateway bound
+
+    @Test func takeLimitBlocksFurtherTakes() {
+        let gateway = FakeRecordingEnrollmentGateway(result: acceptedResult())
+        let model = OwnerEnrollmentModel(gateway: gateway, sessionKey: "realtime:main")
+        for index in 0..<OwnerEnrollmentModel.maxTakes {
+            model.recordListeningCapture(recordingBaseId: "live-take-\(index)", elapsedMs: 5_000)
+        }
+        #expect(model.atTakeLimit)
+        #expect(model.capturedRecordingBaseIds.count == OwnerEnrollmentModel.maxTakes)
     }
 }

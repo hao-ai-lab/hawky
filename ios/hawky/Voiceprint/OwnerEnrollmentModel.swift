@@ -303,6 +303,12 @@ final class OwnerEnrollmentModel: ObservableObject {
     /// to compute the "keep talking ~N more seconds" hint.
     nonisolated static let serverVoicedFloorMs: Double = 30_000
 
+    /// The gateway rejects submissions with more than this many takes
+    /// (enroll_owner_from_recording accepts 1..10 recordingBaseIds). The model
+    /// enforces the same bound so the UI blocks an 11th take with honest copy
+    /// instead of every submit failing with a generic transport error.
+    nonisolated static let maxTakes = 10
+
     @Published private(set) var state: OwnerEnrollmentState = .idle
     @Published private(set) var sources: [OwnerEnrollmentSource] = []
     /// Per-source upload state, keyed by `OwnerEnrollmentSource.id`. A source is
@@ -659,6 +665,13 @@ final class OwnerEnrollmentModel: ObservableObject {
         Int((max(0, Self.serverVoicedFloorMs - speechProgressMs) / 1000).rounded(.up))
     }
 
+    /// True when the gateway's take bound is reached: no further takes may be
+    /// recorded — the user must enroll what they have or start over. The view
+    /// disables Continue recording with honest copy on this.
+    var atTakeLimit: Bool {
+        capturedRecordingBaseIds.count >= Self.maxTakes
+    }
+
     /// Whether "Enroll my voice" may submit the captured takes: same fail-closed
     /// consent gate as the clip flow, plus at least one captured take, progress
     /// clearing the guided floor, and no take still being listened to.
@@ -680,6 +693,9 @@ final class OwnerEnrollmentModel: ObservableObject {
         recordingTransport: GatewayTransport? = nil
     ) async -> Bool {
         guard !isListening else { return true }
+        // The gateway rejects >maxTakes ids outright; refusing here keeps the
+        // user's audio instead of letting an 11th take doom every submit.
+        guard !atTakeLimit else { return false }
         guard store.voiceprintEnrollmentGateway() != nil else {
             state = .failed("Hawky gateway is not reachable — connect first to enroll.")
             return false
@@ -791,6 +807,12 @@ final class OwnerEnrollmentModel: ObservableObject {
             return nil
         }
         if result.accepted {
+            // The takes are now IN the template: clear them (and the anchor) so
+            // the post-success screen cannot re-enroll the same audio or stack
+            // new takes onto already-enrolled ones. A later re-enroll starts
+            // fresh, exactly like the already-enrolled banner frames it.
+            capturedRecordingBaseIds.removeAll()
+            takeElapsedMs.removeAll()
             serverCountedSpeechMs = nil
             takeCountAtLastRejection = 0
             state = .enrolled(result)
@@ -800,8 +822,13 @@ final class OwnerEnrollmentModel: ObservableObject {
             // client estimates of every take counted so far (Continue-recording
             // takes after this rejection estimate on top of it) — and KEEP all
             // takes: tooShort is actionable ("Continue recording"), not terminal.
-            serverCountedSpeechMs = result.speechMs ?? 0
-            takeCountAtLastRejection = capturedRecordingBaseIds.count
+            // A rejection payload without speechMs (parse anomaly) leaves the
+            // client estimates in place: anchoring ALL takes at 0 would show
+            // "0s / 30s" despite real captured audio.
+            if let serverSpeechMs = result.speechMs {
+                serverCountedSpeechMs = serverSpeechMs
+                takeCountAtLastRejection = capturedRecordingBaseIds.count
+            }
             state = .tooShort
         } else {
             state = .failed(Self.recordingFailureMessage(for: result))

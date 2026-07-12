@@ -875,17 +875,29 @@ export function registerVoiceprintMethods(
       // independently and enroll TOGETHER, in take order.
       const selected: Array<{ audioPath: string; durationMs: number }> = [];
       const totals = { considered: 0, qualityRejected: 0, capped: 0, afterGap: 0 };
+      // The ~90s selection budget is a TOTAL across takes, not per take: each
+      // rejection->continue->resubmit re-embeds every prior take through the
+      // sidecar, so without a global cap ten takes could feed 15 minutes of
+      // audio per submission. Later takes past the budget count as capped.
+      let selectedMs = 0;
       try {
         for (const recordingBaseId of input.recordingBaseIds) {
           const selection = await selectEnrollmentSegmentsFromRecording({
             recordingBaseId,
             scoring: config,
           });
-          selected.push(...selection.selected);
           totals.considered += selection.consideredCount;
           totals.qualityRejected += selection.qualityRejectedCount;
           totals.capped += selection.cappedCount;
           totals.afterGap += selection.afterGapCount;
+          for (const segment of selection.selected) {
+            if (selectedMs >= ENROLL_FROM_RECORDING_TOTAL_MAX_MS) {
+              totals.capped += 1;
+              continue;
+            }
+            selected.push(segment);
+            selectedMs += segment.durationMs;
+          }
         }
       } catch (error) {
         emitVoiceprintAudit(lifecycle, {
@@ -1882,6 +1894,9 @@ interface EnrollOwnerFromRecordingParams {
 }
 
 const ENROLL_FROM_RECORDING_MAX_TAKES = 10;
+
+/** Total selection budget across ALL takes of one submission (see the RPC). */
+const ENROLL_FROM_RECORDING_TOTAL_MAX_MS = 90_000;
 
 function parseEnrollOwnerFromRecordingParams(params: unknown): EnrollOwnerFromRecordingParams {
   const p = objectOrUndefined(params);
