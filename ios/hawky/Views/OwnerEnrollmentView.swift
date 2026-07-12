@@ -241,7 +241,7 @@ struct OwnerEnrollmentView: View {
         seconds: Int, floorSeconds: Int, enough: Bool, serverAnchored: Bool
     ) -> String {
         if enough {
-            return "About \(seconds)s captured — the server makes the final count."
+            return "About \(seconds)s captured — 30s is the minimum; closer to a minute makes recognition noticeably stronger."
         }
         if serverAnchored {
             return "\(seconds)s / \(floorSeconds)s — keep talking about \(model.keepTalkingSeconds) more seconds"
@@ -349,7 +349,7 @@ struct OwnerEnrollmentView: View {
             return "Keep talking — Hawky is listening silently."
         }
         if model.capturedRecordingBaseIds.isEmpty {
-            return "Step 1 — tap Start listening and talk for about 40 seconds."
+            return "Step 1 — tap Start listening and talk for about a minute."
         }
         if !model.hasEnoughListeningSpeech {
             return "Keep going — tap Continue recording and talk about \(model.keepTalkingSeconds) more seconds."
@@ -386,7 +386,7 @@ struct OwnerEnrollmentView: View {
                 ? "You have enough speech. Tap Enroll my voice below."
                 : "You have enough speech. Grant consent below, then enroll."
         }
-        return "Hawky will listen silently for about 40 seconds while you talk. Do this alone in a quiet place — it should only hear your voice."
+        return "Hawky will listen silently while you talk — aim for about a minute of speech. Do this alone in a quiet place — it should only hear your voice."
     }
 
     // MARK: - Listening action
