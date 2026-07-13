@@ -2013,9 +2013,26 @@ final class LiveSessionStore {
         }
 
         do {
+            // #camera-latency: the camera pipeline is independent of the WebRTC
+            // handshake (frames buffer until the data channel is ready), so it
+            // is brought up CONCURRENTLY with the mic warm-up + connect instead
+            // of dead last behind the up-to-8s session-config ack. The effective
+            // config is passed explicitly (activeConfig is not set yet); the
+            // task is JOINED at the original "visual input" point so failure
+            // semantics are unchanged (a failed connect still reaches the catch
+            // block's stopVisualStream()).
+            let visualLaunchedAt = Date()
+            let visualTask = Task { [weak self, nextProvider] in
+                await self?.startVisualStreamIfNeeded(
+                    provider: nextProvider,
+                    sessionConfig: effectiveConfig
+                )
+            }
             // Recording mic must start before connect() grabs the audio device —
             // two voice-processing engines fighting for the mic crash CoreAudio.
+            let recordingMicStartedAt = Date()
             await startRecordingIfNeeded(transport: recordingTransport, config: effectiveConfig)
+            recordStartTiming("recording mic", since: recordingMicStartedAt)
             let connectStartedAt = Date()
             try await nextProvider.connect(config: effectiveConfig)
             recordStartTiming("provider connect", since: connectStartedAt)
@@ -2093,9 +2110,13 @@ final class LiveSessionStore {
                 diagnostics.audioSessionStatus = "Audio input off"
                 appendSystemMessage("Audio input off")
             }
-            let visualStartedAt = Date()
-            await startVisualStreamIfNeeded(provider: nextProvider)
-            recordStartTiming("visual input", since: visualStartedAt)
+            // Join the concurrently-launched camera bring-up (started pre-connect).
+            let visualJoinStartedAt = Date()
+            await visualTask.value
+            recordStartTiming(
+                "visual input (concurrent, total \(elapsedLabel(since: visualLaunchedAt)))",
+                since: visualJoinStartedAt
+            )
             diagnostics.lastLifecycleEvent = "Started in \(elapsedLabel(since: startStartedAt))"
             append(
                 "Start timing: \(elapsedLabel(since: startStartedAt))",
@@ -3012,16 +3033,25 @@ final class LiveSessionStore {
         diagnostics.audioRoute = Self.audioRouteLabel()
     }
 
-    private func startVisualStreamIfNeeded(provider: LiveSessionProvider) async {
+    /// `sessionConfig` is the EFFECTIVE config for the session being started.
+    /// It must be passed explicitly when this runs concurrently with connect
+    /// (#camera-latency): before connect completes, `activeConfig` is not yet
+    /// set, so `liveConfig` would read the DRAFT config — bypassing per-session
+    /// overrides like the enrollment session's forced camera-off.
+    private func startVisualStreamIfNeeded(
+        provider: LiveSessionProvider,
+        sessionConfig: LiveSessionConfig? = nil
+    ) async {
+        let visualConfig = sessionConfig ?? liveConfig
         guard !isStreamingVisual else { return }
         // Running session reads the frozen snapshot, so mid-session edits apply
         // to the next session, not this one.
-        guard liveConfig.visualSource != .off else {
+        guard visualConfig.visualSource != .off else {
             diagnostics.visualStatus = "Off"
             return
         }
 
-        let fps = liveConfig.effectiveVisualFPS
+        let fps = visualConfig.effectiveVisualFPS
         guard fps > 0 else {
             diagnostics.visualStatus = "Off"
             return
@@ -3029,11 +3059,11 @@ final class LiveSessionStore {
 
         // Select the frame deduplicator for this stream. Off → pass-through, so
         // cadence alone governs the send rate (pre-#612 behaviour).
-        visualDeduplicator = liveConfig.visualDedupEnabled
+        visualDeduplicator = visualConfig.visualDedupEnabled
             ? AverageHashDeduplicator()
             : PassThroughDeduplicator()
 
-        switch liveConfig.visualSource {
+        switch visualConfig.visualSource {
         case .off:
             return
         case .iPhoneCamera:

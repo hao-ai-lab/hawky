@@ -961,11 +961,11 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					3CD4250F4C85588402A444E6 = {
-						DevelopmentTeam = H36Q343HS8;
+						DevelopmentTeam = NGS8R78A9C;
 						ProvisioningStyle = Automatic;
 					};
 					796A44CF7DB3AC77F305BCF6 = {
-						DevelopmentTeam = H36Q343HS8;
+						DevelopmentTeam = NGS8R78A9C;
 						ProvisioningStyle = Automatic;
 					};
 					A289C97CAD5242E6B6F0D803 = {
@@ -1317,7 +1317,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawkyLockScreenWidget/hawkyLockScreenWidget.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = H36Q343HS8;
+				DEVELOPMENT_TEAM = NGS8R78A9C;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawkyLockScreenWidget/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1326,7 +1326,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky.lockscreenwidget;
+				PRODUCT_BUNDLE_IDENTIFIER = "live.hawky.lock-screen-widget";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = NO;
 				SWIFT_VERSION = 5.10;
@@ -1419,7 +1419,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawky/hawky.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = H36Q343HS8;
+				DEVELOPMENT_TEAM = NGS8R78A9C;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawky/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1427,7 +1427,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky;
+				PRODUCT_BUNDLE_IDENTIFIER = live.hawky;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "hawky/hawky-Bridging-Header.h";
 				SWIFT_VERSION = 5.10;
@@ -1508,7 +1508,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawky/hawky.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = H36Q343HS8;
+				DEVELOPMENT_TEAM = NGS8R78A9C;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawky/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1516,7 +1516,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky;
+				PRODUCT_BUNDLE_IDENTIFIER = live.hawky;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "hawky/hawky-Bridging-Header.h";
 				SWIFT_VERSION = 5.10;
@@ -1533,7 +1533,7 @@
 				CODE_SIGN_ENTITLEMENTS = hawkyLockScreenWidget/hawkyLockScreenWidget.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = H36Q343HS8;
+				DEVELOPMENT_TEAM = NGS8R78A9C;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = hawkyLockScreenWidget/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -1542,7 +1542,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.starry7420.hawky.lockscreenwidget;
+				PRODUCT_BUNDLE_IDENTIFIER = "live.hawky.lock-screen-widget";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = NO;
 				SWIFT_VERSION = 5.10;
