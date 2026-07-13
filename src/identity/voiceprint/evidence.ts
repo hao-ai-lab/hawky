@@ -101,7 +101,13 @@ export interface SpeakerEvidenceConfig {
 export const DEFAULT_SPEAKER_EVIDENCE_CONFIG: SpeakerEvidenceConfig = {
   flipThreshold: 3,
   windowSize: 5,
-  staleTimeoutMs: 60_000,
+  // 10 minutes, matching production. The original 60s default silently decays
+  // a settled owner during natural conversation pauses — the evidence-layer
+  // benchmark (scripts/bench-voiceprint-evidence.ts, "sparse owner" scenario)
+  // shows a 60s default NEVER establishes on sparse conversations. Deployments
+  // relying on this default (no evidence block in config) now get the measured
+  // value instead of the footgun.
+  staleTimeoutMs: 600_000,
 };
 
 export function initialSpeakerEvidenceState(): SpeakerEvidenceState {
