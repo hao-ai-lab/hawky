@@ -1148,6 +1148,14 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
             "model": .string(model),
             "instructions": .string(instructions),
             "output_modalities": .array([.string("audio")]),
+            // #18: cap spoken-turn length. This rides the post-connect
+            // `session.update` over the data channel — NOT the client-secret mint
+            // — on purpose: the GA `/v1/realtime/client_secrets` schema rejects
+            // `session.max_response_output_tokens` ("Unknown parameter"), as the
+            // gateway broker documents and strips (live-realtime-broker.ts). The
+            // session.update path accepts it, so the cap is applied here where it
+            // actually takes effect.
+            "max_response_output_tokens": Self.maxResponseOutputTokensValue(config: config),
             "tool_choice": .string(silent ? "none" : "auto"),
             "audio": .object([
                 "input": .object(inputAudioConfig),
@@ -1167,6 +1175,13 @@ final class PipecatOpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvi
             }
         }
         return .object(sessionConfig)
+    }
+
+    /// Pipecat-`Value` flavor of the max-response-tokens cap for the WebRTC
+    /// `session.update` (#18). nil == user chose "unlimited" -> "inf".
+    static func maxResponseOutputTokensValue(config: LiveSessionConfig) -> Value {
+        guard let tokens = config.maxResponseOutputTokens else { return .string("inf") }
+        return .number(Double(min(max(tokens, 1), 4_096)))
     }
 
     // MARK: - Stay Silent (live session.update over the data channel)
@@ -2100,16 +2115,7 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": config.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? LiveProviderKind.openAIRealtime.defaultModel
-                : config.model,
-            "reasoning_effort": config.reasoningEffort.rawValue,
-            "max_response_output_tokens": Self.maxResponseOutputTokensPayload(config: config),
-            "tool_choice": config.toolsEnabled ? config.toolChoice.rawValue : LiveToolChoice.none.rawValue,
-            "parallel_tool_calls": config.parallelToolCallsEnabled,
-            "expires_after_seconds": 600,
-        ])
+        request.httpBody = try JSONSerialization.data(withJSONObject: Self.brokerClientSecretBody(config: config))
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -2120,6 +2126,30 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
             throw LiveSessionProviderError.invalidConfig(decoded.error ?? "OpenAI Realtime broker failed with HTTP \(http.statusCode)")
         }
         return decoded
+    }
+
+    /// Broker client-secret mint request body. Extracted as a pure static so the
+    /// #18 invariant — `max_response_output_tokens` is NEVER sent on either mint
+    /// path — is unit-testable without keychain/network.
+    ///
+    /// #18: `max_response_output_tokens` is intentionally absent here, matching the
+    /// direct client-secret path. The gateway broker strips it
+    /// (live-realtime-broker.ts) because the GA `/v1/realtime/client_secrets`
+    /// session schema rejects it ("Unknown parameter:
+    /// 'session.max_response_output_tokens'"). The cap is applied instead by the
+    /// post-connect `session.update` (sessionUpdatePayload). Keeping both mint paths
+    /// field-free removes the latent risk that a future broker refactor which
+    /// stopped stripping would resurface the mint rejection.
+    static func brokerClientSecretBody(config: LiveSessionConfig) -> [String: Any] {
+        [
+            "model": config.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? LiveProviderKind.openAIRealtime.defaultModel
+                : config.model,
+            "reasoning_effort": config.reasoningEffort.rawValue,
+            "tool_choice": config.toolsEnabled ? config.toolChoice.rawValue : LiveToolChoice.none.rawValue,
+            "parallel_tool_calls": config.parallelToolCallsEnabled,
+            "expires_after_seconds": 600,
+        ]
     }
 
     private func requestDirectClientSecret(config: LiveSessionConfig) async throws -> OpenAIRealtimeBrokerResponse {
@@ -2141,7 +2171,13 @@ final class OpenAIRealtimeLiveSessionProvider: NSObject, LiveSessionProvider {
                     : config.model,
                 "instructions": config.resolvedInstructions,
                 "reasoning": ["effort": config.reasoningEffort.rawValue],
-                "max_response_output_tokens": Self.maxResponseOutputTokensPayload(config: config),
+                // #18: `max_response_output_tokens` is intentionally NOT sent in the
+                // client-secret mint. The GA `/v1/realtime/client_secrets` session
+                // schema rejects it ("Unknown parameter: 'session.max_response_output_tokens'"),
+                // the same reason the gateway broker strips it. The cap is applied
+                // instead by the post-connect `session.update` the WebRTC transport
+                // sends from `buildSessionConfig`. (Sending it here would fail the
+                // mint outright now that the field has a non-nil voice default.)
                 "parallel_tool_calls": config.parallelToolCallsEnabled,
                 "audio": [
                     "output": [
