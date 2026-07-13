@@ -1097,6 +1097,15 @@ final class LiveSessionStore {
         // to the gateway session transcript (latent recognizer), and never
         // distill into daily memory. One flag gates all of those record paths.
         override.conversationJournalingEnabled = false
+        // Capture-only: the listening session must NOT run live recognition on
+        // the enrollment monologue itself. Scoring it wastes sidecar work
+        // (against the template being replaced) and — worse — establishes
+        // owner_present in the iOS identity machine DURING enrollment, so the
+        // NEXT real session's same-verdict broadcast can dedupe to no-op and
+        // the agent never learns who is speaking (observed on device,
+        // 2026-07-13 14:41: gateway emitted owner_present but the model still
+        // disclaimed).
+        override.voiceprintRealtimeEnabled = false
         return override
     }
 
