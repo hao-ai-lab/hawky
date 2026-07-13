@@ -298,6 +298,16 @@ final class LiveSessionStore {
     private var recordingMicSource: MicAudioSource?
     private var recordingMicTask: Task<Void, Never>?
     private let audioOutputPlayer = LiveRealtimeAudioOutputPlayer()
+    /// #18 delta-revive latch. When user speech barges in we stop the player, but
+    /// late `.outputAudioDelta`s from the just-cancelled response keep arriving and
+    /// would `play()` again — reviving audio the user meant to interrupt. Latching
+    /// here makes us DROP those stray deltas until the next response boundary —
+    /// `response.created` (new turn) OR the interrupted response's own terminal
+    /// event (`response.done`/`cancelled`/`failed`) — at which point audio is
+    /// allowed through again. Releasing on terminal too keeps a spurious
+    /// `speech_started` (noise that never spawns a new response) from stranding
+    /// the latch and dropping the tail of the still-active current response.
+    private var outputAudioDropLatched = false
     private var currentAssistantEntryID: UUID?
     // Live streaming text, decoupled from the committed transcript (#623).
     // Assistant deltas arrive per token (tens/sec). Mutating the `conversation`
@@ -2241,6 +2251,9 @@ final class LiveSessionStore {
         await activeProvider?.close()
         recordStopTiming("provider close", since: providerCloseStartedAt)
         audioOutputPlayer.stop()
+        // #18: never carry a barge-in drop latch across a stop/restart, or the
+        // next session's first audio could be silently dropped.
+        outputAudioDropLatched = false
         eventTask?.cancel()
         eventTask = nil
         let endedSessionKey = Self.resolvedRuntimeGatewayBridgeSessionKey(
@@ -3308,6 +3321,97 @@ final class LiveSessionStore {
         type == .began && phase == .connected && isCapturingMic
     }
 
+    // MARK: - Delta-revive drop latch (#18)
+
+    /// Whether an incoming `.outputAudioDelta` should be dropped rather than
+    /// played, given the barge-in drop latch state. Pure so the delta-routing
+    /// decision is unit-testable without an audio device. When the latch is set
+    /// (user speech stopped playback), late deltas from the just-cancelled
+    /// response are dropped so they can't revive interrupted audio.
+    static func shouldDropOutputAudioDelta(latched: Bool) -> Bool {
+        latched
+    }
+
+    /// Latch transition for a barge-in playback stop: engage the drop latch so
+    /// subsequent `.outputAudioDelta`s are dropped until the next response
+    /// boundary. Only meaningful when the barge-in policy actually stops local
+    /// playback (otherwise there is nothing to protect). Pure/testable.
+    static func outputAudioDropLatchOnSpeechStart(stopsPlayback: Bool, current: Bool) -> Bool {
+        stopsPlayback ? true : current
+    }
+
+    /// Latch transition for a response boundary (`response.created`): the new turn
+    /// owns the floor, so release the latch and let its audio through. Pure/testable.
+    static func outputAudioDropLatchOnResponseCreated() -> Bool {
+        false
+    }
+
+    /// Latch transition for a response TERMINAL boundary (`response.done` /
+    /// `response.cancelled` / `response.failed`). Release here too so the latch can
+    /// never outlive the single response it was engaged against. Without this, a
+    /// spurious `speech_started` (background noise that stops playback but the
+    /// server classifies as noise, so it emits NO new `response.created`) would
+    /// strand the latch and drop the tail of the STILL-ACTIVE current response
+    /// until some future turn. Bounding release to the interrupted response's own
+    /// terminal event caps that to one response lifetime.
+    ///
+    /// Revival safety here is a PROTOCOL-ORDERING ASSUMPTION, not an invariant this
+    /// client enforces: we rely on the OpenAI Realtime wire order delivering all of
+    /// a response's `output_audio.delta`s BEFORE its terminal event. On the WS
+    /// transport a single AsyncStream continuation serializes `.raw` and
+    /// `.outputAudioDelta` in wire order, so this holds. The documented, ACCEPTED
+    /// residual edge: if a server/proxy/broker ever interleaved a late
+    /// `output_audio.delta` for response A AFTER A's terminal, that one delta would
+    /// play() and briefly revive interrupted audio — bounded to a single delta,
+    /// because a genuinely new response re-latches only via a fresh `speech_started`.
+    /// Closing this fully would require per-response floor tracking (drop deltas
+    /// whose response id != the active response), which is deliberately out of scope.
+    /// Pure/testable. Whitelisted to terminal raw types by the caller
+    /// (`isResponseTerminalRawType`). WS-only: the WebRTC transport plays audio in
+    /// the pipecat SDK and emits no `.outputAudioDelta`, so this latch never fires there.
+    static func outputAudioDropLatchOnResponseTerminal() -> Bool {
+        false
+    }
+
+    /// Whether a raw realtime event type is a response TERMINAL boundary. Kept next
+    /// to the latch helpers so the release-on-terminal wiring is unit-testable and
+    /// stays in sync with `updateConversationState(forRawType:)`. Pure/testable.
+    static func isResponseTerminalRawType(_ type: String) -> Bool {
+        type == "response.done" || type == "response.cancelled" || type == "response.failed"
+    }
+
+    #if DEBUG
+    /// Test seam (#18): drives the REAL received-`.raw` routing so a test can assert
+    /// the integration wiring — not just the pure statics — actually latches on a
+    /// barge-in `speech_started` and releases on a `response.created` /
+    /// `response.done` boundary. Mirrors `handle(.raw(...))`'s received branch;
+    /// guards against a future refactor silently dropping the
+    /// `handleRealtimeRawEvent` / `updateConversationState` calls (which would
+    /// strand the latch with a green pure-helper suite).
+    func debugRouteReceivedRawEvent(type: String, json: String = "{}") {
+        handleRealtimeRawEvent(type, json: json)
+        updateConversationState(forRawType: type)
+    }
+
+    /// Test seam (#18): observe the barge-in drop latch after driving raw events.
+    var debugOutputAudioDropLatched: Bool { outputAudioDropLatched }
+
+    /// Test seam (#18): force the latch (stands in for a barge-in that stopped
+    /// playback) so a release-boundary test does not need the audio device that a
+    /// real `speech_started` would touch.
+    func debugSetOutputAudioDropLatched(_ latched: Bool) {
+        outputAudioDropLatched = latched
+    }
+
+    /// Test seam (#18): drive the REAL top-level `handle(_:)` event routing so a
+    /// test can assert non-raw session events (e.g. `.reconnect`) clear the barge-in
+    /// drop latch through the actual handler, not a mirrored copy. Guards against a
+    /// future refactor dropping the clear from the `.reconnect` case.
+    func debugRouteSessionEvent(_ event: LiveSessionEvent) {
+        handle(event)
+    }
+    #endif
+
     // MARK: - No-audio watchdog (#673)
 
     /// After connecting we expect mic chunks to keep flowing. If none have arrived
@@ -3477,6 +3581,14 @@ final class LiveSessionStore {
             enqueueFallbackVoiceprintTranscriptCompleted(itemID: itemID, transcript: text)
         case .outputAudioDelta(let data):
             publishOutputAudioDiagnostics(receivedBytes: data.count)
+            // #18: drop late deltas from a barged-in response so they can't revive
+            // playback the user just interrupted. The latch clears at the next
+            // response boundary (response.created OR the interrupted response's
+            // terminal event), so the new turn's audio still plays.
+            if Self.shouldDropOutputAudioDelta(latched: outputAudioDropLatched) {
+                diagnostics.lastModelEvent = "Dropped output audio (interrupted response)"
+                return
+            }
             if liveConfig.responseModality == .audio {
                 do {
                     let result = try audioOutputPlayer.play(data)
@@ -3512,6 +3624,17 @@ final class LiveSessionStore {
             diagnostics.reconnects = count
             append("Reconnect \(count)", level: .warning)
             appendSystemMessage("Reconnect \(count)", level: .warning)
+            // #18: a WS reconnect starts a fresh response stream, so never carry a
+            // barge-in drop latch across it. If the connection blipped while the
+            // latch was engaged (user barged in, then the socket dropped before the
+            // interrupted response's terminal or a new response.created cleared it),
+            // the stranded latch would otherwise persist into the reconnected
+            // session. In practice this is self-healing — the first post-reconnect
+            // response emits `response.created` before any of its deltas, clearing
+            // the latch ahead of playback — but clearing here fail-closes the gap
+            // and keeps the invariant "latch never outlives its session leg"
+            // explicit rather than dependent on wire ordering.
+            outputAudioDropLatched = false
         case .raw(let direction, let type, let json):
             journalRaw(direction: direction, type: type, json: json)
             appendVerbose("\(direction.rawValue): \(type)", detail: json)
@@ -3580,6 +3703,14 @@ final class LiveSessionStore {
             startRawAudioTrackSegmentIfNeeded()
             guard config.bargeInPolicy.stopsLocalPlaybackOnSpeechStart else { return }
             audioOutputPlayer.stop()
+            // #18: engage the drop latch so late deltas from the cancelled response
+            // can't revive playback. Released at the next response boundary —
+            // response.created (new turn) OR the interrupted response's own
+            // terminal event, whichever comes first.
+            outputAudioDropLatched = Self.outputAudioDropLatchOnSpeechStart(
+                stopsPlayback: config.bargeInPolicy.stopsLocalPlaybackOnSpeechStart,
+                current: outputAudioDropLatched
+            )
             diagnostics.outputAudioStatus = "Interrupted by user speech"
             diagnostics.lastModelEvent = diagnostics.outputAudioStatus
             append(diagnostics.outputAudioStatus)
@@ -5697,7 +5828,25 @@ final class LiveSessionStore {
         switch type {
         case "response.created":
             currentAssistantEntryID = nil
+            // #18: a new response owns the floor — release the barge-in drop latch
+            // so this turn's audio deltas play. (Deltas from the cancelled prior
+            // response were dropped while latched.)
+            outputAudioDropLatched = Self.outputAudioDropLatchOnResponseCreated()
         case "response.done", "response.cancelled", "response.failed":
+            // #18: also release the barge-in drop latch at the interrupted
+            // response's own terminal boundary, so a spurious speech_started that
+            // never produces a new response.created cannot strand the latch and
+            // keep dropping the tail of a still-active current response.
+            //
+            // Unconditional: this case label IS the terminal-type set, so any raw
+            // type routed here is by definition terminal — no re-check needed. The
+            // former `if isResponseTerminalRawType(type)` guard was always true and
+            // only risked masking a divergence: a future edit adding a raw type to
+            // this label but not to `isResponseTerminalRawType` would have silently
+            // skipped the release. This label and `isResponseTerminalRawType` must
+            // stay in lockstep; the classifier remains the testable seam for the
+            // `.raw`-routing integration tests and the debug router.
+            outputAudioDropLatched = Self.outputAudioDropLatchOnResponseTerminal()
             finishAssistantMessage()
         default:
             break
