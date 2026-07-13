@@ -1,0 +1,307 @@
+import {
+  buildEmbeddingBatchRequest,
+  buildEmbeddingRequest,
+  validateEmbeddingResponse,
+  type VoiceprintEmbeddingBatchRequest,
+  type VoiceprintEmbeddingRequest,
+  type VoiceprintEmbeddingResponse,
+} from "./sidecar-protocol.js";
+import {
+  makeVoiceprintRecordId,
+  type IsoTime,
+  type RecordId,
+} from "./contracts.js";
+import {
+  scorePreparedLiveVoiceprintTurn,
+  type LiveVoiceprintReadyTurn,
+  type LiveVoiceprintScoredTurn,
+} from "./live-adapter.js";
+import type { VoiceprintTurnAsNormOptions } from "./turn-scoring.js";
+import {
+  formatVoiceprintModel,
+  sameVoiceprintModel,
+} from "./model.js";
+import { isReferenceVoiceprintModel } from "./model-lifecycle.js";
+import type { VoiceprintConsentSnapshot } from "./policy.js";
+import type { VoiceprintModelInfo, VoiceprintThresholds } from "./types.js";
+import { validateIdentifierNotEmpty, validateTimeBounds } from "./live-validators.js";
+
+export interface LiveVoiceprintScoringJob {
+  version: 1;
+  id: RecordId;
+  status: "queued";
+  createdAt: IsoTime;
+  prepared: LiveVoiceprintReadyTurn;
+  embeddingRequest: VoiceprintEmbeddingRequest;
+  ownerTemplateRef?: string;
+  attempts: {
+    current: number;
+    max: number;
+  };
+  timeoutMs?: number;
+}
+
+export interface LiveVoiceprintScoringJobResult {
+  status: "scored";
+  jobId: RecordId;
+  requestId: string;
+  turn: LiveVoiceprintReadyTurn["turn"];
+  response: VoiceprintEmbeddingResponse;
+  result: LiveVoiceprintScoredTurn;
+}
+
+// Re-export so `index.ts` (`export *`) and existing importers keep the same public
+// symbol. The class now lives in a leaf module (`embedding-errors.ts`) so the
+// validation ORIGINS (sidecar-protocol.ts, turn-scoring.ts) can throw it directly
+// without importing this higher-level job module (which would create a cycle).
+export { UnusableVoiceprintEmbeddingError } from "./embedding-errors.js";
+import { UnusableVoiceprintEmbeddingError } from "./embedding-errors.js";
+
+export function buildLiveVoiceprintScoringJob(input: {
+  prepared: LiveVoiceprintReadyTurn;
+  audioPath: string;
+  requestStartMs?: number;
+  requestEndMs?: number;
+  targetSampleRate?: number;
+  ownerTemplateRef?: string;
+  createdAt?: IsoTime;
+  attempt?: number;
+  maxAttempts?: number;
+  timeoutMs?: number;
+}): LiveVoiceprintScoringJob {
+  validateJobOptions(input);
+  validatePreparedTurnForJob(input.prepared);
+
+  const turn = input.prepared.turn;
+  const jobId = makeVoiceprintRecordId("vpjob", [
+    turn.sessionKey,
+    turn.transcriptItemId,
+    turn.audioArtifactId,
+    turn.startMs,
+    turn.endMs,
+    turn.route,
+    input.audioPath,
+    input.requestStartMs,
+    input.requestEndMs,
+    input.targetSampleRate,
+    input.ownerTemplateRef,
+  ]);
+  const embeddingRequest = buildEmbeddingRequest({
+    id: `${jobId}_embedding`,
+    audioPath: input.audioPath,
+    startMs: input.requestStartMs,
+    endMs: input.requestEndMs,
+    targetSampleRate: input.targetSampleRate,
+    route: turn.route,
+  });
+
+  return {
+    version: 1,
+    id: jobId,
+    status: "queued",
+    createdAt: input.createdAt ?? new Date().toISOString(),
+    prepared: input.prepared,
+    embeddingRequest,
+    ownerTemplateRef: input.ownerTemplateRef,
+    attempts: {
+      current: input.attempt ?? 0,
+      max: input.maxAttempts ?? 1,
+    },
+    timeoutMs: input.timeoutMs,
+  };
+}
+
+export function buildLiveVoiceprintScoringBatchRequest(
+  jobs: readonly LiveVoiceprintScoringJob[],
+): VoiceprintEmbeddingBatchRequest {
+  if (jobs.length === 0) {
+    throw new Error("Live voiceprint scoring batch requires at least one job.");
+  }
+
+  const jobIds = new Set<string>();
+  for (const job of jobs) {
+    if (jobIds.has(job.id)) {
+      throw new Error(`Duplicate live voiceprint scoring job id: ${job.id}.`);
+    }
+    jobIds.add(job.id);
+  }
+
+  return buildEmbeddingBatchRequest(jobs.map((job) => job.embeddingRequest));
+}
+
+export function scoreLiveVoiceprintScoringJobResponse(input: {
+  job: LiveVoiceprintScoringJob;
+  response: VoiceprintEmbeddingResponse;
+  ownerEmbeddings: number[][];
+  thresholds?: Partial<VoiceprintThresholds>;
+  consent?: Partial<VoiceprintConsentSnapshot>;
+  templateLearningReviewed?: boolean;
+  eventId?: string;
+  createdAt?: IsoTime;
+  expectedModel?: VoiceprintModelInfo;
+  /**
+   * A5 production guard: when true, refuse ANY response whose returned model tag
+   * is the non-discriminative reference backend, independent of expectedModel.
+   * This is the definitive runtime check at the point the model tag exists — the
+   * declared sidecar env is only the REQUESTED backend, not proof of what ran.
+   */
+  requireDiscriminativeModel?: boolean;
+  /** OPT-IN A3 AS-Norm normalization (default OFF; see turn-scoring.ts). */
+  asNorm?: VoiceprintTurnAsNormOptions;
+}): LiveVoiceprintScoringJobResult {
+  // A per-turn UNUSABLE embedding (empty / NaN / infinite / zero-norm) is a
+  // data-quality fault isolated to THIS turn — surface it as the fail-closed
+  // marker so the batch scorer can skip only this turn (never resolve it) instead
+  // of throwing out of the whole batch and losing the good turns. Other response
+  // faults (missing id/model) stay hard throws (batch-integrity precondition).
+  try {
+    validateEmbeddingResponse(input.response);
+  } catch (error) {
+    throw reclassifyUnusableEmbeddingError(error);
+  }
+  if (input.response.id !== input.job.embeddingRequest.id) {
+    throw new Error(
+      `Live voiceprint sidecar response id ${input.response.id} does not match job request id ${input.job.embeddingRequest.id}.`,
+    );
+  }
+  // A5 PRODUCTION GUARD (runtime): the reference backend is non-discriminative,
+  // so a "score" it produces is meaningless for a real user. Refuse it based on
+  // the model the sidecar ACTUALLY returned — this holds even when expected_model
+  // is unset and even if a misconfigured/wrapper sidecar emitted a reference tag
+  // despite a non-reference declared env.
+  if (
+    input.requireDiscriminativeModel &&
+    isReferenceVoiceprintModel(input.response.model)
+  ) {
+    throw new Error(
+      `Live voiceprint sidecar returned the non-discriminative reference model ${formatVoiceprintModel(input.response.model)}; require_discriminative_model refuses to score it.`,
+    );
+  }
+  if (
+    input.expectedModel &&
+    !sameVoiceprintModel(input.expectedModel, input.response.model)
+  ) {
+    throw new Error(
+      `Live voiceprint sidecar model ${formatVoiceprintModel(input.response.model)} does not match expected ${formatVoiceprintModel(input.expectedModel)}.`,
+    );
+  }
+
+  let result: LiveVoiceprintScoredTurn;
+  try {
+    result = scorePreparedLiveVoiceprintTurn({
+      prepared: input.job.prepared,
+      ownerEmbeddings: input.ownerEmbeddings,
+      sampleEmbedding: input.response.embedding,
+      model: input.response.model,
+      thresholds: input.thresholds,
+      consent: input.consent,
+      templateLearningReviewed: input.templateLearningReviewed,
+      eventId: input.eventId,
+      createdAt: input.createdAt,
+      asNorm: input.asNorm,
+    });
+  } catch (error) {
+    // A wrong-dimension / unusable SAMPLE embedding (the sidecar-returned vector)
+    // is a per-turn data fault: reclassify so the batch scorer skips only this
+    // turn. Owner-template / consent / quality faults are NOT reclassified — they
+    // are configuration or precondition faults and keep throwing.
+    throw reclassifyUnusableSampleEmbeddingError(error);
+  }
+
+  return {
+    status: "scored",
+    jobId: input.job.id,
+    requestId: input.response.id,
+    turn: input.job.prepared.turn,
+    response: input.response,
+    result,
+  };
+}
+
+/**
+ * Reclassify a {@link validateEmbeddingResponse} failure: only the finite
+ * non-empty embedding-VECTOR fault is an unusable-embedding (per-turn) fault, and
+ * it is now thrown at the origin as a typed {@link UnusableVoiceprintEmbeddingError}.
+ * We detect it by TYPE (`instanceof`) rather than by substring so rewording the
+ * message can never silently flip skip-vs-fail. Missing id/model faults are
+ * batch-integrity preconditions (plain Error) and keep throwing as-is.
+ */
+function reclassifyUnusableEmbeddingError(error: unknown): unknown {
+  if (error instanceof UnusableVoiceprintEmbeddingError) {
+    return error;
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Reclassify a scoring failure: only an unusable/wrong-dimension SAMPLE embedding
+ * (the sidecar-returned vector) is a per-turn data fault, thrown at the origin as a
+ * typed {@link UnusableVoiceprintEmbeddingError} and detected here by TYPE, not
+ * substring. Owner-embedding, consent, and quality faults are configuration/
+ * precondition faults (plain Error) and keep throwing.
+ */
+function reclassifyUnusableSampleEmbeddingError(error: unknown): unknown {
+  if (error instanceof UnusableVoiceprintEmbeddingError) {
+    return error;
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function validateJobOptions(input: {
+  audioPath: string;
+  requestStartMs?: number;
+  requestEndMs?: number;
+  targetSampleRate?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  timeoutMs?: number;
+}): void {
+  validateIdentifierNotEmpty(
+    input.audioPath,
+    "Live voiceprint scoring job requires audioPath.",
+  );
+  const attempt = input.attempt ?? 0;
+  const maxAttempts = input.maxAttempts ?? 1;
+  if (!Number.isInteger(attempt) || attempt < 0) {
+    throw new Error("Live voiceprint scoring job attempt must be a non-negative integer.");
+  }
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new Error("Live voiceprint scoring job maxAttempts must be a positive integer.");
+  }
+  if (attempt >= maxAttempts) {
+    throw new Error("Live voiceprint scoring job attempt must be less than maxAttempts.");
+  }
+  if (
+    input.timeoutMs !== undefined &&
+    (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0)
+  ) {
+    throw new Error("Live voiceprint scoring job timeoutMs must be positive.");
+  }
+  if (
+    input.requestStartMs !== undefined &&
+    input.requestEndMs !== undefined &&
+    input.requestEndMs <= input.requestStartMs
+  ) {
+    throw new Error("Live voiceprint scoring job requestEndMs must be greater than requestStartMs.");
+  }
+}
+
+function validatePreparedTurnForJob(prepared: LiveVoiceprintReadyTurn): void {
+  const turn = prepared.turn;
+  validateIdentifierNotEmpty(
+    turn.sessionKey,
+    "Live voiceprint scoring job requires sessionKey.",
+  );
+  validateIdentifierNotEmpty(
+    turn.transcriptItemId,
+    "Live voiceprint scoring job requires transcriptItemId.",
+  );
+  validateIdentifierNotEmpty(
+    turn.audioArtifactId,
+    "Live voiceprint scoring job requires audioArtifactId.",
+  );
+  validateTimeBounds(turn.startMs, turn.endMs, "Live voiceprint scoring job");
+  if (!prepared.quality.allowedUses.scoring) {
+    throw new Error("Live voiceprint scoring job requires quality that allows scoring.");
+  }
+}
