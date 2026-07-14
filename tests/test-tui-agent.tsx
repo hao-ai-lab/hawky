@@ -8,7 +8,7 @@
 
 import { describe, expect, test, afterEach } from "bun:test";
 import React from "react";
-import { render as inkRender } from "ink-testing-library";
+import { cleanup, render as inkRender } from "ink-testing-library";
 import { App } from "../src/tui/app.js";
 import { resetMessageCounter } from "../src/tui/hooks/use_agent_loop.js";
 import type {
@@ -28,6 +28,11 @@ import { AgentLoopSource } from "./helpers/mock-agent-source.js";
 // =============================================================================
 
 const tick = (ms = 150) => new Promise<void>((r) => setTimeout(r, ms));
+
+afterEach(() => {
+  cleanup();
+  resetMessageCounter();
+});
 
 // =============================================================================
 // Mock Provider
@@ -150,8 +155,6 @@ function toolUseResponse(
 // =============================================================================
 
 describe("App — basic wiring", () => {
-  afterEach(() => resetMessageCounter());
-
   test("renders in agent mode with provider", () => {
     const provider = new MockProvider();
     provider.addResponse(textResponse("hi"));
@@ -237,8 +240,6 @@ describe("App — basic wiring", () => {
 // =============================================================================
 
 describe("App — status transitions", () => {
-  afterEach(() => resetMessageCounter());
-
   test("status starts as idle", () => {
     const provider = new MockProvider();
     provider.addResponse(textResponse("hi"));
@@ -330,8 +331,6 @@ describe("App — status transitions", () => {
 // =============================================================================
 
 describe("App — streaming text", () => {
-  afterEach(() => resetMessageCounter());
-
   test("multi-chunk response accumulates text", async () => {
     const provider = new MockProvider();
     provider.addResponse(multiChunkResponse(["Hello ", "world", "!"]));
@@ -373,8 +372,6 @@ describe("App — streaming text", () => {
 // =============================================================================
 
 describe("App — multi-turn", () => {
-  afterEach(() => resetMessageCounter());
-
   test("can have multiple turns", async () => {
     const provider = new MockProvider();
     provider.addResponse(textResponse("Reply 1"));
@@ -410,8 +407,6 @@ describe("App — multi-turn", () => {
 // =============================================================================
 
 describe("App — error handling", () => {
-  afterEach(() => resetMessageCounter());
-
   test("shows error message on provider failure", async () => {
     const provider = new ErrorProvider();
     const config = makeConfig();
@@ -474,8 +469,6 @@ describe("App — error handling", () => {
 // =============================================================================
 
 describe("App — token usage display", () => {
-  afterEach(() => resetMessageCounter());
-
   test("token usage not visible when idle (status bar hidden)", async () => {
     const provider = new MockProvider();
     provider.addResponse([
@@ -521,8 +514,6 @@ describe("App — token usage display", () => {
 // =============================================================================
 
 describe("App — cancellation", () => {
-  afterEach(() => resetMessageCounter());
-
   test("Esc cancels running agent turn", async () => {
     const provider = new SlowProvider();
     const config = makeConfig();
@@ -776,8 +767,6 @@ describe("MessageList — streaming message", () => {
 // =============================================================================
 
 describe("App — tool output display", () => {
-  afterEach(() => resetMessageCounter());
-
   test("shows tool output with success icon after auto-approved tool", async () => {
     const provider = new MockProvider();
     // Use glob tool (auto_approve permission), not bash (ask_user)
@@ -837,8 +826,6 @@ describe("App — tool output display", () => {
 // =============================================================================
 
 describe("App — cancel recovery", () => {
-  afterEach(() => resetMessageCounter());
-
   test("can send new message after cancelling streaming", async () => {
     const provider = new SlowProvider();
     // After cancel, the next sendMessage needs a fresh provider response

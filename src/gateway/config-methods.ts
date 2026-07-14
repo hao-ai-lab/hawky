@@ -11,6 +11,7 @@ import type { HeartbeatService } from "./heartbeat.js";
 import type { AgentSessionManager } from "./agent-sessions.js";
 import { loadConfig, updateConfig, resetConfig, DEFAULT_CONFIG } from "../storage/config.js";
 import { MethodError } from "./methods.js";
+import { resolveLocalProviderAccess } from "../agent/provider-factory.js";
 
 // Fields that are NEVER exposed or settable via the web panel
 const FORBIDDEN_KEYS = new Set([
@@ -179,6 +180,24 @@ export function registerConfigMethods(
           "openai_compatible requires an active_profile with a configured base_url; edit ~/.hawky/config.json or use /provider in a follow-up release",
         );
       }
+      const candidate = JSON.parse(JSON.stringify(existingConfig));
+      candidate.provider = "openai_compatible";
+      if (updates.api_keys) {
+        candidate.api_keys = {
+          ...(existingConfig.api_keys ?? {}),
+          ...(updates.api_keys as Record<string, unknown>),
+        };
+      }
+      candidate.openai_compatible = {
+        ...(existingConfig.openai_compatible ?? {}),
+        active_profile: activeProfile,
+        profiles,
+      };
+      try {
+        resolveLocalProviderAccess(candidate);
+      } catch (e) {
+        throw new MethodError("INVALID_REQUEST", e instanceof Error ? e.message : String(e));
+      }
     }
 
     if (p.effort !== undefined) {
@@ -219,7 +238,10 @@ export function registerConfigMethods(
         hbUpdate.interval_minutes = mins;
       }
       if (hb.model !== undefined) {
-        hbUpdate.model = hb.model || null; // empty string = unset
+        if (hb.model !== null && typeof hb.model !== "string") {
+          throw new MethodError("INVALID_REQUEST", "heartbeat.model must be a string or null");
+        }
+        hbUpdate.model = hb.model?.trim() || null; // empty string = unset
       }
       if (hb.consolidation_enabled !== undefined) {
         hbUpdate.consolidation_enabled = !!hb.consolidation_enabled;
@@ -286,8 +308,16 @@ export function registerConfigMethods(
     resetConfig(); // Clear cache so next loadConfig() reads the new file
     const refreshed = loadConfig();
 
-    // Live-reload heartbeat if its config changed
-    if (updates.heartbeat && heartbeat) {
+    const heartbeatRelevant =
+      updates.heartbeat !== undefined ||
+      updates.provider !== undefined ||
+      updates.model !== undefined ||
+      updates.api_keys !== undefined ||
+      updates.openai_base_url !== undefined ||
+      updates.openai_compatible !== undefined;
+
+    // Live-reload heartbeat when its own config or provider/model access changes.
+    if (heartbeatRelevant && heartbeat) {
       heartbeat.updateConfig(refreshed);
     }
 

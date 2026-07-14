@@ -28,6 +28,7 @@ import { LLMError } from "./provider.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import type { ContentBlock, AnthropicToolDefinition, ToolResultContent } from "./types.js";
 import type { LLMSystemBlock } from "./provider.js";
+import { resolveOpenAICompletionTokenParam } from "./model-compat.js";
 
 const log = createSubsystemLogger("agent/api");
 
@@ -67,11 +68,11 @@ export class OpenAIProvider implements LLMProvider {
     // OpenAI equivalent; cache_control was already stripped in translateMessages.
     const params: any = {
       model: request.model,
-      max_tokens: request.max_tokens,
       messages,
       stream: true,
       stream_options: { include_usage: true },
     };
+    params[resolveOpenAICompletionTokenParam(request.model)] = request.max_tokens;
     if (request.stop_sequences && request.stop_sequences.length > 0) {
       params.stop = request.stop_sequences;
     }

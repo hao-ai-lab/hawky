@@ -6,7 +6,7 @@
 // overrides. Config is cached after first load.
 //
 // Priority (highest wins):
-//   1. Environment variables (ANTHROPIC_API_KEY, BRAVE_API_KEY)
+//   1. Environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY, BRAVE_API_KEY)
 //   2. Config file ($HAWKY_HOME/config.json or ~/.hawky/config.json)
 //   3. Built-in defaults
 //
@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { HawkyConfig } from "../agent/types.js";
+import { normalizeProviderModels } from "../agent/model-compat.js";
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -149,14 +150,21 @@ const ENV_MAPPINGS: EnvMapping[] = [
 // Deep merge utility
 // -----------------------------------------------------------------------------
 
+const NULLABLE_CONFIG_PATHS = new Set([
+  "effort",
+  "heartbeat.model",
+]);
+
 function deepMerge(
   defaults: Record<string, unknown>,
   overrides: Record<string, unknown>,
+  path = "",
 ): Record<string, unknown> {
   const result = cloneConfigValue(defaults) as Record<string, unknown>;
   for (const key of Object.keys(overrides)) {
     const val = overrides[key];
     const def = defaults[key];
+    const nextPath = path ? `${path}.${key}` : key;
     if (
       val !== null &&
       val !== undefined &&
@@ -170,7 +178,10 @@ function deepMerge(
       result[key] = deepMerge(
         def as Record<string, unknown>,
         val as Record<string, unknown>,
+        nextPath,
       );
+    } else if (val === null && NULLABLE_CONFIG_PATHS.has(nextPath)) {
+      result[key] = null;
     } else if (val !== undefined && val !== null) {
       result[key] = val;
     }
@@ -199,15 +210,20 @@ function cloneConfigValue(value: unknown): unknown {
 let cachedConfig: HawkyConfig | null = null;
 let cachedConfigPath: string | null = null;
 
+interface LoadConfigOptions {
+  normalize?: boolean;
+}
+
 /**
  * Load configuration. Merges config file with defaults, then applies
  * environment variable overrides. Result is cached for subsequent calls.
  *
  * @param configPath - Override config file path (for testing)
  */
-export function loadConfig(configPath?: string): HawkyConfig {
+export function loadConfig(configPath?: string, options: LoadConfigOptions = {}): HawkyConfig {
+  const shouldNormalize = options.normalize !== false;
   const filePath = configPath ?? CONFIG_PATH;
-  if (cachedConfig && cachedConfigPath === filePath) return cachedConfig;
+  if (shouldNormalize && cachedConfig && cachedConfigPath === filePath) return cachedConfig;
   const defaults = currentDefaultConfig();
 
   let fileConfig: Record<string, unknown> = {};
@@ -310,9 +326,13 @@ export function loadConfig(configPath?: string): HawkyConfig {
     }
   }
 
-  cachedConfig = config;
+  if (!shouldNormalize) {
+    return config;
+  }
+
+  cachedConfig = normalizeProviderModels(config);
   cachedConfigPath = filePath;
-  return config;
+  return cachedConfig;
 }
 
 /**
@@ -415,13 +435,13 @@ export function updateConfig(
   }
 
   // Merge: defaults ← existing file ← updates
-  const merged = deepMerge(
+  const merged = normalizeProviderModels(deepMerge(
     deepMerge(
       currentDefaultConfig() as unknown as Record<string, unknown>,
       fileConfig,
     ),
     updates,
-  ) as unknown as HawkyConfig;
+  ) as unknown as HawkyConfig);
 
   saveConfig(merged, filePath);
   return merged;

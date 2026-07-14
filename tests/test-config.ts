@@ -32,6 +32,7 @@ let testConfigPath: string;
 // Save original env vars so we can restore them (other test files depend on these)
 const origAnthropicKey = process.env.ANTHROPIC_API_KEY;
 const origBraveKey = process.env.BRAVE_API_KEY;
+const origOpenAIKey = process.env.OPENAI_API_KEY;
 const origHawkyHome = process.env.HAWKY_HOME;
 
 beforeEach(() => {
@@ -39,6 +40,7 @@ beforeEach(() => {
   // Clear env vars so config tests can verify file-based loading without env interference
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.BRAVE_API_KEY;
+  delete process.env.OPENAI_API_KEY;
   delete process.env.HAWKY_HOME;
   resetConfigDir();
   testDir = join(tmpdir(), `hawky-config-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -58,6 +60,11 @@ afterEach(() => {
     process.env.BRAVE_API_KEY = origBraveKey;
   } else {
     delete process.env.BRAVE_API_KEY;
+  }
+  if (origOpenAIKey !== undefined) {
+    process.env.OPENAI_API_KEY = origOpenAIKey;
+  } else {
+    delete process.env.OPENAI_API_KEY;
   }
   if (origHawkyHome !== undefined) {
     process.env.HAWKY_HOME = origHawkyHome;
@@ -147,6 +154,33 @@ describe("Loading from file", () => {
     expect(config.max_tokens).toBe(16384);
     expect(config.max_iterations).toBe(100);
     expect(config.gateway_port).toBe(9999);
+  });
+
+  test("normalizes OpenAI output token limit when loading config", () => {
+    writeTestConfig({
+      api_keys: { openai: "sk-openai-test" },
+      provider: "openai",
+      model: "gpt-4o-mini",
+      max_tokens: 32768,
+    });
+
+    const config = loadConfig(testConfigPath);
+    expect(config.provider).toBe("openai");
+    expect(config.model).toBe("gpt-4o-mini");
+    expect(config.max_tokens).toBe(16384);
+  });
+
+  test("raw load skips provider normalization and cached normalized config", () => {
+    writeTestConfig({
+      api_keys: { openai: "sk-openai-test" },
+      provider: "openai",
+      model: "gpt-4o-mini",
+      max_tokens: 32768,
+    });
+
+    expect(loadConfig(testConfigPath).max_tokens).toBe(16384);
+    const raw = loadConfig(testConfigPath, { normalize: false });
+    expect(raw.max_tokens).toBe(32768);
   });
 
   test("heartbeat config merges correctly", () => {
@@ -478,6 +512,34 @@ describe("Deep merge edge cases", () => {
     // null is overridden by defaults during deep merge
     expect(config.heartbeat.enabled).toBe(true);
   });
+
+  test("loadConfig normalizes stale Claude models when provider is OpenAI", () => {
+    writeTestConfig({
+      provider: "openai",
+      api_keys: { anthropic: "", brave_search: "", openai: "sk-openai-test" },
+      model: "claude-opus-4-7",
+      heartbeat: { model: "claude-sonnet-4-6" },
+    });
+
+    const config = loadConfig(testConfigPath);
+    expect(config.provider).toBe("openai");
+    expect(config.model.startsWith("gpt-")).toBe(true);
+    expect(config.heartbeat.model).toBeNull();
+  });
+
+  test("updateConfig persists heartbeat model null instead of restoring default", () => {
+    writeTestConfig({
+      provider: "anthropic",
+      api_keys: { anthropic: "sk-ant-test", brave_search: "", openai: "" },
+      heartbeat: { model: "claude-sonnet-4-6" },
+    });
+
+    updateConfig({ heartbeat: { model: null } }, testConfigPath);
+    const raw = JSON.parse(readFileSync(testConfigPath, "utf8"));
+    expect(raw.heartbeat.model).toBeNull();
+    resetConfig();
+    expect(loadConfig(testConfigPath).heartbeat.model).toBeNull();
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -768,6 +830,14 @@ describe("printGatewayBanner", () => {
     // Must NOT contain the actual key
     expect(output).not.toContain("sk-secret");
     expect(output).not.toContain("brave-key");
+  });
+
+  test("shows OpenAI API key presence without revealing value", () => {
+    const output = captureBanner(makeBannerConfig({
+      api_keys: { anthropic: "", brave_search: "", openai: "sk-openai-secret" },
+    }));
+    expect(output).toContain("openai");
+    expect(output).not.toContain("sk-openai-secret");
   });
 
   test("shows heartbeat enabled with interval and hours", () => {

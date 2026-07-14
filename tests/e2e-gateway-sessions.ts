@@ -339,7 +339,10 @@ describe("Gateway session persistence — permission flow", () => {
     srv.start(port);
 
     try {
-      const ws = await connectAndHandshake(port, "perm:approve");
+      const sessionKey = "perm:approve";
+      const ws = await connectAndHandshake(port, sessionKey);
+      await sendRequest(ws, "session.resolve", { sessionKey });
+      await sendRequest(ws, "permission.mode", { mode: "default" });
 
       // Send message that triggers bash tool
       void sendRequest(ws, "chat.send", { message: "run it" });
@@ -370,7 +373,10 @@ describe("Gateway session persistence — permission flow", () => {
     srv.start(port);
 
     try {
-      const ws = await connectAndHandshake(port, "perm:deny");
+      const sessionKey = "perm:deny";
+      const ws = await connectAndHandshake(port, sessionKey);
+      await sendRequest(ws, "session.resolve", { sessionKey });
+      await sendRequest(ws, "permission.mode", { mode: "default" });
       const events: EventFrame[] = [];
       ws.addEventListener("message", (e) => {
         try { const d = JSON.parse(e.data as string); if (d.type === "event") events.push(d); } catch {}

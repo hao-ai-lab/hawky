@@ -49,9 +49,11 @@ export function printGatewayBanner(params: BannerParams): void {
 
   // API keys — show presence, never the value
   const hasAnthropic = !!config.api_keys.anthropic;
+  const hasOpenAI = !!config.api_keys.openai;
   const hasBrave = !!config.api_keys.brave_search;
   rows.push(["API keys", [
     hasAnthropic ? "anthropic" : null,
+    hasOpenAI ? "openai" : null,
     hasBrave ? "brave" : null,
   ].filter(Boolean).join(", ") || "(none)"]);
 

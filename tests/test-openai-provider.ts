@@ -1285,6 +1285,47 @@ describe("Provider type shape", () => {
 });
 
 // =============================================================================
+// Request parameter compatibility
+// =============================================================================
+
+describe("request parameter compatibility", () => {
+  function mockCompletion(provider: OpenAIProvider) {
+    return spyOn(provider["client"].chat.completions, "create").mockResolvedValue(
+      fakeStream([
+        { id: "c1", model: "gpt-test", choices: [{ delta: { content: "ok" }, finish_reason: null }] },
+        { id: "c1", model: "gpt-test", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } },
+      ]) as any,
+    );
+  }
+
+  test("uses max_completion_tokens for gpt-5 family models", async () => {
+    const provider = new OpenAIProvider("sk-test", { baseURL: "http://localhost:8000/v1" });
+    const createSpy = mockCompletion(provider);
+
+    for await (const _ of provider.stream(makeRequest({ model: "gpt-5.5", max_tokens: 2048 }))) {
+      // drain
+    }
+
+    const params = createSpy.mock.calls[0][0] as any;
+    expect(params.max_completion_tokens).toBe(2048);
+    expect("max_tokens" in params).toBe(false);
+  });
+
+  test("uses max_tokens for legacy chat-completions models", async () => {
+    const provider = new OpenAIProvider("sk-test", { baseURL: "http://localhost:8000/v1" });
+    const createSpy = mockCompletion(provider);
+
+    for await (const _ of provider.stream(makeRequest({ model: "gpt-4o-mini", max_tokens: 2048 }))) {
+      // drain
+    }
+
+    const params = createSpy.mock.calls[0][0] as any;
+    expect(params.max_tokens).toBe(2048);
+    expect("max_completion_tokens" in params).toBe(false);
+  });
+});
+
+// =============================================================================
 // OpenAIProvider.countTokens()
 // =============================================================================
 
