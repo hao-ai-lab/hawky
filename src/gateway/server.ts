@@ -85,14 +85,30 @@ function logoutRedirectHtml(returnUrl: string): string {
 </html>`;
 }
 
-function requestIp(req: Request): string {
-  return req.headers.get("CF-Connecting-IP")
-    ?? req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim()
-    ?? "";
+type RequestIpSource = {
+  requestIP(req: Request): { address?: string | null } | null;
+};
+
+function shouldTrustProxyHeaders(): boolean {
+  return process.env.HAWKY_TRUST_PROXY_HEADERS === "1" || process.env.HAWKY_TRUST_PROXY === "1";
 }
 
-function loginThrottleKey(req: Request): string {
-  return requestIp(req) || "unknown";
+function trustedProxyIp(req: Request): string {
+  const cfConnectingIp = req.headers.get("CF-Connecting-IP")?.trim();
+  if (cfConnectingIp) return cfConnectingIp;
+  return req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ?? "";
+}
+
+export function requestIp(req: Request, source?: RequestIpSource): string {
+  if (shouldTrustProxyHeaders()) {
+    const forwardedIp = trustedProxyIp(req);
+    if (forwardedIp) return forwardedIp;
+  }
+  return source?.requestIP(req)?.address ?? "";
+}
+
+function loginThrottleKey(req: Request, source?: RequestIpSource): string {
+  return requestIp(req, source) || "unknown";
 }
 
 function proxyHeaders(headers: Headers): Headers {
@@ -210,10 +226,10 @@ export class GatewayServer {
         // App auth endpoints — optional email/password login wall before
         // issuing device tokens. Cloudflare Access can still sit in front.
         if (self.appAuth && url.pathname === "/auth/login") {
-          return self.handleAppLogin(req, url);
+          return self.handleAppLogin(req, url, server);
         }
         if (self.appAuth && url.pathname === "/auth/register") {
-          return self.handleAppRegister(req, url);
+          return self.handleAppRegister(req, url, server);
         }
         if (self.appAuth && url.pathname === "/auth/logout") {
           return self.handleAppLogout(url);
@@ -258,7 +274,7 @@ export class GatewayServer {
         // Live model broker — mints short-lived OpenAI Realtime client secrets
         // for browser/mobile clients without exposing the gateway API key.
         if (url.pathname === "/api/live/openai/client-secret" && req.method === "POST") {
-          return self.handleOpenAIRealtimeClientSecret(req);
+          return self.handleOpenAIRealtimeClientSecret(req, server);
         }
 
         // Serve web frontend static files (production mode)
@@ -537,7 +553,7 @@ export class GatewayServer {
       if (mode === "json") {
         return Response.json({ ok: false, error: "Login required" }, { status: 401 });
       }
-      const returnUrl = sanitizeReturnUrl(url.searchParams.get("return_url") ?? "/");
+      const returnUrl = sanitizeReturnUrl(url.searchParams.get("return_url") ?? `${url.pathname}${url.search}`);
       return new Response(this.appAuth.loginPage(returnUrl), {
         status: 401,
         headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -579,7 +595,7 @@ export class GatewayServer {
     return Response.json({ ok: true, token });
   }
 
-  private async handleAppLogin(req: Request, url: URL): Promise<Response> {
+  private async handleAppLogin(req: Request, url: URL, ipSource?: RequestIpSource): Promise<Response> {
     if (!this.appAuth) return new Response("Not found", { status: 404 });
     if (req.method === "GET") {
       return new Response(this.appAuth.loginPage(url.searchParams.get("return_url") ?? "/"), {
@@ -591,7 +607,7 @@ export class GatewayServer {
     const body = await readFormOrJson(req);
     const returnUrl = sanitizeReturnUrl(body.return_url ?? "/");
     try {
-      const { user, token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
+      const { user, token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req, ipSource));
       return redirect(this.postLoginRedirect(req, user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.loginPage(returnUrl, err instanceof Error ? err.message : "Login failed."), {
@@ -601,7 +617,7 @@ export class GatewayServer {
     }
   }
 
-  private async handleAppRegister(req: Request, _url: URL): Promise<Response> {
+  private async handleAppRegister(req: Request, _url: URL, ipSource?: RequestIpSource): Promise<Response> {
     if (!this.appAuth) return new Response("Not found", { status: 404 });
     const url = new URL(req.url);
     if (req.method === "GET") {
@@ -620,7 +636,7 @@ export class GatewayServer {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
-      const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
+      const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req, ipSource));
       return redirect(result.user.role === "admin" ? "/admin" : this.postLoginRedirect(req, result.user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.registerPage(returnUrl, "", err instanceof Error ? err.message : "Registration failed."), {
@@ -709,6 +725,14 @@ export class GatewayServer {
     if (this.appAuth.userFromRequest(req)) return false;
     if (url.pathname.startsWith("/auth/")) return false;
     if (url.pathname === "/ws") return false;
+    if (
+      url.pathname === "/api/live/openai/client-secret"
+      && req.method === "POST"
+      && this.deviceAuth
+      && req.headers.get("Authorization")?.startsWith("Bearer ")
+    ) {
+      return false;
+    }
     return true;
   }
 
@@ -747,7 +771,7 @@ export class GatewayServer {
 
   private isAuthorizedHealthRequest(req: Request): boolean {
     const token = process.env.HAWKY_HEALTH_TOKEN ?? "";
-    if (!token) return false;
+    if (!token) return true;
     return req.headers.get("X-Hawky-Health-Token") === token;
   }
 
@@ -796,7 +820,7 @@ export class GatewayServer {
     return payload;
   }
 
-  private async handleOpenAIRealtimeClientSecret(req: Request): Promise<Response> {
+  private async handleOpenAIRealtimeClientSecret(req: Request, ipSource?: RequestIpSource): Promise<Response> {
     const device = this.requireDeviceToken(req);
     if (device instanceof Response) return device;
 
@@ -807,7 +831,7 @@ export class GatewayServer {
         ? `user:${appUser.id}`
         : device
           ? `device:${device.jti}`
-          : `ip:${requestIp(req) || "unknown"}`;
+          : `ip:${requestIp(req, ipSource) || "unknown"}`;
       return Response.json(await mintOpenAIRealtimeClientSecret(body, { quotaKey }));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
