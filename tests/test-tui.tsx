@@ -5,13 +5,12 @@
 // Covers: message list (with welcome banner), status bar, input area, full app.
 // =============================================================================
 
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import React from "react";
 import { render as inkRender } from "ink-testing-library";
 import { MessageList } from "../src/tui/components/message_list.js";
 import { StatusBar } from "../src/tui/components/status_bar.js";
 import { App } from "../src/tui/app.js";
-import { resetMessageCounter } from "../src/tui/hooks/use_agent_loop.js";
 import type { DisplayMessage, TuiStatus } from "../src/tui/types.js";
 import type {
   LLMProvider,
@@ -346,8 +345,6 @@ describe("StatusBar", () => {
 // =============================================================================
 
 describe("App", () => {
-  afterEach(() => resetMessageCounter());
-
   test("renders welcome banner and input box", () => {
     const { lastFrame } = inkRender(
       <App model="claude-sonnet-4-6" agentSource={makeSource("hi")} sessionKey="test:main" />,

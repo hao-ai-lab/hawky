@@ -16,7 +16,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
-      "@hawky/protocol": ["../src/gateway/protocol.ts"]
+      "@hawky/protocol": ["../src/gateway/protocol.ts"],
+      "@hawky/transcript": ["../src/transcript/index.ts"]
     }
   },
   "include": ["src", "tests"],

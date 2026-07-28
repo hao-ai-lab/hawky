@@ -5,7 +5,10 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: { "@hawky/protocol": path.resolve(__dirname, "../src/gateway/protocol.ts") },
+    alias: {
+      "@hawky/protocol": path.resolve(__dirname, "../src/gateway/protocol.ts"),
+      "@hawky/transcript": path.resolve(__dirname, "../src/transcript/index.ts"),
+    },
   },
   test: {
     environment: "jsdom",

@@ -9,7 +9,6 @@ import { describe, expect, test, afterEach, beforeEach } from "bun:test";
 import React from "react";
 import { render as inkRender } from "ink-testing-library";
 import { App } from "../src/tui/app.js";
-import { resetMessageCounter } from "../src/tui/hooks/use_agent_loop.js";
 import { setSessionsDir, resetSessionsDir } from "../src/storage/session.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -53,12 +52,10 @@ beforeEach(() => {
   testDir = join(tmpdir(), `hawky-cmd-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(testDir, { recursive: true });
   setSessionsDir(testDir);
-  resetMessageCounter();
 });
 
 afterEach(() => {
   resetSessionsDir();
-  resetMessageCounter();
   try { rmSync(testDir, { recursive: true, force: true }); } catch {}
 });
 

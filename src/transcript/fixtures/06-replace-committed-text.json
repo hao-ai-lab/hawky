@@ -1,0 +1,73 @@
+{
+  "events": [
+    {
+      "type": "text",
+      "content": "I'll look into it."
+    },
+    {
+      "type": "tool_use_start",
+      "tool_use_id": "toolu_04",
+      "name": "grep",
+      "input": {
+        "pattern": "TODO"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_04",
+      "name": "grep",
+      "content": "3 matches",
+      "is_error": false
+    },
+    {
+      "type": "text",
+      "content": "I looked into it: 3 TODOs.",
+      "replace": true
+    },
+    {
+      "type": "done"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "message",
+        "id": "msg-0",
+        "role": "assistant",
+        "text": "I looked into it: 3 TODOs.",
+        "done": true
+      },
+      {
+        "kind": "tool",
+        "id": "toolu_04",
+        "toolUseId": "toolu_04",
+        "name": "grep",
+        "inputPreview": "TODO",
+        "status": "ok",
+        "output": [
+          {
+            "type": "stdout",
+            "content": "3 matches"
+          }
+        ],
+        "meta": {
+          "input": {
+            "pattern": "TODO"
+          },
+          "resultContent": "3 matches",
+          "isError": false
+        }
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 1,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

@@ -21,10 +21,7 @@ import {
 } from "../src/storage/session.js";
 import { PermissionCache } from "../src/agent/tool_executor.js";
 import type { ChatMessage } from "../src/agent/types.js";
-import {
-  historyToDisplayMessages,
-  resetRestoreCounter,
-} from "../src/tui/utils/history_to_display.js";
+import { historyToDisplay } from "../src/tui/utils/transcript_display.js";
 
 let testDir: string;
 
@@ -32,12 +29,10 @@ beforeEach(() => {
   testDir = join(tmpdir(), `hawky-edge-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(testDir, { recursive: true });
   setSessionsDir(testDir);
-  resetRestoreCounter();
 });
 
 afterEach(() => {
   resetSessionsDir();
-  resetRestoreCounter();
   try { rmSync(testDir, { recursive: true, force: true }); } catch {}
 });
 
@@ -72,7 +67,7 @@ describe("Session — large conversations", () => {
       messages.push(msg("user", `message ${i}`));
       messages.push(msg("assistant", `reply ${i}`));
     }
-    const display = historyToDisplayMessages(messages);
+    const display = historyToDisplay(messages);
     expect(display).toHaveLength(100);
     expect(display[0].role).toBe("user");
     expect(display[99].role).toBe("assistant");
@@ -237,7 +232,7 @@ describe("validateMessages — edge cases", () => {
 // History display — edge cases
 // =============================================================================
 
-describe("historyToDisplayMessages — edge cases", () => {
+describe("historyToDisplay — edge cases", () => {
   test("tool_result without matching tool_use is ignored", () => {
     const messages: ChatMessage[] = [
       msg("user", "hi"),
@@ -248,7 +243,7 @@ describe("historyToDisplayMessages — edge cases", () => {
       },
       msg("assistant", "ok"),
     ];
-    const display = historyToDisplayMessages(messages);
+    const display = historyToDisplay(messages);
     // user + assistant, tool_result without matching tool_use is silently skipped
     expect(display).toHaveLength(2);
     expect(display[0].role).toBe("user");
@@ -269,7 +264,7 @@ describe("historyToDisplayMessages — edge cases", () => {
         timestamp: "2026-01-01",
       },
     ];
-    const display = historyToDisplayMessages(messages);
+    const display = historyToDisplay(messages);
     // user + tool (no assistant text block)
     expect(display).toHaveLength(2);
     expect(display[0].role).toBe("user");
@@ -291,7 +286,7 @@ describe("historyToDisplayMessages — edge cases", () => {
         timestamp: "2026-01-01",
       },
     ];
-    const display = historyToDisplayMessages(messages);
+    const display = historyToDisplay(messages);
     const tool = display[1];
     expect(tool.toolData!.outputLines).toHaveLength(3);
     expect(tool.toolData!.outputLines[0].content).toBe("a.txt");
@@ -312,7 +307,7 @@ describe("historyToDisplayMessages — edge cases", () => {
         timestamp: "2026-01-01",
       },
     ];
-    const display = historyToDisplayMessages(messages);
+    const display = historyToDisplay(messages);
     const tool = display[1];
     expect(tool.toolData!.status).toBe("error");
     expect(tool.toolData!.isError).toBe(true);
@@ -323,7 +318,7 @@ describe("historyToDisplayMessages — edge cases", () => {
       { role: "user", content: [], timestamp: "2026-01-01" },
       msg("assistant", "ok"),
     ];
-    const display = historyToDisplayMessages(messages);
+    const display = historyToDisplay(messages);
     // Empty content user message produces no display, assistant does
     expect(display).toHaveLength(1);
     expect(display[0].role).toBe("assistant");

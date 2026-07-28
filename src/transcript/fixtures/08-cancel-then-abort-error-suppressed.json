@@ -1,0 +1,47 @@
+{
+  "events": [
+    {
+      "type": "text",
+      "content": "partial"
+    },
+    {
+      "type": "cancel",
+      "content": "Request cancelled by user"
+    },
+    {
+      "type": "error",
+      "content": "Request aborted by user"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "message",
+        "id": "msg-0",
+        "role": "assistant",
+        "text": "partial",
+        "done": true
+      },
+      {
+        "kind": "message",
+        "id": "msg-1",
+        "role": "system",
+        "text": "Request cancelled by user",
+        "done": true,
+        "meta": {
+          "marker": "cancel"
+        }
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 2,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

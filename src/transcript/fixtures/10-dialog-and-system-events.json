@@ -1,0 +1,92 @@
+{
+  "events": [
+    {
+      "type": "thinking",
+      "content": "pondering…"
+    },
+    {
+      "type": "permission_request",
+      "id": "perm-1",
+      "tool_use_id": "toolu_06",
+      "tool_name": "bash",
+      "tool_input": {
+        "command": "rm x"
+      }
+    },
+    {
+      "type": "permission_result",
+      "id": "perm-1",
+      "decision": "allow_once"
+    },
+    {
+      "type": "ask_user_request",
+      "id": "ask-1",
+      "tool_use_id": "toolu_06",
+      "question": "Proceed?",
+      "options": [
+        "yes",
+        "no"
+      ],
+      "multi_select": false
+    },
+    {
+      "type": "ask_user_response",
+      "id": "ask-1",
+      "selected": [
+        "yes"
+      ]
+    },
+    {
+      "type": "queue_message",
+      "content": "also do the other thing",
+      "position": 1
+    },
+    {
+      "type": "system_message",
+      "content": "Context compacted",
+      "subtype": "compaction"
+    },
+    {
+      "type": "user_committed",
+      "message_index": 7
+    },
+    {
+      "type": "done"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "message",
+        "id": "msg-0",
+        "role": "system",
+        "text": "also do the other thing",
+        "done": true,
+        "meta": {
+          "marker": "queue",
+          "position": 1
+        }
+      },
+      {
+        "kind": "message",
+        "id": "msg-1",
+        "role": "system",
+        "text": "Context compacted",
+        "done": true,
+        "meta": {
+          "subtype": "compaction"
+        }
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 2,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

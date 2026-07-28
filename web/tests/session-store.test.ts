@@ -6,7 +6,8 @@
 // =============================================================================
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { useSessionStore, synthesizeMetadataFromInput, buildFullInput, type TaskSummary } from "../src/store/session-store";
+import { useSessionStore, type TaskSummary } from "../src/store/session-store";
+import { synthesizeMetadataFromInput, buildFullInput } from "../src/store/transcript-view";
 import { useSocketStore } from "../src/store/socket-store";
 
 // Mock rpc function

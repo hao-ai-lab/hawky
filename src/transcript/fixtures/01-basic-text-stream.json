@@ -1,0 +1,44 @@
+{
+  "events": [
+    {
+      "type": "text",
+      "content": "Hel"
+    },
+    {
+      "type": "text",
+      "content": "lo"
+    },
+    {
+      "type": "text",
+      "content": " there."
+    },
+    {
+      "type": "done",
+      "usage": {
+        "input_tokens": 12,
+        "output_tokens": 4
+      }
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "message",
+        "id": "msg-0",
+        "role": "assistant",
+        "text": "Hello there.",
+        "done": true
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 1,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

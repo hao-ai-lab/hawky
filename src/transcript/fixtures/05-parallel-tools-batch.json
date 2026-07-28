@@ -1,0 +1,101 @@
+{
+  "events": [
+    {
+      "type": "tool_use_start",
+      "tool_use_id": "toolu_a",
+      "name": "read_file",
+      "input": {
+        "file_path": "a.ts"
+      },
+      "batchId": "batch-1",
+      "batchSize": 2
+    },
+    {
+      "type": "tool_use_start",
+      "tool_use_id": "toolu_b",
+      "name": "read_file",
+      "input": {
+        "file_path": "b.ts"
+      },
+      "batchId": "batch-1",
+      "batchSize": 2
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_b",
+      "name": "read_file",
+      "content": "contents of b",
+      "is_error": false
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_a",
+      "name": "read_file",
+      "content": "contents of a",
+      "is_error": false
+    },
+    {
+      "type": "done"
+    }
+  ],
+  "expected": {
+    "items": [
+      {
+        "kind": "tool",
+        "id": "toolu_a",
+        "toolUseId": "toolu_a",
+        "name": "read_file",
+        "inputPreview": "a.ts",
+        "status": "ok",
+        "output": [
+          {
+            "type": "stdout",
+            "content": "contents of a"
+          }
+        ],
+        "meta": {
+          "input": {
+            "file_path": "a.ts"
+          },
+          "batchId": "batch-1",
+          "batchSize": 2,
+          "resultContent": "contents of a",
+          "isError": false
+        }
+      },
+      {
+        "kind": "tool",
+        "id": "toolu_b",
+        "toolUseId": "toolu_b",
+        "name": "read_file",
+        "inputPreview": "b.ts",
+        "status": "ok",
+        "output": [
+          {
+            "type": "stdout",
+            "content": "contents of b"
+          }
+        ],
+        "meta": {
+          "input": {
+            "file_path": "b.ts"
+          },
+          "batchId": "batch-1",
+          "batchSize": 2,
+          "resultContent": "contents of b",
+          "isError": false
+        }
+      }
+    ],
+    "cursor": {
+      "streamingItemId": null,
+      "toolUseIdToItem": {},
+      "replaceTargetItemId": null,
+      "cancelPending": false,
+      "thinkingText": "",
+      "nextMessageSeq": 0,
+      "replacedCommitted": false,
+      "orphanToolResults": {}
+    }
+  }
+}

@@ -3,11 +3,34 @@
 //
 // Manages the session list, active session, streaming state, and message
 // sending. Subscribes to gateway events for real-time streaming.
+//
+// ALL "stream event → rendered transcript" transition logic lives in the
+// shared canonical reducer (@hawky/transcript → src/transcript). This store
+// keeps one canonical TranscriptState per session, projects it into the
+// SessionMessage view via ./transcript-view, and owns every side effect:
+// flush throttling, unread badges, pagination, dialogs, usage bookkeeping.
 // =============================================================================
 
 import { create } from "zustand";
 import { useSocketStore } from "./socket-store";
 import type { EventFrame } from "@hawky/protocol";
+import {
+  appendUserMessage,
+  fromHistory,
+  initialState,
+  reduce,
+  type HistoryMessage,
+  type StreamEvent,
+  type TranscriptItem,
+  type TranscriptState,
+} from "@hawky/transcript";
+import {
+  deriveSessionMessages,
+  shouldDisplay,
+  syncMessages,
+  toSessionMessage,
+  type SessionOverlay,
+} from "./transcript-view";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -53,9 +76,9 @@ export interface SessionMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   timestamp?: string;
-  /** Absolute message index in the backend session history. Set by
-   *  parseHistoryMessages from the server's response so the client can
-   *  pass it directly to chat.rewind without any counting from the start.
+  /** Absolute message index in the backend session history. Set by the
+   *  shared history fold (fromHistory) so the client can pass it directly
+   *  to chat.rewind without any counting from the start.
    *  Undefined for optimistic messages (just-typed user bubbles waiting
    *  to be confirmed) — those can't be rewound to until the next history
    *  refresh syncs the index. */
@@ -281,14 +304,6 @@ interface SessionState {
    * retroactively fill tool cards when that older chunk is fetched.
    */
   orphanToolResults: Record<string, { content: string; isError: boolean }>;
-  /**
-   * Per-tool_use_id input cache accumulated across all loaded history pages.
-   * Lets the merged-window re-pass in loadOlderMessages synthesize diff
-   * metadata for legacy tool_uses whose continuation lives in a newer page.
-   * Keys are toolUseIds; values carry the name + raw input needed for
-   * synthesizeMetadataFromInput. Grows monotonically as older pages load.
-   */
-  historyInputCache: Record<string, { name: string; input: Record<string, unknown> }>;
 
   // Actions
   fetchSessions: () => Promise<void>;
@@ -306,7 +321,7 @@ interface SessionState {
    *  discarding everything from that message onward, then send a
    *  replacement. `messageIndex` is the absolute position in the
    *  server's session history — populated on each loaded SessionMessage
-   *  as `backendIndex` by parseHistoryMessages. We use the absolute index
+   *  as `backendIndex` by the shared history fold. We use the absolute index
    *  rather than a "user-turn count" so the action works correctly even
    *  when the client only has a paginated subset of history loaded. */
   rewindAndSend: (messageIndex: number, newText: string) => Promise<void>;
@@ -360,11 +375,6 @@ function isSystemSession(key: string): boolean {
   return key.startsWith("heartbeat:") || key.startsWith("cron:") || key.startsWith("flush:");
 }
 
-let nextMsgId = 0;
-function msgId(): string {
-  return `msg-${++nextMsgId}`;
-}
-
 /**
  * Monotonic counter bumped on every switchSession call. Fire-and-forget
  * RPCs that outlive their switch (e.g. task.list) capture their token
@@ -415,214 +425,202 @@ function extractBroadcastAttachments(payload: unknown): Partial<Pick<SessionMess
   return out;
 }
 
-/** Format tool input as a short preview string */
-function formatToolPreview(name: string, input: Record<string, unknown>): string {
-  if (name === "bash" && typeof input.command === "string") {
-    return input.command.length > 80 ? input.command.slice(0, 80) + "..." : input.command;
-  }
-  if (name === "read_file" && typeof input.file_path === "string") {
-    return input.file_path as string;
-  }
-  if (name === "edit_file" && typeof input.file_path === "string") {
-    return input.file_path as string;
-  }
-  if (name === "write_file" && typeof input.file_path === "string") {
-    return input.file_path as string;
-  }
-  if (name === "glob" && typeof input.pattern === "string") {
-    return input.pattern as string;
-  }
-  if (name === "grep" && typeof input.pattern === "string") {
-    return input.pattern as string;
-  }
-  return JSON.stringify(input).slice(0, 60);
-}
+// -----------------------------------------------------------------------------
+// Canonical transcript runtime (per session)
+//
+// One canonical TranscriptState per session key — the SAME fold serves the
+// active session (projected into `messages`) and background sessions
+// (projected into their sessionCache entry). The shared reducer owns every
+// transition; this block owns projection + throttling only.
+// -----------------------------------------------------------------------------
 
-// Bounded display string for the expanded ToolLine row. We deliberately do
-// NOT store the raw `block.input` object on every tool message — for
-// edit_file/write_file that would keep the full old_string/new_string /
-// content text in the Zustand store and per-session cache indefinitely,
-// and long sessions with large file operations could eat megabytes of RAM.
-// Instead, pre-extract just the field the UI actually renders, apply a
-// generous cap, and throw away the rest.
-const MAX_FULL_INPUT_CHARS = 10_000;
-export function buildFullInput(name: string | undefined, input: unknown): string | undefined {
-  if (!name) return undefined;
-  if (!input || typeof input !== "object") return undefined;
-  const inp = input as Record<string, unknown>;
-  let text: string | undefined;
-  switch (name) {
-    case "bash":
-    case "shell":
-      if (typeof inp.command === "string") text = inp.command;
-      break;
-    case "read_file":
-    case "read":
-    case "edit_file":
-    case "edit":
-    case "write_file":
-    case "write":
-      if (typeof inp.file_path === "string") text = inp.file_path as string;
-      break;
-    case "glob":
-      if (typeof inp.pattern === "string") text = inp.pattern as string;
-      break;
-    case "grep": {
-      if (typeof inp.pattern === "string") {
-        const p = typeof inp.path === "string" ? `  (in ${inp.path as string})` : "";
-        text = `${inp.pattern as string}${p}`;
-      }
-      break;
-    }
-    case "web_search":
-      if (typeof inp.query === "string") text = inp.query as string;
-      break;
-    case "web_fetch":
-      if (typeof inp.url === "string") text = inp.url as string;
-      break;
-  }
-  if (text === undefined) {
-    // Unknown/custom tool — pretty-print so nothing is hidden, but still
-    // bounded by the char cap below.
-    try {
-      text = JSON.stringify(inp, null, 2);
-    } catch {
-      return undefined;
-    }
-  }
-  return text.length > MAX_FULL_INPUT_CHARS
-    ? text.slice(0, MAX_FULL_INPUT_CHARS) + "\n… (truncated)"
-    : text;
-}
-
-// Mirrors MAX_DIFF_METADATA_CHARS in src/tools/edit_file.ts and write_file.ts:
-// the live tool path nulls out diff strings above this cap so structuredPatch
-// doesn't lock the UI on a giant edit. Reload synthesis must respect the same
-// budget — without it, an edit that streamed safely could freeze the page after
-// a refresh because the full input text is still in the JSONL.
-const MAX_DIFF_METADATA_CHARS = 50_000;
-
-// Reconstruct enough metadata from a tool_use's input to keep DiffView and
-// summary text working after a page reload. Live streaming sets `metadata`
-// from the tool's result payload, but the JSONL `tool_result` block (Anthropic
-// API format) carries only content/is_error/tool_use_id — `metadata` is lost.
-// The assistant's tool_use block, however, still has the input fields, so we
-// can resurrect old_string/new_string for edit_file and the new content for
-// write_file. Line numbers in the diff start at 1 (no match_line on reload),
-// which is cosmetic — colors and content are correct.
-export function synthesizeMetadataFromInput(
-  name: string | undefined,
-  input: unknown,
-): Record<string, unknown> | undefined {
-  if (!name || !input || typeof input !== "object") return undefined;
-  const inp = input as Record<string, unknown>;
-  if (name === "edit_file") {
-    const oldStr = inp.old_string;
-    const newStr = inp.new_string;
-    if (typeof oldStr !== "string" || typeof newStr !== "string") return undefined;
-    if (oldStr.length > MAX_DIFF_METADATA_CHARS || newStr.length > MAX_DIFF_METADATA_CHARS) {
-      return undefined;
-    }
-    return {
-      file_path: typeof inp.file_path === "string" ? inp.file_path : "file",
-      old_string: oldStr,
-      new_string: newStr,
-      lines_added: newStr.split("\n").length,
-      lines_removed: oldStr.split("\n").length,
-    };
-  }
-  if (name === "write_file") {
-    const content = inp.content;
-    if (typeof content !== "string") return undefined;
-    if (content.length > MAX_DIFF_METADATA_CHARS) return undefined;
-    return {
-      file_path: typeof inp.file_path === "string" ? inp.file_path : "file",
-      // We can't tell on reload whether the write was an overwrite or a
-      // new file. Use `old_content: null` rather than "" — the renderer
-      // (computeDiffLines) maps null → "" for the diff so it shows the
-      // full content as added (new-file form), AND formatToolSummary
-      // checks `old_content === null` specifically to emit the
-      // "New file, N lines" summary on reload. With "" neither branch
-      // fires and the row loses its summary line on refresh.
-      old_content: null,
-      new_content: content,
-    };
-  }
-  return undefined;
-}
-
-// Per-session streaming state (replaces singleton for multi-session support)
-interface StreamingState {
-  streamingMsgId: string | null;
-  streamingText: string;
-  replaceTargetMsgId: string | null;
-  toolMsgMap: Map<string, string>;
+interface SessionTranscript {
+  /** Canonical transcript — the single source of truth for rendered rows. */
+  state: TranscriptState;
+  /** The canonical state the Zustand view currently reflects. */
+  projected: TranscriptState;
+  /** Web-only per-item presentation (startedAt / live / command chip). */
+  overlays: Record<string, SessionOverlay>;
+  /** Pending throttled projection for streaming text deltas. */
   flushTimer: ReturnType<typeof setTimeout> | null;
 }
 
-const sessionStreaming = new Map<string, StreamingState>();
+const sessionTranscripts = new Map<string, SessionTranscript>();
 
-function getStreaming(sessionKey: string): StreamingState {
-  let s = sessionStreaming.get(sessionKey);
-  if (!s) {
-    s = {
-      streamingMsgId: null,
-      streamingText: "",
-      replaceTargetMsgId: null,
-      toolMsgMap: new Map(),
-      flushTimer: null,
-    };
-    sessionStreaming.set(sessionKey, s);
+function getTranscript(sessionKey: string): SessionTranscript {
+  let t = sessionTranscripts.get(sessionKey);
+  if (!t) {
+    const state = initialState();
+    t = { state, projected: state, overlays: {}, flushTimer: null };
+    sessionTranscripts.set(sessionKey, t);
   }
-  return s;
+  return t;
 }
 
-/**
- * Per-session "recently cancelled" flag. Set on `cancel` event, consumed by
- * the next `error` event — but ONLY if the error content matches a known
- * user-abort sentinel. Cleared aggressively (new send, `done`, non-abort
- * error, session switch) so the flag can't leak into the next turn and
- * suppress a genuine failure.
- */
-const recentCancelBySession = new Map<string, boolean>();
-
-/** Does the error content look like the backend's user-abort sentinel? */
-function isUserAbortError(content: unknown): boolean {
-  if (typeof content !== "string") return false;
-  // The current backend sentinel is "Request aborted by user".
-  // Accept close variants ("Request aborted by the user", "aborted by user")
-  // but intentionally do NOT match "aborted before starting" or other
-  // provider-side pre-abort errors — those need to surface to the user.
-  return /aborted by (the )?user/i.test(content);
+/** Swap in a freshly folded canonical state (session switch / history load). */
+function resetTranscript(sessionKey: string, state: TranscriptState): SessionTranscript {
+  const t = getTranscript(sessionKey);
+  if (t.flushTimer) {
+    clearTimeout(t.flushTimer);
+    t.flushTimer = null;
+  }
+  t.state = state;
+  t.projected = state;
+  t.overlays = {};
+  return t;
 }
-
-// Legacy aliases for active session (used by scheduleFlush and event handlers)
-// These are updated to point to the active session's streaming state
-let streamingMsgId: string | null = null;
-let streamingText = "";
-let streamingReplaceTargetMsgId: string | null = null;
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 const FLUSH_INTERVAL_MS = 50;
 
-function scheduleFlush(set: (fn: (state: SessionState) => Partial<SessionState>) => void) {
-  if (flushTimer) return; // Already scheduled
-  flushTimer = setTimeout(() => {
-    flushTimer = null;
-    if (streamingMsgId && streamingText) {
-      const id = streamingMsgId;
-      const text = streamingText;
-      set((state) => ({
-        messages: state.messages.map((m) =>
-          m.id === id ? { ...m, content: text } : m,
-        ),
-      }));
-    }
+/**
+ * Mirror the canonical state into the Zustand view: the active session's
+ * `messages`, or a background session's cache entry. Incremental (see
+ * syncMessages) and idempotent — a redundant call is a no-op.
+ */
+function projectTranscript(sessionKey: string): void {
+  const t = getTranscript(sessionKey);
+  if (t.projected === t.state) return;
+  const prev = t.projected;
+  const next = t.state;
+  t.projected = next;
+  if (sessionKey === useSessionStore.getState().activeKey) {
+    useSessionStore.setState((state) => ({
+      messages: syncMessages(state.messages, prev, next, t.overlays),
+    }));
+  } else {
+    useSessionStore.setState((state) => {
+      const cached = state.sessionCache[sessionKey] ?? EMPTY_PER_SESSION_CACHE;
+      return {
+        sessionCache: {
+          ...state.sessionCache,
+          [sessionKey]: {
+            ...cached,
+            messages: syncMessages(cached.messages, prev, next, t.overlays),
+          },
+        },
+      };
+    });
+  }
+}
+
+/** Throttled projection for high-frequency text deltas — same 50ms cadence
+ *  the old streaming flush used, for both active and background sessions. */
+function scheduleProjection(sessionKey: string): void {
+  const t = getTranscript(sessionKey);
+  if (t.flushTimer) return; // Already scheduled
+  t.flushTimer = setTimeout(() => {
+    t.flushTimer = null;
+    projectTranscript(sessionKey);
   }, FLUSH_INTERVAL_MS);
 }
 
-// Tool tracking: map tool_use_id → message ID (supports parallel tool calls)
-let toolMsgMap = new Map<string, string>();
+/**
+ * Reconstruct the typed StreamEvent from a gateway `agent.*` broadcast (the
+ * gateway emits each StreamEvent as "agent." + event.type, so the payload IS
+ * the event — this just coerces loosely-typed WS data). Returns null for
+ * agent events that are not transcript transitions: the permission/ask_user
+ * dialog traffic stays entirely in this adapter.
+ */
+function toStreamEvent(type: string, payload: any): StreamEvent | null {
+  switch (type) {
+    case "text":
+      return { type, content: String(payload?.content ?? ""), replace: payload?.replace === true };
+    case "thinking":
+      return { type, content: String(payload?.content ?? "") };
+    case "tool_use_start":
+      return {
+        type,
+        tool_use_id: String(payload?.tool_use_id ?? ""),
+        name: String(payload?.name ?? "tool"),
+        input: (typeof payload?.input === "object" && payload.input !== null
+          ? payload.input
+          : {}) as Record<string, unknown>,
+        approvalReason: payload?.approvalReason,
+        batchId: payload?.batchId,
+        batchSize: payload?.batchSize,
+      };
+    case "tool_streaming":
+      return {
+        type,
+        tool_use_id: String(payload?.tool_use_id ?? ""),
+        stream_type: payload?.stream_type === "stderr" ? "stderr" : "stdout",
+        content: String(payload?.content ?? ""),
+      };
+    case "tool_result":
+      return {
+        type,
+        tool_use_id: String(payload?.tool_use_id ?? ""),
+        name: String(payload?.name ?? "tool"),
+        content: typeof payload?.content === "string" ? payload.content : "",
+        display_content:
+          typeof payload?.display_content === "string" ? payload.display_content : undefined,
+        is_error: payload?.is_error === true,
+        metadata: payload?.metadata,
+      };
+    case "done":
+      return { type };
+    case "error":
+      // The reducer renders `Error: ${content}` — coerce a missing content
+      // to the old handler's "Unknown error" wording.
+      return {
+        type,
+        content: typeof payload?.content === "string" ? payload.content : "Unknown error",
+        code: payload?.code,
+      };
+    case "cancel":
+      return { type, content: String(payload?.content ?? "") };
+    case "queue_message":
+      return {
+        type,
+        content: String(payload?.content ?? ""),
+        position: typeof payload?.position === "number" ? payload.position : 0,
+      };
+    case "system_message":
+      return { type, content: String(payload?.content ?? ""), subtype: payload?.subtype };
+    case "user_committed":
+      return typeof payload?.message_index === "number"
+        ? { type, message_index: payload.message_index }
+        : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Apply one live stream event to a session's canonical transcript and
+ * project the result into the view.
+ */
+function applyStreamEvent(sessionKey: string, ev: StreamEvent): { createdStreaming: boolean } {
+  const t = getTranscript(sessionKey);
+  const prev = t.state;
+  t.state = reduce(prev, ev);
+
+  // Stamp web-only overlays for the tool item this event just created —
+  // the wall clock lives in the adapter (the core is deliberately pure).
+  if (ev.type === "tool_use_start") {
+    const created = t.state.items[t.state.items.length - 1];
+    if (created && created.kind === "tool") {
+      t.overlays[created.id] = { ...t.overlays[created.id], startedAt: Date.now(), live: true };
+    }
+  }
+
+  if (ev.type === "user_committed") {
+    // Deliberately not projected here: the store keeps its message-level
+    // stamp (see handleEvent) so optimistic bubbles that exist only in the
+    // view still get their backendIndex; the canonical stamp lands on the
+    // next natural projection.
+    return { createdStreaming: false };
+  }
+
+  // Pure text appends are throttled exactly like the old streaming flush;
+  // everything structural (new bubble, replace, tool cards, finalize)
+  // projects immediately.
+  const appendOnly = ev.type === "text" && ev.replace !== true && prev.cursor.streamingItemId !== null;
+  if (appendOnly) scheduleProjection(sessionKey);
+  else projectTranscript(sessionKey);
+
+  return { createdStreaming: ev.type === "text" && prev.cursor.streamingItemId === null };
+}
 
 /** Generate a human-readable label for what the agent is doing with a tool.
  *  Includes a short preview of the input for context (like Claude.ai's
@@ -645,321 +643,6 @@ function toolStatusLabel(toolName: string, input?: Record<string, unknown>): str
     case "ask_user": return "Waiting for your input";
     case "cron": return `Managing cron${suffix}`;
     default: return `Using ${toolName}${suffix}`;
-  }
-}
-
-/**
- * Parse a raw backend `session.history` response into UI-level `SessionMessage`s.
- * Splits each turn's content blocks into text bubbles and tool cards, merges
- * tool_result output into the preceding tool_use card, and collapses empty
- * tool-result turns that would otherwise render as blank user bubbles.
- *
- * Returns `orphanResults` too: a map of tool_use_ids whose `tool_result` block
- * appeared in this chunk but whose matching `tool_use` did NOT (the pair was
- * split across a pagination boundary — the tool_use lives in an older chunk).
- * Callers can apply these when an older chunk later loads.
- */
-interface ParsedHistory {
-  messages: SessionMessage[];
-  orphanResults: Record<string, { content: string; isError: boolean }>;
-  /** Per-tool_use_id input cache so the orphan applier (called with a
-   *  later page's parse result) can synthesize diff metadata using the
-   *  original tool_use input when stitching across pagination. */
-  inputCache: Map<string, { name: string; input: Record<string, unknown> }>;
-}
-
-function parseHistoryMessages(raw: Array<any>): ParsedHistory {
-  const messages: SessionMessage[] = [];
-  const orphanResults: Record<string, { content: string; isError: boolean }> = {};
-  const inputCache = new Map<string, { name: string; input: Record<string, unknown> }>();
-  for (const msg of raw) {
-    if (typeof msg.content === "string") {
-      messages.push({
-        id: msgId(),
-        role: msg.role ?? "system",
-        content: msg.content,
-        timestamp: msg.timestamp,
-        backendIndex: typeof msg.index === "number" ? msg.index : undefined,
-      });
-      continue;
-    }
-    if (!Array.isArray(msg.content)) continue;
-
-    let textContent = "";
-    const imageBlocks: Array<{ base64: string; media_type: string }> = [];
-    const documentBlocks: Array<{ media_type: string; filename: string; sizeBytes: number }> = [];
-    const hasToolResult = msg.content.some((b: any) => b.type === "tool_result");
-    // Synthesize batchIds for *adjacent* runs of 2+ tool_use blocks only.
-    // A run of tool_uses with no text between them is what the model emits
-    // for a parallel call, and what the live pipeline tags with a real
-    // batchId. Interleaved text between tool_uses is a sequential turn
-    // with narration — those should stay as separate steps so ChatView
-    // doesn't reorder the prose around them.
-    const blocks: any[] = msg.content;
-    const blockBatchIds: Array<string | undefined> = new Array(blocks.length).fill(undefined);
-    let runStart = -1;
-    for (let bi = 0; bi <= blocks.length; bi++) {
-      const isToolUse = bi < blocks.length && blocks[bi]?.type === "tool_use";
-      if (isToolUse) {
-        if (runStart < 0) runStart = bi;
-      } else if (runStart >= 0) {
-        const runLen = bi - runStart;
-        if (runLen >= 2) {
-          const bid = `hist-${msgId()}`;
-          for (let k = runStart; k < bi; k++) blockBatchIds[k] = bid;
-        }
-        runStart = -1;
-      }
-    }
-    for (let bi = 0; bi < blocks.length; bi++) {
-      const block = blocks[bi];
-      const syntheticBatchId = blockBatchIds[bi];
-      if (block.type === "image" && block.source?.type === "base64") {
-        imageBlocks.push({ base64: block.source.data, media_type: block.source.media_type });
-        continue;
-      }
-      if (block.type === "document" && block.source?.type === "base64") {
-        const dataLen = typeof block.source.data === "string" ? block.source.data.length : 0;
-        documentBlocks.push({
-          media_type: block.source.media_type ?? "application/pdf",
-          filename: typeof block.title === "string" && block.title ? block.title : "document",
-          // Estimate raw bytes from base64 length so the pill can show size.
-          sizeBytes: Math.ceil(dataLen * 3 / 4),
-        });
-        continue;
-      }
-      if (block.type === "text" && !hasToolResult) {
-        textContent += block.text ?? "";
-      } else if (block.type === "tool_use") {
-        if (textContent.trim()) {
-          messages.push({
-            id: msgId(),
-            role: msg.role ?? "assistant",
-            content: textContent,
-            timestamp: msg.timestamp,
-          });
-          textContent = "";
-        }
-        // Cache the input so a later tool_result (in this chunk OR a
-        // newer chunk via the orphan stitcher) can synthesize diff
-        // metadata. Do NOT synthesize here: a page reload that lands
-        // mid-tool would otherwise show a fake completed diff for an
-        // edit/write that hasn't finished and may still fail. (Codex P2.)
-        const toolUseId = block.id ?? "";
-        if (toolUseId) {
-          inputCache.set(toolUseId, {
-            name: block.name ?? "tool",
-            input: (block.input ?? {}) as Record<string, unknown>,
-          });
-        }
-        messages.push({
-          id: msgId(),
-          role: "tool",
-          content: "",
-          timestamp: msg.timestamp,
-          tool: {
-            toolUseId,
-            name: block.name ?? "tool",
-            inputPreview: formatToolPreview(block.name ?? "", block.input ?? {}),
-            fullInput: buildFullInput(block.name, block.input),
-            // Default to "running" — flips to success/error when the
-            // matching tool_result is matched (this chunk or later).
-            status: "running",
-            output: "",
-            isError: false,
-            batchId: syntheticBatchId,
-          },
-        });
-      } else if (block.type === "tool_result") {
-        const content = typeof block.content === "string"
-          ? block.content
-          : Array.isArray(block.content)
-            ? block.content.map((b: any) => b.text ?? "").join("")
-            : "";
-        const isError = block.is_error ?? false;
-        let toolMsg: SessionMessage | undefined;
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].tool?.toolUseId === block.tool_use_id) {
-            toolMsg = messages[i];
-            break;
-          }
-        }
-        if (toolMsg?.tool) {
-          toolMsg.tool.output = content;
-          toolMsg.tool.isError = isError;
-          toolMsg.tool.status = isError ? "error" : "success";
-          // Only synthesize the diff metadata once we know the tool
-          // succeeded. The cached input from the matching tool_use lets
-          // us reconstruct old_string/new_string for edit_file or the
-          // new content for write_file. On error we leave metadata
-          // undefined — DiffView won't render a fake hunk for a change
-          // that never landed.
-          if (!isError) {
-            const cached = inputCache.get(block.tool_use_id);
-            if (cached) {
-              const meta = synthesizeMetadataFromInput(cached.name, cached.input);
-              if (meta) toolMsg.tool.metadata = meta;
-            }
-          }
-        } else if (block.tool_use_id) {
-          // Orphan: tool_use must be in a chunk not yet loaded (older page).
-          // Stash for cross-chunk linking when that chunk arrives.
-          orphanResults[block.tool_use_id] = { content, isError };
-        }
-      }
-    }
-    if (textContent.trim() || imageBlocks.length > 0 || documentBlocks.length > 0) {
-      const fallbackText = imageBlocks.length > 0
-        ? "(image attached)"
-        : documentBlocks.length > 0 ? "(PDF attached)" : "";
-      messages.push({
-        id: msgId(),
-        role: msg.role ?? "assistant",
-        content: textContent.trim() || fallbackText,
-        timestamp: msg.timestamp,
-        images: imageBlocks.length > 0 ? imageBlocks : undefined,
-        documents: documentBlocks.length > 0 ? documentBlocks : undefined,
-        backendIndex: typeof msg.index === "number" ? msg.index : undefined,
-      });
-    }
-    if (!hasToolResult && (messages.length === 0 || messages[messages.length - 1].timestamp !== msg.timestamp)) {
-      const fallback = msg.content.map((b: any) => b.text ?? b.content ?? "").join("");
-      if (fallback.trim()) {
-        messages.push({
-          id: msgId(),
-          role: msg.role ?? "system",
-          content: fallback,
-          timestamp: msg.timestamp,
-        });
-      }
-    }
-  }
-
-  reclassifyLegacyRunningTools(messages, inputCache);
-
-  return { messages, orphanResults, inputCache };
-}
-
-/**
- * Classify every "running" tool message as either still-in-flight or a
- * legacy tool whose result was never persisted. The unit of grouping
- * is the SOURCE ASSISTANT TURN: messages produced from one source msg
- * share its `timestamp`, and the trailing turn — defined by the
- * timestamp of the last message in the window — is the only turn that
- * can contain in-flight tools, because the agent cannot start a new
- * turn until the previous one's tools resolve.
- *
- * A tool in an earlier turn with status "running" must therefore be
- * legacy: flip it to "success" and synthesize diff metadata from the
- * cached input so a refreshed row doesn't spin forever. A tool in the
- * trailing turn stays "running" so the spinner keeps showing.
- *
- * Called in TWO places:
- *   1. End of parseHistoryMessages, on the single-page parse result.
- *   2. After loadOlderMessages merges an older page with the
- *      already-loaded window — otherwise a tool at the end of the
- *      older page (whose continuation lives in the newer page) stays
- *      "running" even though the newer page already proves it finished.
- *
- * **Only acts on tools that have a timestamp.** Live-streamed tool
- * messages (created from `agent.tool_use_start` WebSocket events) have
- * no timestamp; historical tool messages always do. Without this
- * guard, a mid-turn parallel batch that the user scrolls back through
- * would get its earlier tools wrongly flipped to "success" by the
- * merged-window re-pass — a real in-session regression (Codex P1 on
- * the principled-redesign pass). Leaving timestamp-less tools alone
- * preserves the live streaming state; historical reclassification
- * still works because historical messages carry timestamps.
- *
- * Why earlier rules (now retired) failed:
- *   - "any later message → completed": broke parallel in-flight
- *     batches (each tool_use had another tool_use after it).
- *   - "contiguous trailing tools only": broke interleaved
- *     tool_use → text → tool_use (same turn, same timestamp).
- *   - "fallback: only the last message is in-flight": broke paginated
- *     active sessions where live streaming messages have no timestamp.
- *
- * Mutates `messages` in place.
- */
-function reclassifyLegacyRunningTools(
-  messages: SessionMessage[],
-  inputCache: Map<string, { name: string; input: Record<string, unknown> }>,
-): void {
-  if (messages.length === 0) return;
-  // The trailing historical turn — walk backwards past any
-  // timestamp-less (live-streaming) tail to find the last timestamped
-  // message. This is what lets paginated active sessions still
-  // reclassify their historical tools correctly: earlier historical
-  // tools whose continuation is already loaded (but whose tool_result
-  // is missing) flip to "success"; live tools on the tail are
-  // untouched because they have no timestamp.
-  let trailingHistoricalTs: string | undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].timestamp !== undefined) {
-      trailingHistoricalTs = messages[i].timestamp;
-      break;
-    }
-  }
-  // No timestamped messages at all (degenerate / test-only shape):
-  // conservative default — leave everything alone.
-  if (trailingHistoricalTs === undefined) return;
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (m.role !== "tool" || !m.tool || m.tool.status !== "running") continue;
-    // Skip timestamp-less tools — they're from live streaming, not
-    // history parsing. Only historical messages carry timestamps.
-    if (m.timestamp === undefined) continue;
-    // In the trailing historical turn → in-flight.
-    if (m.timestamp === trailingHistoricalTs) continue;
-    // Earlier historical turn → must have completed.
-    m.tool.status = "success";
-    const cached = inputCache.get(m.tool.toolUseId);
-    if (cached) {
-      const meta = synthesizeMetadataFromInput(cached.name, cached.input);
-      if (meta) m.tool.metadata = meta;
-    }
-  }
-}
-
-/**
- * Fill empty tool_use cards in a freshly parsed older chunk using the
- * orphan tool_results we collected from previously-loaded newer chunks.
- * Mutates `olderMessages` in place and deletes matched keys from `orphans`.
- *
- * `inputCache` comes from the SAME parse pass that produced `olderMessages`
- * — it lets us synthesize diff metadata for matched orphans using the
- * original tool_use input. Without this, an edit_file that completed
- * successfully would not get its diff back when stitched across pages.
- */
-function applyOrphanResultsToOlder(
-  olderMessages: SessionMessage[],
-  orphans: Record<string, { content: string; isError: boolean }>,
-  inputCache: Map<string, { name: string; input: Record<string, unknown> }>,
-): void {
-  for (const m of olderMessages) {
-    if (m.role !== "tool" || !m.tool || m.tool.output) continue;
-    const orphan = orphans[m.tool.toolUseId];
-    if (!orphan) continue;
-    m.tool.output = orphan.content;
-    m.tool.isError = orphan.isError;
-    m.tool.status = orphan.isError ? "error" : "success";
-    // Always reset metadata to the truth dictated by the orphan result.
-    // Important: the post-pass in parseHistoryMessages may have already
-    // synthesized speculative metadata for this tool (assuming success).
-    // If the orphan reveals an error, that speculative metadata MUST be
-    // cleared, otherwise DiffView would render a fake green/red diff
-    // for a failed edit. On success, re-synthesize so the metadata is
-    // consistent with what actually shipped.
-    if (orphan.isError) {
-      m.tool.metadata = undefined;
-    } else {
-      const cached = inputCache.get(m.tool.toolUseId);
-      if (cached) {
-        const meta = synthesizeMetadataFromInput(cached.name, cached.input);
-        m.tool.metadata = meta; // may be undefined for non-diffable tools
-      }
-    }
-    delete orphans[m.tool.toolUseId];
   }
 }
 
@@ -1098,7 +781,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   notificationsBySession: {},
   historyMeta: null,
   orphanToolResults: {},
-  historyInputCache: {},
 
   cancelAgent: () => {
     const { rpc } = useSocketStore.getState();
@@ -1210,14 +892,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         permissionMode: get().permissionMode,
         forceBypass: get().forceBypass,
       };
-      // Save streaming state for the previous session
-      const prevStreaming = getStreaming(prevKey);
-      prevStreaming.streamingMsgId = streamingMsgId;
-      prevStreaming.streamingText = streamingText;
-      prevStreaming.replaceTargetMsgId = streamingReplaceTargetMsgId;
-      prevStreaming.flushTimer = flushTimer;
-      prevStreaming.toolMsgMap = toolMsgMap;
-
+      // No streaming state to hand off: the previous session's canonical
+      // transcript lives in sessionTranscripts and keeps folding background
+      // events; projections target its cache entry once activeKey changes.
       set((state) => ({
         sessionCache: { ...state.sessionCache, [prevKey]: cache },
       }));
@@ -1247,17 +924,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Always fetch fresh state from gateway — it's the source of truth.
     // Background event accumulation is only used for badges, not for content.
     // This guarantees no missing text, no stale state, no streaming gaps.
-
-    // Fetch history from gateway. Don't block events — with multi-session
-    // subscriptions, events are tagged with _sessionKey and routed correctly.
-    streamingMsgId = null;
-    streamingText = "";
-    streamingReplaceTargetMsgId = null;
-    toolMsgMap = new Map();
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
+    // (The target session's canonical transcript is rebuilt below from the
+    // fetched history via resetTranscript.)
 
     // Seed usage fields from the sidebar entry (backend-persisted) so the
     // footer renders immediately on cold load without waiting for a turn.
@@ -1333,8 +1001,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (get().activeKey !== key) return;
 
       const rawMessages = historyResult?.messages ?? [];
-      const { messages, orphanResults: initialOrphans, inputCache: initialInputCache } =
-        parseHistoryMessages(rawMessages);
+      // Fold the persisted history through the shared canonical reducer —
+      // this replaces the old parseHistoryMessages (tool matching, batch
+      // synthesis, legacy running-tool reclassification, orphan collection
+      // all live in the core now).
+      let transcript = fromHistory(rawMessages as HistoryMessage[]);
+      const initialOrphans = transcript.cursor.orphanToolResults;
       const historyMeta: SessionHistoryMeta = {
         oldestLoadedIndex: rawMessages.length > 0 ? rawMessages[0].index ?? null : null,
         hasMore: historyResult?.hasMore ?? false,
@@ -1347,8 +1019,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // a second browser, or the iPhone after a screen-on. Without it, the
       // newly-attached client sees a busy agent but no UI to unblock it.
       let currentAgentStatus: AgentStatus = "idle";
-      let currentTurnMsgId: string | null = null;
-      let currentTurnText = "";
       let hydratedPermission: PendingPermission | null = null;
       let hydratedAskUser: PendingAskUser | null = null;
       // Discriminator for "server returned authoritative pending info"
@@ -1361,13 +1031,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       try {
         const currentTurn = await rpc("session.currentTurn", { sessionKey: key }) as any;
         if (currentTurn?.streaming && currentTurn.text) {
-          currentTurnMsgId = msgId();
-          currentTurnText = currentTurn.text;
-          messages.push({
-            id: currentTurnMsgId,
-            role: "assistant",
-            content: currentTurnText,
-          });
+          // Feed the in-progress text through the reducer as a synthetic
+          // text event: it opens a streaming item, so incoming agent.text
+          // deltas APPEND to it instead of creating a new bubble.
+          transcript = reduce(transcript, { type: "text", content: String(currentTurn.text) });
           currentAgentStatus = "streaming";
         } else if (currentTurn?.busy) {
           // Agent is in an active turn (e.g., executing tools) but not streaming
@@ -1408,22 +1075,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
       if (get().activeKey !== key) return;
 
-      // Set up streaming state so incoming events APPEND to the currentTurn
-      // message instead of creating a new one
-      if (currentTurnMsgId) {
-        streamingMsgId = currentTurnMsgId;
-        streamingText = currentTurnText;
-      }
+      // Install the freshly folded canonical transcript for this session
+      // and project it wholesale (fresh load replaces the message list).
+      const t = resetTranscript(key, transcript);
+      const messages = deriveSessionMessages(transcript, t.overlays);
 
       // Persist to localStorage only after history loaded successfully
       try { localStorage.setItem("hawky:activeKey", key); } catch {}
 
       // Ensure active session is in sidebar + restore cached permission/ask_user
-      // Seed historyInputCache from this page's parse so a later
-      // loadOlderMessages can still re-synthesize metadata for legacy
-      // tool_uses that don't have a matching result in any loaded page.
-      const seededInputCache: SessionState["historyInputCache"] = {};
-      for (const [id, v] of initialInputCache) seededInputCache[id] = v;
       set((state) => {
         // task.list resolves via a fire-and-forget at the top of
         // switchSession (in parallel with session.history), so we
@@ -1447,7 +1107,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           taskSummary: state.taskSummary,
           historyMeta,
           orphanToolResults: initialOrphans,
-          historyInputCache: seededInputCache,
         };
         const exists = state.sessions.some((s) => s.key === key);
         if (exists) return base;
@@ -1472,7 +1131,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Clear persisted key on failure so refresh falls back to web:general
       try { localStorage.removeItem("hawky:activeKey"); } catch {}
       if (get().activeKey === key) {
-        set({ loading: false, messages: [], historyMeta: null, orphanToolResults: {}, historyInputCache: {}, taskSummary: null });
+        resetTranscript(key, initialState());
+        set({ loading: false, messages: [], historyMeta: null, orphanToolResults: {}, taskSummary: null });
       }
     }
   },
@@ -1500,41 +1160,98 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (get().activeKey !== key) return;
 
       const rawOlder = result?.messages ?? [];
-      const { messages: olderMessages, orphanResults: olderOrphans, inputCache: olderInputCache } =
-        parseHistoryMessages(rawOlder);
+      // Fold the older page through the shared reducer. Its cursor carries
+      // any NEW orphan tool_results (pairs split across an even-older page).
+      // The namespace (this page's beforeIndex cursor) keeps ids of LEGACY
+      // index-less rows unique across folds — the ordinal fallback is only
+      // page-unique, and this page is prepended into the same items array
+      // as the initial window (duplicate ids = duplicate React keys).
+      const olderState = fromHistory(rawOlder as HistoryMessage[], {
+        idNamespace: `p${meta.oldestLoadedIndex}`,
+      });
       // New cursor = index of the oldest message we just received
       // (rawOlder[0] since the backend returns older→newer order within a page)
       const newOldestIndex =
         rawOlder.length > 0 ? rawOlder[0].index ?? meta.oldestLoadedIndex : meta.oldestLoadedIndex;
 
-      // Cross-link: fill any empty tool cards in this older chunk using
+      // Cross-link: fill unresolved tool cards in this older chunk using
       // tool_results we stashed earlier as orphans when parsing newer chunks.
-      // The inputCache from the same parse pass lets us synthesize diff
-      // metadata for successfully-stitched orphan results.
-      // Matched keys are consumed so they don't linger in state.
+      // Matched keys are consumed so they don't linger in state. Diff
+      // metadata needs no explicit re-synthesis here — the selector derives
+      // it from the preserved input whenever a history tool shows success,
+      // and derives NONE on error (so a failed edit never keeps a fake diff).
       const remainingOrphans = { ...get().orphanToolResults };
-      applyOrphanResultsToOlder(olderMessages, remainingOrphans, olderInputCache);
+      let olderItems: TranscriptItem[] = olderState.items.map((item) => {
+        if (item.kind !== "tool") return item;
+        if (item.meta?.resultContent !== undefined || item.output.length > 0) return item;
+        const orphan = remainingOrphans[item.toolUseId];
+        if (!orphan) return item;
+        delete remainingOrphans[item.toolUseId];
+        return {
+          ...item,
+          status: orphan.isError ? ("error" as const) : ("ok" as const),
+          meta: { ...item.meta, resultContent: orphan.content, isError: orphan.isError },
+        };
+      });
       // Merge any new orphans from this chunk for future (even-older) loads.
-      const mergedOrphans = { ...remainingOrphans, ...olderOrphans };
+      const mergedOrphans = { ...remainingOrphans, ...olderState.cursor.orphanToolResults };
 
-      // Merge inputCaches across all loaded pages, then re-run the
-      // reclassifier on the FULL merged window. Without this pass, a
-      // legacy tool_use at the end of the older page (whose
-      // continuation lives in the already-loaded newer page) stays
-      // "running" forever — parseHistoryMessages saw it as trailing
-      // in isolation, but the combined transcript proves otherwise.
-      const mergedInputCacheMap = new Map<string, { name: string; input: Record<string, unknown> }>();
-      for (const [id, v] of Object.entries(get().historyInputCache)) mergedInputCacheMap.set(id, v);
-      for (const [id, v] of olderInputCache) mergedInputCacheMap.set(id, v);
-      const mergedMessages = [...olderMessages, ...get().messages];
-      reclassifyLegacyRunningTools(mergedMessages, mergedInputCacheMap);
-      const mergedInputCache: SessionState["historyInputCache"] = {};
-      for (const [id, v] of mergedInputCacheMap) mergedInputCache[id] = v;
+      // Re-run the legacy-running-tool reclassification on the FULL merged
+      // window. Without this pass, a legacy tool_use at the end of the older
+      // page (whose continuation lives in the already-loaded newer page)
+      // stays "running" forever — the page-local fold saw it as trailing in
+      // isolation, but the combined transcript proves otherwise. Same rules
+      // as the core's fromHistory pass: only timestamped (historical) tools
+      // are touched — live-streamed tools have no timestamp and keep their
+      // spinner (Codex P1 guard).
+      const t = getTranscript(key);
+      const prevState = t.state;
+      let trailingTs: string | undefined;
+      const currentMsgs = get().messages;
+      for (let i = currentMsgs.length - 1; i >= 0 && trailingTs === undefined; i--) {
+        trailingTs = currentMsgs[i].timestamp;
+      }
+      for (let i = olderItems.length - 1; i >= 0 && trailingTs === undefined; i--) {
+        trailingTs = olderItems[i].timestamp;
+      }
+      const reclassify = (item: TranscriptItem): TranscriptItem =>
+        item.kind === "tool" &&
+        item.status === "running" &&
+        item.timestamp !== undefined &&
+        item.timestamp !== trailingTs
+          ? { ...item, status: "ok" as const }
+          : item;
+      let currentItems = prevState.items;
+      if (trailingTs !== undefined) {
+        olderItems = olderItems.map(reclassify);
+        // reclassify preserves object identity for untouched items, which is
+        // exactly what syncMessages needs to update only the flipped rows.
+        currentItems = currentItems.map(reclassify);
+      }
+
+      // Install the merged canonical state, then project: current-window
+      // rows changed by the reclassify pass update in place; the older page
+      // is prepended wholesale.
+      const projectedBase = t.projected;
+      t.state = {
+        items: [...olderItems, ...currentItems],
+        cursor: { ...prevState.cursor, orphanToolResults: mergedOrphans },
+      };
+      t.projected = t.state;
+      const updatedCurrent = syncMessages(
+        currentMsgs,
+        projectedBase,
+        { items: currentItems, cursor: prevState.cursor },
+        t.overlays,
+      );
+      const olderMessages = olderItems
+        .filter(shouldDisplay)
+        .map((item) => toSessionMessage(item, t.overlays[item.id]));
+      const mergedMessages = [...olderMessages, ...updatedCurrent];
 
       set((state) => ({
         messages: mergedMessages,
         orphanToolResults: mergedOrphans,
-        historyInputCache: mergedInputCache,
         historyMeta: state.historyMeta
           ? {
               oldestLoadedIndex: newOldestIndex,
@@ -1592,9 +1309,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const { rpc } = useSocketStore.getState();
     const activeKey = get().activeKey;
 
-    // A new turn is starting — clear any stale cancel flag so this turn's
-    // first error (if any) is never accidentally suppressed.
-    recentCancelBySession.delete(activeKey);
+    // A new turn is starting — clear any stale cancel flag in the canonical
+    // cursor so this turn's first error (if any) is never suppressed.
+    const t = getTranscript(activeKey);
+    if (t.state.cursor.cancelPending) {
+      t.state = { items: t.state.items, cursor: { ...t.state.cursor, cancelPending: false } };
+    }
 
     // Clear unread for this session (user is actively engaged)
     const clearedUnread = { ...get().unreadCounts };
@@ -1608,23 +1328,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Note: no echo dedup needed — the gateway excludes this connection's
     // connId from the `user.message` broadcast, so only sibling clients
     // receive it. See src/gateway/agent-methods.ts (chat.send).
-    const userMsgId = msgId();
-    set((state) => ({
-      messages: [...state.messages, {
-        id: userMsgId,
-        role: "user" as const,
-        content: text,
-        timestamp: new Date().toISOString(),
-        images: attachments,
-        documents: documents?.map((d) => ({
-          media_type: d.media_type,
-          filename: d.filename ?? "document",
-          sizeBytes: Math.ceil(d.base64.length * 3 / 4),
-        })),
-      }],
-      agentStatus: "thinking" as const,
-      statusLabel: "Thinking...",
-    }));
+    const meta: Record<string, unknown> = {};
+    if (attachments) meta.images = attachments;
+    if (documents) {
+      meta.documents = documents.map((d) => ({
+        media_type: d.media_type,
+        filename: d.filename ?? "document",
+        sizeBytes: Math.ceil(d.base64.length * 3 / 4),
+      }));
+    }
+    t.state = appendUserMessage(t.state, text, {
+      timestamp: new Date().toISOString(),
+      meta: Object.keys(meta).length > 0 ? meta : undefined,
+    });
+    projectTranscript(activeKey);
+    set({ agentStatus: "thinking", statusLabel: "Thinking..." });
 
     // Fire-and-forget: don't await the RPC response. The chat.send RPC blocks
     // until the agent finishes, which can exceed the 30s RPC timeout for long
@@ -1642,14 +1360,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // If we're already streaming, the error is just the RPC timeout —
       // the actual response is arriving via events.
       if (get().activeKey === activeKey && get().agentStatus === "thinking") {
-        set((state) => ({
-          agentStatus: "idle" as const,
-          messages: [...state.messages, {
-            id: msgId(),
-            role: "system" as const,
-            content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-          }],
-        }));
+        const tc = getTranscript(activeKey);
+        tc.state = reduce(tc.state, {
+          type: "system_message",
+          content: `Error: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        projectTranscript(activeKey);
+        set({ agentStatus: "idle" });
       }
     });
   },
@@ -1669,6 +1386,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (cutAt < 0) return {};
       return { messages: state.messages.slice(0, cutAt) };
     });
+    // Mirror the truncation into the canonical transcript so future events
+    // and projections stay consistent with the view.
+    {
+      const t = getTranscript(activeKey);
+      const cutAt = t.state.items.findIndex(
+        (it) => it.kind === "message" && typeof it.backendIndex === "number" && it.backendIndex >= messageIndex,
+      );
+      if (cutAt >= 0) {
+        const items = t.state.items.slice(0, cutAt);
+        const keptIds = new Set(items.map((it) => it.id));
+        const toolUseIdToItem: Record<string, string> = {};
+        for (const [tuId, itemId] of Object.entries(t.state.cursor.toolUseIdToItem)) {
+          if (keptIds.has(itemId)) toolUseIdToItem[tuId] = itemId;
+        }
+        const { streamingItemId, replaceTargetItemId } = t.state.cursor;
+        t.state = {
+          items,
+          cursor: {
+            ...t.state.cursor,
+            toolUseIdToItem,
+            streamingItemId: streamingItemId && keptIds.has(streamingItemId) ? streamingItemId : null,
+            replaceTargetItemId:
+              replaceTargetItemId && keptIds.has(replaceTargetItemId) ? replaceTargetItemId : null,
+          },
+        };
+        t.projected = t.state; // the view was truncated in the same step
+      }
+    }
 
     // 2. Ask the gateway to do the authoritative rewind. The backend
     //    broadcasts session.rewound to sibling clients (excluding us,
@@ -1679,13 +1424,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Rewind failed server-side — re-hydrate local view from the
       // authoritative history so we're not out of sync.
       await get().switchSession(activeKey);
-      set((state) => ({
-        messages: [...state.messages, {
-          id: msgId(),
-          role: "system" as const,
-          content: `Rewind failed: ${err instanceof Error ? err.message : String(err)}`,
-        }],
-      }));
+      const t = getTranscript(activeKey);
+      t.state = reduce(t.state, {
+        type: "system_message",
+        content: `Rewind failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      projectTranscript(activeKey);
       return;
     }
 
@@ -1739,16 +1483,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const newKey = payload?.newKey as string | undefined;
       if (!oldKey || !newKey || oldKey === newKey) return;
 
-      // Module-level streaming map (outside React state)
-      const prevStream = sessionStreaming.get(oldKey);
-      if (prevStream) {
-        sessionStreaming.set(newKey, prevStream);
-        sessionStreaming.delete(oldKey);
-      }
-      const prevCancelled = recentCancelBySession.get(oldKey);
-      if (prevCancelled !== undefined) {
-        recentCancelBySession.set(newKey, prevCancelled);
-        recentCancelBySession.delete(oldKey);
+      // Module-level canonical transcript map (outside React state)
+      const prevTranscript = sessionTranscripts.get(oldKey);
+      if (prevTranscript) {
+        sessionTranscripts.set(newKey, prevTranscript);
+        sessionTranscripts.delete(oldKey);
       }
 
       set((state) => {
@@ -1866,194 +1605,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         persistUnread(get());
       }
 
-      const bgStreaming = getStreaming(eventSessionKey);
+      // Fold the stream event into the background session's canonical
+      // transcript and project into its cache entry. The SAME reducer serves
+      // active and background sessions — only the projection target differs.
+      const bgType = event.startsWith("agent.") ? event.slice(6) : null;
+      const bgStreamEv = bgType ? toStreamEvent(bgType, payload) : null;
+      if (bgStreamEv) {
+        const { createdStreaming } = applyStreamEvent(eventSessionKey, bgStreamEv);
 
-      if (event === "agent.text" && payload?.content) {
-        const content = payload.content as string;
-        const isReplacement = payload.replace === true;
-        const replacementTargetId = isReplacement && !bgStreaming.streamingMsgId
-          ? bgStreaming.replaceTargetMsgId
-          : null;
-
-        if (replacementTargetId) {
-          bgStreaming.streamingMsgId = replacementTargetId;
-          bgStreaming.replaceTargetMsgId = null;
-        }
-
-        // Accumulate in memory (not React state) — no deltas lost
-        bgStreaming.streamingText = isReplacement
-          ? content
-          : bgStreaming.streamingText + content;
-
-        // Create streaming message ID if first delta
-        if (!bgStreaming.streamingMsgId) {
-          bgStreaming.replaceTargetMsgId = null;
-          bgStreaming.streamingMsgId = msgId();
-          const cached = get().sessionCache[eventSessionKey];
-          if (cached) {
-            set((state) => ({
-              sessionCache: {
-                ...state.sessionCache,
-                [eventSessionKey]: {
-                  ...cached,
-                  agentStatus: "streaming",
-                  messages: [...cached.messages, {
-                    id: bgStreaming.streamingMsgId!,
-                    role: "assistant" as const,
-                    content: bgStreaming.streamingText,
-                  }],
-                },
-              },
-            }));
-          }
-        }
-
-        if (isReplacement) {
-          if (bgStreaming.flushTimer) {
-            clearTimeout(bgStreaming.flushTimer);
-            bgStreaming.flushTimer = null;
-          }
-          const id = bgStreaming.streamingMsgId;
-          const text = bgStreaming.streamingText;
-          set((state) => {
-            const cached = state.sessionCache[eventSessionKey];
-            if (!cached || !id) return {};
-            return {
-              sessionCache: {
-                ...state.sessionCache,
-                [eventSessionKey]: {
-                  ...cached,
-                  messages: cached.messages.map((m) =>
-                    m.id === id ? { ...m, content: text } : m,
-                  ),
-                },
-              },
-            };
-          });
-          return;
-        }
-
-        // Throttled flush to cache (same 50ms interval as active session)
-        if (!bgStreaming.flushTimer) {
-          bgStreaming.flushTimer = setTimeout(() => {
-            bgStreaming.flushTimer = null;
-            const cached = get().sessionCache[eventSessionKey];
-            if (cached && bgStreaming.streamingMsgId) {
-              const id = bgStreaming.streamingMsgId;
-              const text = bgStreaming.streamingText;
-              set((state) => ({
-                sessionCache: {
-                  ...state.sessionCache,
-                  [eventSessionKey]: {
-                    ...cached,
-                    messages: cached.messages.map((m) =>
-                      m.id === id ? { ...m, content: text } : m,
-                    ),
-                  },
-                },
-              }));
-            }
-          }, FLUSH_INTERVAL_MS);
-        }
-      }
-
-      if (event === "agent.tool_use_start") {
-        const cached = get().sessionCache[eventSessionKey];
-        const baseMessages = cached?.messages ?? [];
-        let messages = baseMessages;
-
-        if (bgStreaming.streamingMsgId) {
-          const id = bgStreaming.streamingMsgId;
-          const text = bgStreaming.streamingText;
-          if (bgStreaming.flushTimer) {
-            clearTimeout(bgStreaming.flushTimer);
-            bgStreaming.flushTimer = null;
-          }
-          messages = messages.map((m) => m.id === id ? { ...m, content: text } : m);
-          bgStreaming.replaceTargetMsgId = id;
-          bgStreaming.streamingMsgId = null;
-          bgStreaming.streamingText = "";
-        }
-
-        const toolUseId = payload.tool_use_id ?? "";
-        const toolId = msgId();
-        bgStreaming.toolMsgMap.set(toolUseId, toolId);
-        const input = payload.input ?? {};
-        const tName = payload.name ?? "tool";
-        set((state) => ({
-          sessionCache: {
-            ...state.sessionCache,
-            [eventSessionKey]: {
-              ...(cached ?? EMPTY_PER_SESSION_CACHE),
-              agentStatus: "thinking",
-              statusLabel: toolStatusLabel(tName, input as Record<string, unknown>),
-              messages: [...messages, {
-                id: toolId,
-                role: "tool" as const,
-                content: "",
-                tool: {
-                  toolUseId,
-                  name: tName,
-                  inputPreview: formatToolPreview(tName, input),
-                  fullInput: buildFullInput(tName, input),
-                  status: "running",
-                  output: "",
-                  isError: false,
-                  startedAt: Date.now(),
-                  batchId: payload.batchId,
-                },
-              }],
-            },
-          },
-        }));
-      }
-
-      if (event === "agent.tool_streaming") {
-        const streamToolId = bgStreaming.toolMsgMap.get(payload.tool_use_id ?? "");
-        if (streamToolId) {
-          const cached = get().sessionCache[eventSessionKey];
-          const line = payload.content ?? "";
+        // Status side effects mirror the old background handlers.
+        if (createdStreaming) {
           set((state) => ({
             sessionCache: {
               ...state.sessionCache,
               [eventSessionKey]: {
-                ...(cached ?? EMPTY_PER_SESSION_CACHE),
-                messages: (cached?.messages ?? []).map((m) =>
-                  m.id === streamToolId && m.tool
-                    ? { ...m, tool: { ...m.tool, output: m.tool.output + line + "\n" } }
-                    : m,
-                ),
+                ...(state.sessionCache[eventSessionKey] ?? EMPTY_PER_SESSION_CACHE),
+                agentStatus: "streaming",
               },
             },
           }));
         }
-      }
-
-      if (event === "agent.tool_result") {
-        const resultToolUseId = payload.tool_use_id ?? "";
-        const resultMsgId = bgStreaming.toolMsgMap.get(resultToolUseId);
-        if (resultMsgId) {
-          bgStreaming.toolMsgMap.delete(resultToolUseId);
-          const cached = get().sessionCache[eventSessionKey];
+        if (bgStreamEv.type === "tool_use_start") {
           set((state) => ({
             sessionCache: {
               ...state.sessionCache,
               [eventSessionKey]: {
-                ...(cached ?? EMPTY_PER_SESSION_CACHE),
-                messages: (cached?.messages ?? []).map((m) =>
-                  m.id === resultMsgId && m.tool
-                    ? {
-                        ...m,
-                        tool: {
-                          ...m.tool,
-                          status: payload.is_error ? "error" : "success",
-                          output: payload.content ?? m.tool.output,
-                          isError: payload.is_error ?? false,
-                          metadata: payload.metadata,
-                        },
-                      }
-                    : m,
-                ),
+                ...(state.sessionCache[eventSessionKey] ?? EMPTY_PER_SESSION_CACHE),
+                agentStatus: "thinking",
+                statusLabel: toolStatusLabel(bgStreamEv.name, bgStreamEv.input),
               },
             },
           }));
@@ -2061,39 +1640,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
 
       if (event === "agent.done") {
-        // Final flush of any remaining text
-        const cached = get().sessionCache[eventSessionKey];
-        if (cached && bgStreaming.streamingMsgId) {
-          const id = bgStreaming.streamingMsgId;
-          const text = bgStreaming.streamingText;
-          if (bgStreaming.flushTimer) {
-            clearTimeout(bgStreaming.flushTimer);
-            bgStreaming.flushTimer = null;
-          }
-          set((state) => ({
-            sessionCache: {
-              ...state.sessionCache,
-              [eventSessionKey]: {
-                ...cached,
-                agentStatus: "idle",
-                messages: cached.messages.map((m) =>
-                  m.id === id ? { ...m, content: text } : m,
-                ),
-              },
+        set((state) => ({
+          sessionCache: {
+            ...state.sessionCache,
+            [eventSessionKey]: {
+              ...(state.sessionCache[eventSessionKey] ?? EMPTY_PER_SESSION_CACHE),
+              agentStatus: "idle",
             },
-          }));
-        } else if (cached) {
-          set((state) => ({
-            sessionCache: {
-              ...state.sessionCache,
-              [eventSessionKey]: { ...cached, agentStatus: "idle" },
-            },
-          }));
-        }
-        bgStreaming.streamingMsgId = null;
-        bgStreaming.streamingText = "";
-        bgStreaming.replaceTargetMsgId = null;
-        bgStreaming.toolMsgMap.clear();
+          },
+        }));
 
         // Mirror usage onto the sidebar entry so the context ring updates
         // live even when the user is looking at a different channel.
@@ -2129,31 +1684,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         } catch {}
       }
 
-      // Background user.message → append as user bubble in that session's cache.
-      // The gateway excludes the sender from this broadcast, so anything we
-      // receive here comes from a sibling client (other tab / iPhone / TUI).
-      // Append unconditionally — no dedup needed.
+      // Background user.message → append as user bubble in that session's
+      // canonical transcript (projected into its cache entry). The gateway
+      // excludes the sender from this broadcast, so anything we receive here
+      // comes from a sibling client (other tab / iPhone / TUI). Append
+      // unconditionally — no dedup needed.
       if (event === "user.message" && typeof payload?.text === "string") {
-        const cached = get().sessionCache[eventSessionKey];
-        const baseMessages = cached?.messages ?? [];
-        const newMsg: SessionMessage = {
-          id: msgId(),
-          role: "user",
-          content: payload.text,
+        const t = getTranscript(eventSessionKey);
+        const att = extractBroadcastAttachments(payload);
+        const meta: Record<string, unknown> = {};
+        if (att.images) meta.images = att.images;
+        if (att.documents) meta.documents = att.documents;
+        t.state = appendUserMessage(t.state, payload.text, {
           timestamp: payload.timestamp ?? new Date().toISOString(),
-          ...extractBroadcastAttachments(payload),
-        };
+          meta: Object.keys(meta).length > 0 ? meta : undefined,
+        });
         const newCounts = { ...get().unreadCounts, [eventSessionKey]: (get().unreadCounts[eventSessionKey] ?? 0) + 1 };
-        set((state) => ({
-          unreadCounts: newCounts,
-          sessionCache: {
-            ...state.sessionCache,
-            [eventSessionKey]: {
-              ...(cached ?? EMPTY_PER_SESSION_CACHE),
-              messages: [...baseMessages, newMsg],
-            },
-          },
-        }));
+        set({ unreadCounts: newCounts });
+        projectTranscript(eventSessionKey);
         persistUnread(get());
         applyAppBadge(newCounts);
         return;
@@ -2240,15 +1788,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Active-session user.message broadcast — always from a sibling client
     // (gateway excludes the sender's connId), so append unconditionally.
     if (event === "user.message" && typeof payload?.text === "string") {
-      set((state) => ({
-        messages: [...state.messages, {
-          id: msgId(),
-          role: "user" as const,
-          content: payload.text,
-          timestamp: payload.timestamp ?? new Date().toISOString(),
-          ...extractBroadcastAttachments(payload),
-        }],
-      }));
+      const t = getTranscript(activeKey);
+      const att = extractBroadcastAttachments(payload);
+      const meta: Record<string, unknown> = {};
+      if (att.images) meta.images = att.images;
+      if (att.documents) meta.documents = att.documents;
+      t.state = appendUserMessage(t.state, payload.text, {
+        timestamp: payload.timestamp ?? new Date().toISOString(),
+        meta: Object.keys(meta).length > 0 ? meta : undefined,
+      });
+      projectTranscript(activeKey);
       return;
     }
 
@@ -2298,19 +1847,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     const type = event.slice(6); // Remove "agent." prefix
 
+    // Fold the stream event into the active session's canonical transcript.
+    // ALL message-list transitions (streaming text, replace, tool cards,
+    // results, finalize-on-done, cancel/error wording, abort-after-cancel
+    // suppression, user_committed stamping) live in the shared reducer —
+    // the switch below keeps only the web side effects: status labels,
+    // usage bookkeeping, dialogs, unread badges.
+    const streamEv = toStreamEvent(type, payload);
+    if (streamEv) applyStreamEvent(activeKey, streamEv);
+
     switch (type) {
       case "user_committed": {
-        // Backend just appended the user message to history at this index.
-        // Find the optimistic user bubble we added in sendMessage (last
-        // user-role message without backendIndex) and stamp it. This is
-        // what makes the edit pencil appear on the just-sent message
-        // without needing a session.history refetch.
+        // The canonical state was stamped by the reducer, but the visible
+        // bubble can exist only in the view (optimistic sends after a test
+        // or cache restore) — keep the old message-level stamp so the edit
+        // pencil appears either way, without a session.history refetch.
+        // MUST mirror the reducer's scan exactly (FIFO, skipping
+        // history-derived `msg-h*` rows): commits arrive in send order, and
+        // a diverging view-level stamp would hand edit/rewindAndSend the
+        // wrong backendIndex until the next projection overwrites it.
         const idx = payload?.message_index;
         if (typeof idx !== "number") break;
         set((state) => {
           const msgs = [...state.messages];
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            if (msgs[i].role === "user" && msgs[i].backendIndex === undefined) {
+          for (let i = 0; i < msgs.length; i++) {
+            if (
+              msgs[i].role === "user" &&
+              msgs[i].backendIndex === undefined &&
+              !msgs[i].id.startsWith("msg-h")
+            ) {
               msgs[i] = { ...msgs[i], backendIndex: idx };
               break;
             }
@@ -2321,155 +1886,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
 
       case "text": {
-        const content = payload.content ?? "";
-        const isReplacement = payload.replace === true;
-        const replacementTargetId = isReplacement && !streamingMsgId
-          ? streamingReplaceTargetMsgId
-          : null;
-
-        if (replacementTargetId) {
-          streamingMsgId = replacementTargetId;
-          streamingReplaceTargetMsgId = null;
-        }
-
-        if (!streamingMsgId) {
-          streamingReplaceTargetMsgId = null;
-          // First text chunk — create a new assistant message
-          const id = msgId();
-          streamingMsgId = id;
-          streamingText = content;
-          set((state) => ({
-            agentStatus: "streaming",
-            statusLabel: "Generating...",
-            messages: [...state.messages, {
-              id,
-              role: "assistant",
-              content: streamingText,
-            }],
-          }));
-        } else if (isReplacement) {
-          streamingText = content;
-          const id = streamingMsgId;
-          set((state) => ({
-            agentStatus: "streaming",
-            statusLabel: "Generating...",
-            messages: state.messages.map((m) =>
-              m.id === id ? { ...m, content: streamingText } : m,
-            ),
-          }));
-        } else {
-          // Append to existing streaming message (throttled)
-          streamingText += content;
-          scheduleFlush(set);
+        // Set the status only on the transition INTO streaming — the old
+        // handler routed append deltas exclusively through the throttled
+        // flush, and an unconditional set() here would create a new store
+        // state (and notify every subscriber) on EVERY delta.
+        const st = get();
+        if (st.agentStatus !== "streaming" || st.statusLabel !== "Generating...") {
+          set({ agentStatus: "streaming", statusLabel: "Generating..." });
         }
         break;
       }
 
       case "tool_use_start": {
-        // Commit any in-flight streaming text
-        if (streamingMsgId) {
-          const id = streamingMsgId;
-          const text = streamingText;
-          set((state) => ({
-            messages: state.messages.map((m) =>
-              m.id === id ? { ...m, content: text } : m,
-            ),
-          }));
-          streamingReplaceTargetMsgId = id;
-          streamingMsgId = null;
-          streamingText = "";
-        }
-
-        // Add tool card (tracked by tool_use_id for parallel tool support)
-        const toolId = msgId();
-        const toolUseId = payload.tool_use_id ?? "";
-        toolMsgMap.set(toolUseId, toolId);
-        const input = payload.input ?? {};
+        const input = (typeof payload.input === "object" && payload.input !== null
+          ? payload.input
+          : {}) as Record<string, unknown>;
         const tName = payload.name ?? "tool";
-        set((state) => ({
-          agentStatus: "thinking",
-          statusLabel: toolStatusLabel(tName, input as Record<string, unknown>),
-          messages: [...state.messages, {
-            id: toolId,
-            role: "tool",
-            content: "",
-            tool: {
-              toolUseId,
-              name: tName,
-              inputPreview: formatToolPreview(tName, input),
-              fullInput: buildFullInput(tName, input),
-              status: "running",
-              output: "",
-              isError: false,
-              startedAt: Date.now(),
-              batchId: payload.batchId,
-            },
-          }],
-        }));
-        break;
-      }
-
-      case "tool_streaming": {
-        const streamToolId = toolMsgMap.get(payload.tool_use_id ?? "");
-        if (!streamToolId) break;
-        const line = payload.content ?? "";
-        set((state) => ({
-          messages: state.messages.map((m) =>
-            m.id === streamToolId && m.tool
-              ? { ...m, tool: { ...m.tool, output: m.tool.output + line + "\n" } }
-              : m,
-          ),
-        }));
-        break;
-      }
-
-      case "tool_result": {
-        const resultToolUseId = payload.tool_use_id ?? "";
-        const resultMsgId = toolMsgMap.get(resultToolUseId);
-        if (!resultMsgId) break;
-        toolMsgMap.delete(resultToolUseId);
-        set((state) => ({
-          messages: state.messages.map((m) =>
-            m.id === resultMsgId && m.tool
-              ? {
-                  ...m,
-                  tool: {
-                    ...m.tool,
-                    status: payload.is_error ? "error" : "success",
-                    output: payload.content ?? m.tool.output,
-                    isError: payload.is_error ?? false,
-                    metadata: payload.metadata,
-                  },
-                }
-              : m,
-          ),
-        }));
+        set({ agentStatus: "thinking", statusLabel: toolStatusLabel(tName, input) });
         break;
       }
 
       case "done": {
-        // Normal turn completion — clear any stale cancel flag so the
-        // next turn's errors aren't accidentally suppressed.
-        recentCancelBySession.delete(eventSessionKey ?? activeKey);
-        toolMsgMap.clear();
-        streamingReplaceTargetMsgId = null;
-        // Finalize any remaining streaming text
-        if (streamingMsgId) {
-          const id = streamingMsgId;
-          const text = streamingText;
-          set((state) => ({
-            messages: state.messages.map((m) =>
-              m.id === id ? { ...m, content: text } : m,
-            ),
-          }));
-          streamingMsgId = null;
-          streamingText = "";
-        }
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-
         const usage = payload?.usage;
         const doneCtxPercent = usage?.context_usage_percent ?? null;
         // Preserve all four billed buckets so the footer can show total
@@ -2537,76 +1974,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
 
       case "error": {
-        streamingMsgId = null;
-        streamingText = "";
-        streamingReplaceTargetMsgId = null;
-        // Suppress the follow-on abort error that the backend emits right
-        // after a user-initiated cancel (otherwise the user sees "Generation
-        // stopped" + "Error: Request aborted by user" together). Two gates:
-        //   1. We just saw a cancel for this session (recent-cancel flag).
-        //   2. The error content matches the known abort sentinel.
-        // Either way, clear the flag — so a non-abort error after cancel
-        // still surfaces, and a stale flag can't leak into the next turn.
-        const cancelKey = eventSessionKey ?? activeKey;
-        const hadRecentCancel = recentCancelBySession.get(cancelKey) === true;
-        recentCancelBySession.delete(cancelKey);
-        const suppress = hadRecentCancel && isUserAbortError(payload.content);
-        set((state) => ({
-          agentStatus: "idle",
-          pendingPermission: null,
-          pendingAskUser: null,
-          messages: suppress
-            ? state.messages
-            : [...state.messages, {
-                id: msgId(),
-                role: "system",
-                content: `Error: ${payload.content ?? "Unknown error"}`,
-              }],
-        }));
+        // The reducer already handled the transcript side, including the
+        // sentinel-gated suppression of the follow-on abort error the
+        // backend emits right after a user-initiated cancel (cancelPending
+        // in the canonical cursor replaces the old recent-cancel flag).
+        set({ agentStatus: "idle", pendingPermission: null, pendingAskUser: null });
         break;
       }
 
       case "cancel": {
-        // Mark this session as having just cancelled so the follow-on
-        // abort-error from the backend (if any) can be suppressed by the
-        // error handler. Consumed on next error event, so unrelated errors
-        // later still surface.
-        recentCancelBySession.set(eventSessionKey ?? activeKey, true);
-        // Finalize streaming text (without appending "[cancelled]" — status indicator handles it)
-        if (streamingMsgId) {
-          const id = streamingMsgId;
-          const text = streamingText;
-          set((state) => ({
-            messages: state.messages.map((m) =>
-              m.id === id ? { ...m, content: text } : m,
-            ),
-          }));
-        }
-        streamingMsgId = null;
-        streamingText = "";
-        streamingReplaceTargetMsgId = null;
-        // Add a system-level cancelled indicator
-        set((state) => ({
-          agentStatus: "idle",
-          pendingPermission: null,
-          pendingAskUser: null,
-          messages: [...state.messages, {
-            id: msgId(),
-            role: "system",
-            content: "■ Generation stopped.",
-          }],
-        }));
-        break;
-      }
-
-      case "system_message": {
-        set((state) => ({
-          messages: [...state.messages, {
-            id: msgId(),
-            role: "system",
-            content: payload.content ?? "",
-          }],
-        }));
+        // Reducer: finalizes streaming text (no "[cancelled]" suffix) and
+        // emits the marker item the selector renders as "■ Generation
+        // stopped."; it also arms cancelPending for the error suppression.
+        set({ agentStatus: "idle", pendingPermission: null, pendingAskUser: null });
         break;
       }
 
@@ -2674,6 +2054,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Remove from visible list. Drop the cache entry too so a later
       // reactivation doesn't seed its chip from stale state (same
       // reasoning as deleteSession).
+      sessionTranscripts.delete(key);
       const nextCache = { ...get().sessionCache };
       delete nextCache[key];
       set((state) => ({
@@ -2708,6 +2089,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Also drop the cache entry so a future session with the same
       // key can't inherit the deleted session's taskSummary / state
       // during the switchSession seed-from-cache step.
+      sessionTranscripts.delete(key);
       const nextCache = { ...get().sessionCache };
       delete nextCache[key];
       set((state) => ({
@@ -2781,13 +2163,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   addSystemMessage: (text: string, command?: string) => {
-    set((state) => ({
-      messages: [...state.messages, {
-        id: msgId(),
-        role: "system" as const,
-        content: text,
-        ...(command ? { command } : {}),
-      }],
-    }));
+    const key = get().activeKey;
+    const t = getTranscript(key);
+    t.state = reduce(t.state, { type: "system_message", content: text });
+    if (command) {
+      // The slash-command chip is web-only presentation — overlay, not core.
+      const created = t.state.items[t.state.items.length - 1];
+      if (created) t.overlays[created.id] = { ...t.overlays[created.id], command };
+    }
+    projectTranscript(key);
   },
 }));
