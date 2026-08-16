@@ -769,6 +769,235 @@ export interface HawkyConfig {
       token?: string;
     };
   };
+  /** Voiceprint identity configuration. Disabled unless explicitly enabled. */
+  voiceprint?: {
+    /**
+     * A4 biometric retention window (BIPA/GDPR). Voiceprint data (templates +
+     * derived states) older than this window is destroyed by
+     * `identity.voiceprint.purge_expired`. Default 365 days. See the PUBLISHED
+     * DESTRUCTION SCHEDULE in `identity/voiceprint/consent-ledger.ts`. Provide
+     * `retention_ms` to override in milliseconds; otherwise `retention_days`.
+     */
+    retention_days?: number;
+    retention_ms?: number;
+    /**
+     * A7 privacy-safe scoring-DECISION telemetry (distinct from the A4 audit log).
+     * OFF by default: when `enabled` is not true, scoring records NOTHING and
+     * behaves exactly as before. When enabled, one telemetry record per scored turn
+     * (scalar score + decision + threshold + model, keyed by an OPAQUE session hash)
+     * is persisted to `sink_path` (default: state/voiceprint/score-telemetry.json
+     * under the config root) so operators can watch decision drift and build the
+     * score distribution for threshold calibration. NEVER stores a vector/audio/key.
+     */
+    telemetry?: {
+      enabled?: boolean;
+      sink_path?: string;
+    };
+    /**
+     * A9 reviewed voiceprint -> memory-candidate BRIDGE. OFF by default. When
+     * `enabled` is not true, memory distillation and the person snapshot behave
+     * BYTE-FOR-BYTE as before: nothing consumes voiceprint identity signals. When
+     * enabled, the opt-in gateway RPC `identity.voiceprint.bridge_memory_candidate`
+     * maps a reviewed `VoiceprintTurnRecords` into a single, fail-closed
+     * `MemoryCandidate` (durable ONLY for a strong, consented, confirmed owner turn;
+     * quarantined otherwise). It carries scalars + ids + tags only — never a
+     * vector/audio/key. The bridge is a PURE mapping; enabling the flag does NOT
+     * change the default distillation path.
+     */
+    memory_bridge?: {
+      enabled?: boolean;
+    };
+    live_scoring?: {
+      enabled?: boolean;
+      /**
+       * Local/dev opt-in ONLY. When true AND `sidecar.command` is omitted, the
+       * gateway defaults the embedding sidecar to the bundled Python reference
+       * backend (`services/voiceprint/embed.py` with VOICEPRINT_BACKEND=reference).
+       * The reference backend is deterministic but NON-DISCRIMINATIVE — it cannot
+       * tell speakers apart — so it must never be used for real identity decisions.
+       * For production, leave this false and set `sidecar.command`/`args`/`env` to
+       * the onnx backend with a real CAM++ model (see services/voiceprint/README.md).
+       */
+      dev_reference_backend?: boolean;
+      /**
+       * A5 PRODUCTION GUARD. When true, the gateway HARD-REJECTS any configuration
+       * that would score real turns with the NON-DISCRIMINATIVE reference backend
+       * (`dev_reference_backend: true`, a sidecar env selecting
+       * `VOICEPRINT_BACKEND=reference`, or an `expected_model` tagged with the
+       * reference provider/modelId `reference-fbank-v0`) at config-resolve /
+       * registration time, AND refuses to score any turn whose owner template or
+       * per-turn embedding carries the reference model tag. Default false keeps the
+       * current dev/test behavior; PRODUCTION MUST set this to true.
+       */
+      require_discriminative_model?: boolean;
+      /**
+       * A5 MODEL INTEGRITY PIN. When set, the gateway verifies the production model
+       * file's SHA-256 (lowercase hex) on first use and REFUSES with a clear error
+       * on mismatch, so an operator must provision a known-good model. Pair with
+       * `model_path` (the resolved model file). The model file lives OUTSIDE git and
+       * is never downloaded automatically; production must provision the known-good
+       * `.onnx` model out-of-band (see services/voiceprint/README.md, "Getting a real
+       * CAM++ model") and pin its hash here.
+       */
+      model_sha256?: string;
+      /**
+       * A5 MODEL INTEGRITY PIN — the model file to hash. When omitted, the gateway
+       * uses the sidecar env's `VOICEPRINT_MODEL` path. Required (here or via that
+       * env) whenever `model_sha256` is set.
+       */
+      model_path?: string;
+      sidecar?: {
+        command?: string;
+        args?: string[];
+        cwd?: string;
+        env?: Record<string, string>;
+        timeout_ms?: number;
+        max_stdout_bytes?: number;
+        max_stderr_bytes?: number;
+      };
+      owner_template?: {
+        file_path?: string;
+        key_path?: string;
+        key_ref?: string;
+        create_key_if_missing?: boolean;
+      };
+      allowed_audio_roots?: string[];
+      consent?: {
+        capture_allowed?: boolean;
+        biometric_allowed?: boolean;
+        memory_promotion_allowed?: boolean;
+        template_learning_allowed?: boolean;
+        export_allowed?: boolean;
+        reason?: string;
+      };
+      expected_model?: {
+        provider?: "external-json" | "signal-baseline" | "speechbrain" | "wespeaker" | "picovoice" | "sherpa-onnx" | "reference" | "custom";
+        model_id?: string;
+        modelId?: string;
+        version?: string;
+        notes?: string;
+      };
+      thresholds?: {
+        owner_accept?: number;
+        owner_possible?: number;
+        ownerAccept?: number;
+        ownerPossible?: number;
+      };
+      quality_thresholds?: {
+        min_duration_ms?: number;
+        target_duration_ms?: number;
+        min_rms?: number;
+        target_rms?: number;
+        min_peak?: number;
+        min_dynamic_range?: number;
+        max_clipping_ratio?: number;
+        clipping_amplitude?: number;
+        max_abs_dc_offset?: number;
+        minDurationMs?: number;
+        targetDurationMs?: number;
+        minRms?: number;
+        targetRms?: number;
+        minPeak?: number;
+        minDynamicRange?: number;
+        maxClippingRatio?: number;
+        clippingAmplitude?: number;
+        maxAbsDcOffset?: number;
+      };
+      target_sample_rate?: number;
+      timeout_ms?: number;
+      /**
+       * TRUST BOUNDARY opt-in. When true, a score_turns request MAY supply a
+       * per-turn client-computed voiceprint embedding (e.g. from on-device iOS)
+       * and have it scored DIRECTLY against the owner template — without the
+       * server ever seeing the biometric audio or re-deriving the vector via the
+       * sidecar. This deliberately moves the trust boundary: the server can no
+       * longer verify the audio actually produced that vector; it trusts the
+       * authenticated device. Default false: when false, a client-supplied
+       * embedding is IGNORED for direct scoring (the turn falls back to the
+       * audio/sidecar path). The client embedding must still match the owner
+       * template's model+version, or the turn is rejected.
+       */
+      accept_client_embeddings?: boolean;
+      /**
+       * WS1 live owner recognition (Phase 1). OPT-IN, DEFAULT FALSE. When true,
+       * the gateway itself background-scores each finalized realtime turn
+       * (fire-and-forget off the hot `identity.voiceprint.realtime_event` path,
+       * with a short wait-for-audio retry for the in-flight tail chunk) through
+       * the SAME scoring pipeline as `identity.voiceprint.score_turns`, folds
+       * the results into the session-level speaker-evidence reducer, emits an
+       * edge-triggered `voiceprint.identity` gateway event on identity
+       * establish/flip, and piggybacks the scored per-turn states on the
+       * session's next realtime_event response. Fail-safe: scoring
+       * failure/missing audio => skip, never a false owner. When false (the
+       * default) the realtime handlers behave byte-for-byte as before.
+       */
+      auto_score_finalized?: boolean;
+      /**
+       * WS1 auto-scorer A2 evidence hysteresis. Controls how fast an owner
+       * identity establishes and broadcasts to the client. Omit for the default
+       * (flip_threshold 3). Lower flip_threshold => faster push, less anti-flap.
+       * Only relevant when `auto_score_finalized` is true.
+       */
+      evidence?: {
+        flip_threshold?: number;
+        /** Asymmetric hysteresis: consecutive owner turns to establish (fast). */
+        owner_flip_threshold?: number;
+        /** Consecutive clear non-owner turns to overturn owner (slow/sticky). */
+        non_owner_flip_threshold?: number;
+        /** A single owner turn at/above this confidence establishes instantly. */
+        instant_owner_confidence?: number;
+        window_size?: number;
+        stale_timeout_ms?: number;
+        /** Turns shorter than this (ms) never vote toward not_owner. */
+        min_turn_ms?: number;
+      };
+      /**
+       * A8 replay resistance. TTL (ms) for the single-use liveness nonce a client
+       * must attach to a client-supplied embedding submission (see
+       * identity/voiceprint/liveness-nonce.ts). Short by design; defaults to 60s.
+       * Only relevant when `accept_client_embeddings` is true.
+       */
+      liveness_nonce_ttl_ms?: number;
+      /**
+       * A3 AS-Norm (Adaptive Symmetric Normalization) score normalization.
+       * OPT-IN and ADDITIVE, default OFF. When enabled AND a cohort is present,
+       * the raw owner<->test cosine is normalized against an impostor cohort and
+       * classified with `normalized_thresholds` (a z-score-like scale — NOT cosine,
+       * so it must carry its own thresholds, never the raw 0.82/0.72). When OFF or
+       * no cohort, scoring is byte-for-byte the raw-cosine path.
+       *
+       * HONESTY: a real cohort needs HUNDREDS of diverse non-owner speakers
+       * embedded with the SAME model as the owner template, and the normalized
+       * thresholds must be calibrated on real data. DO NOT enable in production
+       * until a real cohort + calibrated normalized thresholds are provisioned.
+       */
+      as_norm?: {
+        enabled?: boolean;
+        /** Number of top cohort cosines to average. Defaults to min(300, cohort length). */
+        top_n?: number;
+        topN?: number;
+        /** Model that produced the cohort embeddings; MUST match the owner template model. */
+        cohort_model?: {
+          provider?: "external-json" | "signal-baseline" | "speechbrain" | "wespeaker" | "picovoice" | "sherpa-onnx" | "reference" | "custom";
+          model_id?: string;
+          modelId?: string;
+          version?: string;
+          notes?: string;
+        };
+        /** Inline cohort embeddings (impostor/non-owner vectors). */
+        cohort_embeddings?: number[][];
+        /** File reference to a JSON cohort ({ model, embeddings }). Loaded at resolve time. */
+        cohort_file?: string;
+        /** Normalized-scale thresholds. Required when enabled. Never the raw cosine 0.82/0.72. */
+        normalized_thresholds?: {
+          owner_accept?: number;
+          owner_possible?: number;
+          ownerAccept?: number;
+          ownerPossible?: number;
+        };
+      };
+    };
+  };
   /** Channel adapters for messaging app integration (Slack, iMessage, etc.). */
   channels?: {
     slack?: {

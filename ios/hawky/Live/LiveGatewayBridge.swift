@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 enum LiveGatewayBridgeError: LocalizedError {
@@ -74,6 +75,413 @@ struct LiveIntentionCreateResult {
     var ask: String?
 }
 
+struct LiveVoiceprintAudioArtifactReference: Equatable {
+    var audioArtifactID: String
+    var audioPath: String
+    var sampleRate: Double?
+}
+
+struct LiveVoiceprintRealtimeEvent: Equatable {
+    var type: String
+    var itemID: String?
+    var speechWindowID: String?
+    var audioStartMs: Double?
+    var audioEndMs: Double?
+    var transcript: String?
+    var audioArtifactID: String?
+    var audioPath: String?
+    var sampleRate: Double?
+    var route: String?
+
+    var eventObject: [String: JSONValue] {
+        var event: [String: JSONValue] = ["type": .string(type)]
+        if let itemID, !itemID.isEmpty { event["item_id"] = .string(itemID) }
+        if let speechWindowID, !speechWindowID.isEmpty { event["speech_window_id"] = .string(speechWindowID) }
+        if let audioStartMs { event["audio_start_ms"] = .number(audioStartMs) }
+        if let audioEndMs { event["audio_end_ms"] = .number(audioEndMs) }
+        if let transcript { event["transcript"] = .string(transcript) }
+        if let audioArtifactID, !audioArtifactID.isEmpty { event["audio_artifact_id"] = .string(audioArtifactID) }
+        if let audioPath, !audioPath.isEmpty { event["audio_path"] = .string(audioPath) }
+        if let sampleRate { event["sample_rate"] = .number(sampleRate) }
+        if let route, !route.isEmpty { event["route"] = .string(route) }
+        return event
+    }
+
+    static func params(
+        sessionKey: String,
+        event: LiveVoiceprintRealtimeEvent,
+        includeMissingAudio: Bool = false
+    ) -> [String: JSONValue] {
+        var params: [String: JSONValue] = [
+            "sessionKey": .string(sessionKey),
+            "event": .object(event.eventObject),
+        ]
+        if includeMissingAudio {
+            params["includeMissingAudio"] = .bool(true)
+        }
+        return params
+    }
+}
+
+struct LiveVoiceprintFinalizedTurn: Equatable {
+    var sessionKey: String
+    var transcriptItemID: String
+    var role: String
+    var text: String?
+    var startMs: Double
+    var endMs: Double
+    var audioArtifactID: String?
+    var audioPath: String?
+    var route: String?
+    var speechWindowID: String
+
+    init?(object: [String: JSONValue]) {
+        guard
+            case let .some(.string(sessionKey)) = object["sessionKey"],
+            case let .some(.string(transcriptItemID)) = object["transcriptItemId"],
+            case let .some(.string(role)) = object["role"],
+            case let .some(.number(startMs)) = object["startMs"],
+            case let .some(.number(endMs)) = object["endMs"],
+            case let .some(.string(speechWindowID)) = object["speechWindowId"]
+        else {
+            return nil
+        }
+        self.sessionKey = sessionKey
+        self.transcriptItemID = transcriptItemID
+        self.role = role
+        self.text = Self.optionalString(object["text"])
+        self.startMs = startMs
+        self.endMs = endMs
+        self.audioArtifactID = Self.optionalString(object["audioArtifactId"])
+        self.audioPath = Self.optionalString(object["audioPath"])
+        self.route = Self.optionalString(object["route"])
+        self.speechWindowID = speechWindowID
+    }
+
+    private static func optionalString(_ value: JSONValue?) -> String? {
+        guard case let .some(.string(text)) = value else { return nil }
+        return text
+    }
+}
+
+/// Result of `identity.voiceprint.request_embedding_challenge` (A8 liveness).
+/// The gateway returns a single-use, session-bound nonce with a TTL. The server
+/// consumes a nonce per eligible turn, so B2 requests one fresh nonce PER
+/// embedding-carrying turn and attaches each to its own turn, treating every nonce as
+/// consumed afterwards (never reused across turns or submissions).
+struct LiveVoiceprintEmbeddingChallenge: Equatable {
+    var sessionKey: String
+    var nonce: String
+    var expiresAtMs: Double
+
+    init?(payload: JSONValue?) {
+        guard
+            case let .some(.object(root)) = payload,
+            case let .some(.bool(ok)) = root["ok"], ok,
+            case let .some(.string(sessionKey)) = root["sessionKey"],
+            case let .some(.string(nonce)) = root["nonce"], !nonce.isEmpty,
+            case let .some(.number(expiresAtMs)) = root["expiresAtMs"]
+        else {
+            return nil
+        }
+        self.sessionKey = sessionKey
+        self.nonce = nonce
+        self.expiresAtMs = expiresAtMs
+    }
+}
+
+/// One per-turn recognition state from `identity.voiceprint.score_turns`
+/// (server `VoiceprintTranscriptIdentityState`). The recognition decision the
+/// live UI shows is `result` (owner_speaking / possible_owner / unknown_speaker /
+/// …) + `confidence`, keyed by `transcriptItemId`. `lifecycle` reports whether the
+/// state was `resolved` / `unknown` / `skipped` / `error` / etc.
+///
+/// NOTE: the server wire key for the score is `confidence` (NOT `score`) — see
+/// `VoiceprintTranscriptIdentityState` in `src/identity/voiceprint/transcript-state.ts`.
+/// `result`, `confidence` and `skipReason` are OPTIONAL on the wire.
+struct LiveVoiceprintScoreTurnState: Equatable {
+    var transcriptItemID: String
+    var lifecycle: String
+    var result: String?
+    var confidence: Double?
+    var skipReason: String?
+
+    init?(object: [String: JSONValue]) {
+        guard
+            case let .some(.string(transcriptItemID)) = object["transcriptItemId"],
+            case let .some(.string(lifecycle)) = object["lifecycle"]
+        else {
+            return nil
+        }
+        self.transcriptItemID = transcriptItemID
+        self.lifecycle = lifecycle
+        if case let .some(.string(result)) = object["result"] {
+            self.result = result
+        } else {
+            self.result = nil
+        }
+        if case let .some(.number(confidence)) = object["confidence"] {
+            self.confidence = confidence
+        } else {
+            self.confidence = nil
+        }
+        if case let .some(.string(skipReason)) = object["skipReason"] {
+            self.skipReason = skipReason
+        } else {
+            self.skipReason = nil
+        }
+    }
+}
+
+/// Result of `identity.voiceprint.score_turns`. Captures `ok` + the echoed session
+/// key + the reported turn count, PLUS the per-turn recognition `states` array that
+/// carries the server's speaker decision (result/confidence/lifecycle keyed by
+/// transcriptItemId). The server owns the scoring; iOS reads `states` to surface it.
+struct LiveVoiceprintScoreTurnsResult: Equatable {
+    var ok: Bool
+    var sessionKey: String?
+    var turns: Int?
+    /// Per-turn recognition states, in server order. Empty when the response
+    /// omits `states` (older server / error path) — never nil, so callers can
+    /// treat "no state" as "no owner shown" without special-casing.
+    var states: [LiveVoiceprintScoreTurnState]
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        let ok: Bool
+        if case let .some(.bool(value)) = root["ok"] {
+            ok = value
+        } else {
+            // The server returns a structured result object without a top-level
+            // `ok` on the happy path; treat presence of a sessionKey/status as ok.
+            ok = root["sessionKey"] != nil || root["status"] != nil
+        }
+        self.ok = ok
+        if case let .some(.string(sessionKey)) = root["sessionKey"] {
+            self.sessionKey = sessionKey
+        } else {
+            self.sessionKey = nil
+        }
+        if case let .some(.number(turns)) = root["turns"] {
+            self.turns = Int(turns)
+        } else {
+            self.turns = nil
+        }
+        if case let .some(.array(states)) = root["states"] {
+            self.states = states.compactMap { value in
+                guard case let .object(object) = value else { return nil }
+                return LiveVoiceprintScoreTurnState(object: object)
+            }
+        } else {
+            self.states = []
+        }
+    }
+}
+
+/// Result of `identity.voiceprint.audio_artifact.register` (B3). Confirms the
+/// gateway accepted the local WAV as a referenceable enrollment source. Returns
+/// the echoed `audioArtifactId` so the enroll flow can carry it in `sources`.
+struct LiveVoiceprintAudioArtifactRegistration: Equatable {
+    var ok: Bool
+    var sessionKey: String?
+    var audioArtifactID: String?
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        if case let .some(.bool(ok)) = root["ok"] {
+            self.ok = ok
+        } else {
+            // Some server versions return the artifact object without a top-level
+            // `ok`; treat presence of the artifact / session key as success.
+            self.ok = root["audioArtifact"] != nil || root["sessionKey"] != nil
+        }
+        if case let .some(.string(sessionKey)) = root["sessionKey"] {
+            self.sessionKey = sessionKey
+        } else {
+            self.sessionKey = nil
+        }
+        if case let .some(.object(artifact)) = root["audioArtifact"],
+           case let .some(.string(id)) = artifact["audioArtifactId"] {
+            self.audioArtifactID = id
+        } else if case let .some(.string(id)) = root["audioArtifactId"] {
+            self.audioArtifactID = id
+        } else {
+            self.audioArtifactID = nil
+        }
+    }
+}
+
+/// Result of `identity.voiceprint.owner_template_status`. Scalar metadata only —
+/// the server never returns biometric material. `enrolled == false` covers
+/// "no template", "deleted", and "enrollment unconfigured" alike.
+struct LiveVoiceprintOwnerTemplateStatus: Equatable {
+    var enrolled: Bool
+    var templateRef: String?
+    var enrolledAt: String?
+    var speechMs: Double?
+    var sourceCount: Int?
+    var quality: String?
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        if case let .some(.bool(enrolled)) = root["enrolled"] {
+            self.enrolled = enrolled
+        } else {
+            self.enrolled = false
+        }
+        self.templateRef = Self.optionalString(root["templateRef"])
+        self.enrolledAt = Self.optionalString(root["enrolledAt"])
+        self.quality = Self.optionalString(root["quality"])
+        if case let .some(.number(speech)) = root["speechMs"] {
+            self.speechMs = speech
+        } else {
+            self.speechMs = nil
+        }
+        if case let .some(.number(count)) = root["sourceCount"] {
+            self.sourceCount = Int(count)
+        } else {
+            self.sourceCount = nil
+        }
+    }
+
+    private static func optionalString(_ value: JSONValue?) -> String? {
+        if case let .some(.string(text)) = value, !text.isEmpty { return text }
+        return nil
+    }
+}
+
+/// Result of `identity.voiceprint.enroll_owner` / `add_enrollment_clip` /
+/// `enroll_owner_from_recording` (B3). The server returns a status ("accepted" on
+/// success; "rejected" / "reembedded" / "needs_reenrollment" otherwise) plus
+/// `sourceCount` and the voiced `speechMs`.
+/// `accepted` is the only success posture the client treats as enrolled.
+struct LiveVoiceprintEnrollmentResult: Equatable {
+    var ok: Bool
+    var status: String?
+    var sessionKey: String?
+    var sourceCount: Int?
+    var speechMs: Double?
+    var reasons: [String]
+    /// Additive counts from `enroll_owner_from_recording` only: how many uploaded
+    /// `.segNNN.mic` segments were considered / actually used / dropped by the
+    /// quality gate / dropped by the selection cap / dropped after a timeline gap.
+    /// All nil on `enroll_owner` / `add_enrollment_clip` responses (which never
+    /// carry them) and on older servers — parsing is optional so nothing breaks.
+    var segmentsConsidered: Int?
+    var segmentsUsed: Int?
+    var segmentsQualityRejected: Int?
+    var segmentsCapped: Int?
+    var segmentsAfterGap: Int?
+
+    /// The server's happy path returns `status: "accepted"`. Anything else — a
+    /// quality rejection, a too-short clip that slipped past the client floor — is
+    /// NOT an enrollment.
+    var accepted: Bool { status == "accepted" }
+
+    init?(payload: JSONValue?) {
+        guard case let .some(.object(root)) = payload else { return nil }
+        if case let .some(.bool(ok)) = root["ok"] {
+            self.ok = ok
+        } else {
+            self.ok = root["status"] != nil
+        }
+        if case let .some(.string(status)) = root["status"] {
+            self.status = status
+        } else {
+            self.status = nil
+        }
+        if case let .some(.string(sessionKey)) = root["sessionKey"] {
+            self.sessionKey = sessionKey
+        } else {
+            self.sessionKey = nil
+        }
+        if case let .some(.number(sourceCount)) = root["sourceCount"] {
+            self.sourceCount = Int(sourceCount)
+        } else {
+            self.sourceCount = nil
+        }
+        if case let .some(.number(speechMs)) = root["speechMs"] {
+            self.speechMs = speechMs
+        } else {
+            self.speechMs = nil
+        }
+        if case let .some(.array(values)) = root["reasons"] {
+            self.reasons = values.compactMap { if case let .string(s) = $0 { return s }; return nil }
+        } else {
+            self.reasons = []
+        }
+        self.segmentsConsidered = Self.optionalInt(root["segmentsConsidered"])
+        self.segmentsUsed = Self.optionalInt(root["segmentsUsed"])
+        self.segmentsQualityRejected = Self.optionalInt(root["segmentsQualityRejected"])
+        self.segmentsCapped = Self.optionalInt(root["segmentsCapped"])
+        self.segmentsAfterGap = Self.optionalInt(root["segmentsAfterGap"])
+    }
+
+    private static func optionalInt(_ value: JSONValue?) -> Int? {
+        guard case let .some(.number(number)) = value else { return nil }
+        return Int(number)
+    }
+}
+
+struct LiveVoiceprintRealtimeResult: Equatable {
+    var ok: Bool
+    var sessionKey: String
+    var finalizedTurns: [LiveVoiceprintFinalizedTurn]
+    var pendingSpeechWindows: Int
+    var pendingTranscripts: Int
+    /// WS2 piggyback (PRIMARY identity channel): per-turn states the gateway scored
+    /// server-side since the previous realtime_event, drained onto this response.
+    /// Empty (never nil) when the server omits `scoredStates` (auto-score off / older
+    /// server). Reuses the same `LiveVoiceprintScoreTurnState` parser as score_turns.
+    var scoredStates: [LiveVoiceprintScoreTurnState]
+    /// WS2 piggyback (PRIMARY identity channel): the current scalar-only identity
+    /// summary. nil when the server omits `identity`. Fed into the edge-triggered
+    /// identity state machine; a nil/garbled summary degrades quietly (never owner).
+    var identity: LiveVoiceprintIdentitySummary?
+
+    init?(payload: JSONValue?) {
+        guard
+            case let .some(.object(root)) = payload,
+            case let .some(.bool(ok)) = root["ok"],
+            case let .some(.string(sessionKey)) = root["sessionKey"]
+        else {
+            return nil
+        }
+        self.ok = ok
+        self.sessionKey = sessionKey
+        self.finalizedTurns = Self.turns(from: root["finalizedTurns"])
+        self.pendingSpeechWindows = Self.int(from: root["pendingSpeechWindows"]) ?? 0
+        self.pendingTranscripts = Self.int(from: root["pendingTranscripts"]) ?? 0
+        self.scoredStates = Self.scoredStates(from: root["scoredStates"])
+        if case let .some(.object(identity)) = root["identity"] {
+            self.identity = LiveVoiceprintIdentitySummary(object: identity)
+        } else {
+            self.identity = nil
+        }
+    }
+
+    private static func scoredStates(from value: JSONValue?) -> [LiveVoiceprintScoreTurnState] {
+        guard case let .some(.array(items)) = value else { return [] }
+        return items.compactMap { item in
+            guard case let .object(object) = item else { return nil }
+            return LiveVoiceprintScoreTurnState(object: object)
+        }
+    }
+
+    private static func turns(from value: JSONValue?) -> [LiveVoiceprintFinalizedTurn] {
+        guard case let .some(.array(items)) = value else { return [] }
+        return items.compactMap { item in
+            guard case let .object(object) = item else { return nil }
+            return LiveVoiceprintFinalizedTurn(object: object)
+        }
+    }
+
+    private static func int(from value: JSONValue?) -> Int? {
+        guard case let .some(.number(number)) = value else { return nil }
+        return Int(number)
+    }
+}
+
 enum LiveGatewayBridgeStreamEvent: Equatable {
     /// The feed websocket handshake just completed (initial connect or a reconnect).
     /// Emitted by `stream()` so the consumer can clear the offline state when the
@@ -93,6 +501,9 @@ enum LiveGatewayBridgeStreamEvent: Equatable {
     case whenArmed(intentionId: String, fireDate: String, title: String, body: String)
     /// #482: gateway disarmed or delivered a timed intention — device should cancel pending notification.
     case whenDisarmed(intentionId: String)
+    /// WS2 live owner recognition (SECONDARY channel): edge-triggered scalar-only
+    /// identity push, routed to the same identity state machine as the piggyback.
+    case voiceprintIdentity(sessionKey: String, verdict: String, decision: String?, confidence: Double?, at: String)
 }
 
 struct LiveFrontendBootContextResponse {
@@ -252,6 +663,8 @@ actor LiveGatewayBridge {
                             continuation.yield(.whenArmed(intentionId: intentionId, fireDate: fireDate, title: title, body: body))
                         case .whenDisarmed(let intentionId):
                             continuation.yield(.whenDisarmed(intentionId: intentionId))
+                        case .voiceprintIdentity(let sessionKey, let verdict, let decision, let confidence, let at):
+                            continuation.yield(.voiceprintIdentity(sessionKey: sessionKey, verdict: verdict, decision: decision, confidence: confidence, at: at))
                         case .error(let code, let message):
                             continuation.yield(.error("[\(code)] \(message)"))
                         }
@@ -335,6 +748,9 @@ actor LiveGatewayBridge {
                     break
                 case .whenDisarmed:
                     // Notification cancellation is handled by the live stream loop, not this one-shot path.
+                    break
+                case .voiceprintIdentity:
+                    // WS2: live owner-identity is handled by the live stream loop, not this one-shot path.
                     break
                 }
             }
@@ -741,6 +1157,246 @@ actor LiveGatewayBridge {
         let payload = await invokeMethod("memory.distill", params: params, sessionKey: sessionKey)
         guard case let .object(root)? = payload else { return nil }
         return LiveMemoryDistillResult(object: root)
+    }
+
+    func sendVoiceprintRealtimeEvent(
+        _ event: LiveVoiceprintRealtimeEvent,
+        sessionKey: String,
+        mode: String,
+        includeMissingAudio: Bool = false,
+        timeoutSeconds: TimeInterval = 10
+    ) async -> LiveVoiceprintRealtimeResult? {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.realtime_event",
+            params: LiveVoiceprintRealtimeEvent.params(
+                sessionKey: sessionKey,
+                event: event,
+                includeMissingAudio: includeMissingAudio
+            ),
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintRealtimeResult(payload: payload)
+    }
+
+    func resetVoiceprintRealtime(
+        sessionKey: String,
+        mode: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async -> Bool {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.realtime_reset",
+            params: ["sessionKey": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        guard
+            case let .object(root)? = payload,
+            case let .some(.bool(ok)) = root["ok"]
+        else {
+            return false
+        }
+        return ok
+    }
+
+    /// A8 liveness (B2). Request a fresh single-use, session-bound, TTL-limited
+    /// nonce that the client MUST attach to an embedding-carrying score_turns
+    /// submission. Returns nil on any failure (offline / no token / bad payload) so
+    /// the caller FAILS CLOSED and never submits a client embedding without a nonce.
+    func requestVoiceprintEmbeddingChallenge(
+        sessionKey: String,
+        mode: String,
+        timeoutSeconds: TimeInterval = 10
+    ) async -> LiveVoiceprintEmbeddingChallenge? {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.request_embedding_challenge",
+            params: ["sessionKey": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEmbeddingChallenge(payload: payload)
+    }
+
+    /// Submit B1-serialized score_turns params (a batch of finalized turns, some of
+    /// which may carry an on-device `sampleEmbedding` + `sampleEmbeddingModel` +
+    /// A8 `nonce`). Returns nil on transport failure. Reuse
+    /// `LiveVoiceprintScoreTurn.scoreTurnsParams` to build `params`.
+    func sendVoiceprintScoreTurns(
+        sessionKey: String,
+        params: [String: JSONValue],
+        mode: String,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> LiveVoiceprintScoreTurnsResult? {
+        currentMode = mode
+        let payload = await invokeMethod(
+            "identity.voiceprint.score_turns",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintScoreTurnsResult(payload: payload)
+    }
+
+    // MARK: - Owner voiceprint enrollment (B3)
+
+    /// Register a locally-recorded WAV as a voiceprint audio artifact so a later
+    /// enroll_owner can reference it by `audioArtifactId`. Mirrors how the
+    /// score/realtime paths reference an artifact. Returns nil on any failure.
+    func registerVoiceprintAudioArtifact(
+        sessionKey: String,
+        audioArtifactID: String,
+        mediaID: String,
+        sampleRate: Double?,
+        route: String? = nil,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> LiveVoiceprintAudioArtifactRegistration? {
+        var params: [String: JSONValue] = [
+            "sessionKey": .string(sessionKey),
+            "audioArtifactId": .string(audioArtifactID),
+            "mediaId": .string(mediaID),
+        ]
+        if let sampleRate { params["sampleRate"] = .number(sampleRate) }
+        if let route, !route.isEmpty { params["route"] = .string(route) }
+        let payload = await invokeMethod(
+            "identity.voiceprint.audio_artifact.register",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintAudioArtifactRegistration(payload: payload)
+    }
+
+    /// Upload a locally-recorded enrollment WAV to the gateway's media ingest so it
+    /// lands under an `allowed_audio_root` and `audio_artifact.register` can resolve
+    /// it. Reuses the SAME `media.chunk.upload` RPC the live session already uses:
+    /// the finalized WAV is read, re-chunked as pcm16, and streamed under the
+    /// caller-supplied `mediaId`, with `final:true` on the last chunk so the gateway
+    /// finalizes the file (writing `<media_root>/<date>/<mediaId>.wav` + a
+    /// `<mediaId>.json` sidecar whose `final_iso` the voiceprint resolver requires).
+    ///
+    /// The `mediaId` passed here MUST be byte-identical to the `mediaId` later passed
+    /// to `registerVoiceprintAudioArtifact`, so the on-disk filename matches. Returns
+    /// true when the final chunk was acknowledged; false on any transport/RPC failure.
+    func uploadVoiceprintEnrollmentAudio(
+        sessionKey: String,
+        mediaID: String,
+        wavPath: String,
+        timeoutSeconds: TimeInterval = 30
+    ) async -> Bool {
+        do {
+            let token = try KeychainStore.load(for: gatewayURL)
+            guard let token, !token.isEmpty else { return false }
+
+            let fileURL = URL(fileURLWithPath: wavPath)
+            let sampleRate = try AVAudioFile(forReading: fileURL).processingFormat.sampleRate
+            let effectiveSampleRate = sampleRate > 0 ? sampleRate : 24_000
+
+            let transport = transportFactory()
+            let wsURL = Self.websocketURL(from: gatewayURL)
+            let connectParams = ConnectParams(
+                version: "1", platform: "ios-live-voiceprint-upload", token: token,
+                sessionKey: sessionKey, role: "client", mode: currentMode
+            )
+            _ = try await transport.connect(url: wsURL, connectParams: connectParams)
+            defer { Task { await transport.disconnect() } }
+
+            // Delegate the chunking + media.chunk.upload wire format to the ONE
+            // shared primitive the deferred Live-recording upload also uses. The
+            // bridge's only job is resolving the transport/token/wsURL and mapping
+            // the shared uploader's throwing contract to this method's Bool result.
+            try await LiveMediaAudioChunkUploader.uploadWavAsMediaChunks(
+                transport: transport,
+                wavURL: fileURL,
+                mediaId: mediaID,
+                sampleRate: effectiveSampleRate,
+                capturedAtNs: 0,
+                timeoutSeconds: timeoutSeconds + 2
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Enroll the OWNER voiceprint template from one or more recorded sources.
+    /// `params` MUST be built by `LiveVoiceprintEnrollmentRequest.enrollOwnerParams`
+    /// so the wire keys (`sources`, `consent`, `minSpeechMs`) match the server
+    /// parser exactly. Returns nil on transport failure.
+    func enrollVoiceprintOwner(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval = 30
+    ) async -> LiveVoiceprintEnrollmentResult? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.enroll_owner",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEnrollmentResult(payload: payload)
+    }
+
+    /// Enroll the OWNER voiceprint template from one or more live listening
+    /// sessions' already-uploaded recording segments
+    /// (`<recordingBaseId>.segNNN.mic` per take). WHY this path exists:
+    /// enrollment must capture through the SAME live WebRTC pipeline
+    /// recognition scores — a standalone-recorder template is acoustically
+    /// orthogonal to the recognition domain (see
+    /// docs/voiceprint-architecture.md, "capture-domain mismatch"). `params`
+    /// MUST be built by
+    /// `LiveVoiceprintEnrollmentRequest.enrollOwnerFromRecordingParams` so the
+    /// wire keys (`recordingBaseIds`, `consent`, `minSpeechMs`) match the
+    /// server parser exactly. Returns nil on transport failure.
+    func enrollVoiceprintOwnerFromRecording(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval = 60
+    ) async -> LiveVoiceprintEnrollmentResult? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.enroll_owner_from_recording",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEnrollmentResult(payload: payload)
+    }
+
+    /// Query whether an owner voiceprint template is already enrolled + its
+    /// scalar metadata (never the biometric material). Drives the enrollment
+    /// UI's "already enrolled" state. Returns nil only on transport failure; an
+    /// unconfigured / unenrolled gateway returns a parsed `.notEnrolled`.
+    func fetchOwnerTemplateStatus(
+        sessionKey: String,
+        timeoutSeconds: TimeInterval = 15
+    ) async -> LiveVoiceprintOwnerTemplateStatus? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.owner_template_status",
+            params: ["sessionKey": .string(sessionKey)],
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintOwnerTemplateStatus(payload: payload)
+    }
+
+    /// Append one more source to an existing owner template ("add another clip").
+    /// `params` MUST be built by
+    /// `LiveVoiceprintEnrollmentRequest.addEnrollmentClipParams`. Returns nil on
+    /// transport failure.
+    func addVoiceprintEnrollmentClip(
+        sessionKey: String,
+        params: [String: JSONValue],
+        timeoutSeconds: TimeInterval = 30
+    ) async -> LiveVoiceprintEnrollmentResult? {
+        let payload = await invokeMethod(
+            "identity.voiceprint.add_enrollment_clip",
+            params: params,
+            sessionKey: sessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        return LiveVoiceprintEnrollmentResult(payload: payload)
     }
 
     /// Invoke an arbitrary gateway method over a short-lived connection and return

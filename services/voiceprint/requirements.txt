@@ -1,0 +1,8 @@
+# The reference backend (VOICEPRINT_BACKEND=reference, the default) needs NOTHING
+# beyond the Python 3 standard library — it is dependency-free by design so tests
+# and CI run without weights or network.
+#
+# The onnx backend (VOICEPRINT_BACKEND=onnx, production) needs sherpa-onnx, which
+# bundles the matched fbank front-end for the CAM++ speaker-embedding model. It is
+# imported lazily, so it is only required when you actually select the onnx backend.
+sherpa-onnx>=1.10

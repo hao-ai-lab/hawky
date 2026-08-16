@@ -372,6 +372,107 @@ import Foundation
         #expect(LiveSessionStore.transcriptAppendRuntimeTarget(activeConfig: nil, draftConfig: draft) == nil)
     }
 
+    @Test func transcriptAppendIsDisabledForRecordSuppressedSessions() {
+        // The enrollment listening session sets conversationJournalingEnabled
+        // false: the user's enrollment monologue must never append to the
+        // gateway session transcript, even in ambient mode.
+        var active = LiveSessionConfig()
+        active.gatewayBridgeSessionKey = "realtime:enroll"
+        active.mode = .ambient
+        active.conversationJournalingEnabled = false
+
+        #expect(
+            LiveSessionStore.transcriptAppendRuntimeTarget(activeConfig: active, draftConfig: LiveSessionConfig()) == nil
+        )
+    }
+
+    @Test func conversationRecordSuppressionFollowsActiveConfigAndFailsOpenByDefault() {
+        // FAIL-CLOSED default the right way around: a default config journals
+        // (nothing is suppressed unless an override asks for it)…
+        let draft = LiveSessionConfig()
+        #expect(!LiveSessionStore.conversationRecordSuppressed(activeConfig: nil, draftConfig: draft))
+
+        // …and the ACTIVE session snapshot wins over the draft, so a mid-session
+        // settings edit can never flip journaling for the running session.
+        var active = draft
+        active.conversationJournalingEnabled = false
+        #expect(LiveSessionStore.conversationRecordSuppressed(activeConfig: active, draftConfig: draft))
+        #expect(!LiveSessionStore.conversationRecordSuppressed(activeConfig: draft, draftConfig: active))
+    }
+
+    @Test func widgetDetailLineIsSuppressedWhenTheRecordIsSuppressed() {
+        // Regression: appendSystemMessage used to persist the free-text detailLine
+        // ("Connecting OpenAI…", the bridge session key, "Session stopped") to the
+        // cross-process WidgetStatusStore / lock-screen widget UNCONDITIONALLY,
+        // even during the silent owner-voiceprint enrollment session whose whole
+        // purpose is to leave no trace. The persist gate must follow the same
+        // record-suppression latch as the chat record.
+        //
+        // FAIL-CLOSED: a suppressed record never persists the detailLine…
+        #expect(!LiveSessionStore.widgetDetailLinePersistAllowed(recordSuppressed: true))
+        // …and a normal (non-suppressed) session still shows lock-screen status.
+        #expect(LiveSessionStore.widgetDetailLinePersistAllowed(recordSuppressed: false))
+    }
+
+    @Test func widgetUserContextLineIsSuppressedWhenTheRecordIsSuppressed() {
+        // Regression: appendUserMessage dropped the chat entry under record
+        // suppression (via appendConversation's central guard) but still pushed
+        // "You: <message>" to the cross-process WidgetStatusStore / lock-screen
+        // widget UNCONDITIONALLY. During the silent owner-voiceprint enrollment
+        // session, an injected/typed user turn would leak its text to the lock
+        // screen even though the session must leave no trace. The user
+        // contextLine now routes through the SAME persist gate as the system
+        // detailLine, so the two widget writes suppress in lockstep.
+        //
+        // FAIL-CLOSED: a suppressed record never persists the user context line…
+        #expect(!LiveSessionStore.widgetDetailLinePersistAllowed(recordSuppressed: true))
+        // …and a normal (non-suppressed) session still shows the "You: …" line.
+        #expect(LiveSessionStore.widgetDetailLinePersistAllowed(recordSuppressed: false))
+    }
+
+    @Test func widgetAssistantContextLineIsSuppressedWhenTheRecordIsSuppressed() {
+        // Regression: finishAssistantMessage dropped the chat bubble under record
+        // suppression (via appendConversation's central guard) but still pushed
+        // "Agent: <text>" to the cross-process WidgetStatusStore / lock-screen
+        // widget UNCONDITIONALLY on BOTH the by-id commit-handoff branch and the
+        // lone-response.done fallbackText branch. During the silent owner-
+        // voiceprint enrollment session, a provider greeting/quirk that slips past
+        // speakOnlyWhenSpokenTo + openingBehavior=.silent would then leak the
+        // model's words to the lock screen even though the session must leave no
+        // trace. Both assistant contextLine writes now route through the SAME
+        // persist gate as the user contextLine and the system detailLine, so every
+        // widget write suppresses in lockstep.
+        //
+        // FAIL-CLOSED: a suppressed record never persists the assistant context line…
+        #expect(!LiveSessionStore.widgetDetailLinePersistAllowed(recordSuppressed: true))
+        // …and a normal (non-suppressed) session still shows the "Agent: …" line.
+        #expect(LiveSessionStore.widgetDetailLinePersistAllowed(recordSuppressed: false))
+    }
+
+    @Test func enrollmentListeningOverrideIsSilentUploadedAndRecordSuppressed() {
+        // Pin the enrollment listening session's temporary config shape: audio
+        // captured + live-uploaded, camera and visual side features off, fully
+        // silent, and — the leak fix — journaling suppressed so nothing of the
+        // enrollment lands in the chat record. The user's draft stays untouched.
+        var base = LiveSessionConfig()
+        base.visualSource = .iPhoneCamera
+        base.visualCadence = .fps1
+        base.cocktailPartyEnabled = true
+        base.safetyCheckEnabled = true
+        base.mediaPersistenceMode = .local
+
+        let override = LiveSessionStore.enrollmentListeningConfigOverride(from: base)
+        #expect(override.audioInputEnabled)
+        #expect(override.mediaPersistenceMode == .liveUpload)
+        #expect(override.visualSource == .off)
+        #expect(override.visualCadence == .off)
+        #expect(!override.cocktailPartyEnabled)
+        #expect(!override.safetyCheckEnabled)
+        #expect(override.speakOnlyWhenSpokenTo)
+        #expect(override.openingBehavior == .silent)
+        #expect(!override.conversationJournalingEnabled)
+    }
+
     @Test func bridgeAvailabilityMapsFromStartDecision() {
         #expect(LiveSessionStore.bridgeAvailability(for: .connected) == .available)
         #expect(LiveSessionStore.bridgeAvailability(for: .offline("timeout")) == .offline("timeout"))

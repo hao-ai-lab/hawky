@@ -893,6 +893,38 @@ struct SettingsView: View {
             .settingsSectionSurface()
 
             LiveSettingsFormContent(store: liveStore)
+
+            Section {
+                NavigationLink {
+                    OwnerEnrollmentView(store: liveStore)
+                } label: {
+                    SettingsLandingRow(
+                        systemImage: "person.wave.2",
+                        color: .teal,
+                        title: "Voice enrollment",
+                        subtitle: "Set up your owner voice template"
+                    )
+                }
+                .accessibilityIdentifier("settings.live.voiceEnrollment.row")
+
+                Toggle(isOn: Binding(
+                    get: { liveStore.config.voiceprintRealtimeEnabled },
+                    set: { liveStore.updateVoiceprintRealtimeEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Live voice recognition")
+                        Text("Recognize when you (the owner) are speaking during a live session. Enroll your voice first.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("settings.live.voiceRecognition.toggle")
+            } header: {
+                Text("Voice identity")
+            } footer: {
+                Text("Enroll your own voice, then turn on live voice recognition so Hawky can tell when you're the one speaking. Enrolling alone only sets up the encrypted template.")
+            }
+            .settingsSectionSurface()
         }
         .navigationTitle("Live")
         .navigationBarTitleDisplayMode(.inline)

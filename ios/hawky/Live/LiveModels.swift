@@ -721,6 +721,17 @@ struct LiveSessionConfig: Equatable {
     /// On: an unreachable gateway fails the whole Live start with a clear error
     /// instead of silently connecting without your machine.
     var gatewayBridgeRequired: Bool = false
+    /// Disabled by default until the owner enrollment and biometric consent UI can
+    /// explicitly turn on the voice identity side-channel.
+    var voiceprintRealtimeEnabled: Bool = false
+    /// B1 on-device speaker embedding. When on (AND voiceprintRealtimeEnabled is on
+    /// AND a CoreML speaker model is provisioned on the device), finalized turns
+    /// carry an on-device `sampleEmbedding` in the score_turns params so the gateway
+    /// can score a client embedding directly against the owner template — no raw
+    /// audio leaves the phone. Default OFF: with this off (or the model absent) the
+    /// session keeps sending markers and the server scores as before. The default
+    /// app behavior is unchanged.
+    var onDeviceEmbeddingEnabled: Bool = false
     /// Cocktail Party Mode (#627): when on, the Live session runs on-device face
     /// detection on each camera frame, matches against the local person DB, and
     /// proactively recalls known people / enrolls new ones. Off by default; needs
@@ -763,6 +774,14 @@ struct LiveSessionConfig: Equatable {
     /// — the live video now surfaces via the PiP/fullscreen preview instead, and
     /// the frames stay an invisible model-input detail. (#415)
     var showVisualFramesInTranscript: Bool = false
+    /// Transient (never persisted — LiveProfileDefaults has no key for it): when
+    /// false, the session leaves NO trace in the conversation record — no app
+    /// chat entries, no session-journal lines, no gateway transcript appends,
+    /// and no session-end memory distill. Set ONLY by temporary config overrides
+    /// (the owner-voiceprint enrollment listening session, which must not leak
+    /// the user's enrollment monologue into their chat history); every
+    /// user-visible session keeps the default (true).
+    var conversationJournalingEnabled: Bool = true
     /// Transient backend-provided startup context for the current Live start.
     /// This is intentionally not persisted in user settings; it is fetched from
     /// the gateway just before the Realtime session is created.
@@ -1336,6 +1355,7 @@ enum LiveProfileDefaults {
     private static let diagnosticsLevelKey = "live.diagnosticsLevel"
     private static let echoCancellationEnabledKey = "live.echoCancellationEnabled"
     private static let showVisualFramesInTranscriptKey = "live.showVisualFramesInTranscript"
+    private static let voiceprintRealtimeEnabledKey = "live.voiceprintRealtimeEnabled"
 
     static func load(defaults: UserDefaults = .standard) -> LiveSessionConfig {
         var config = LiveSessionConfig()
@@ -1492,6 +1512,9 @@ enum LiveProfileDefaults {
         if defaults.object(forKey: gatewayBridgeRequiredKey) != nil {
             config.gatewayBridgeRequired = defaults.bool(forKey: gatewayBridgeRequiredKey)
         }
+        if defaults.object(forKey: voiceprintRealtimeEnabledKey) != nil {
+            config.voiceprintRealtimeEnabled = defaults.bool(forKey: voiceprintRealtimeEnabledKey)
+        }
         if defaults.object(forKey: cocktailPartyEnabledKey) != nil {
             config.cocktailPartyEnabled = defaults.bool(forKey: cocktailPartyEnabledKey)
         }
@@ -1613,6 +1636,7 @@ enum LiveProfileDefaults {
         defaults.set(config.toolsEnabled, forKey: toolsEnabledKey)
         defaults.set(config.gatewayBridgeEnabled, forKey: gatewayBridgeEnabledKey)
         defaults.set(config.gatewayBridgeRequired, forKey: gatewayBridgeRequiredKey)
+        defaults.set(config.voiceprintRealtimeEnabled, forKey: voiceprintRealtimeEnabledKey)
         defaults.set(config.cocktailPartyEnabled, forKey: cocktailPartyEnabledKey)
         defaults.set(config.speakOnlyWhenSpokenTo, forKey: speakOnlyWhenSpokenToKey)
         defaults.set(config.safetyCheckEnabled, forKey: safetyCheckEnabledKey)
