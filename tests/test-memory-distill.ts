@@ -16,7 +16,7 @@
 // =============================================================================
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { WorkspaceManager } from "../src/storage/workspace.js";
@@ -220,6 +220,23 @@ describe("distillMemory: daily (real LLM path, stub provider)", () => {
     // Nothing should have been written.
     expect(ws.readFile(`memory/${DATE_STR}.md`)).toBeNull();
   });
+
+  test("truncates a long transcript to the TAIL (last turns kept, opening dropped)", async () => {
+    // Build a transcript far longer than MAX_TRANSCRIPT_CHARS (24k). Distinct
+    // sentinels at the very start and very end let us prove head->tail switch.
+    const filler = "the middle of the conversation goes on and on with lots of chatter. ".repeat(600);
+    const userText = `HEAD_SENTINEL_ALPHA ${filler} TAIL_SENTINEL_OMEGA`;
+    expect(userText.length).toBeGreaterThan(24_000);
+    seedRealtimeSession("realtime/long", userText, "ok");
+    const provider = new StubProvider(["- summarized\n"]);
+
+    const result = await distillMemory(STUB_CONFIG, { scope: "daily" }, { workspace: ws, now: NOW, provider });
+    expect(result.ok).toBe(true);
+
+    const userMsg = provider.calls[0].messages[0]?.content as string;
+    expect(userMsg).toContain("TAIL_SENTINEL_OMEGA"); // tail preserved
+    expect(userMsg).not.toContain("HEAD_SENTINEL_ALPHA"); // opening dropped
+  });
 });
 
 describe("distillMemory: global (real LLM path, stub provider)", () => {
@@ -250,6 +267,107 @@ describe("distillMemory: global (real LLM path, stub provider)", () => {
     expect(result.ok).toBe(false);
     expect(result.note).toMatch(/empty output/i);
     expect(ws.readFile("MEMORY.md")).toContain("keep me");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Anti-lossy gate on global consolidation (#14, Phase A)
+// -----------------------------------------------------------------------------
+
+/** Build a substantial MEMORY.md of `n` distinct bullet facts (> trivial threshold). */
+function bigMemory(n: number, prefix = "curated fact"): string {
+  const lines = ["# MEMORY", ""];
+  for (let i = 0; i < n; i++) lines.push(`- ${prefix} number ${i} with descriptive detail`);
+  return lines.join("\n") + "\n";
+}
+
+describe("distillMemory: global anti-lossy gate", () => {
+  test("rejects a much-shorter output as lossy: MEMORY.md unchanged, MEMORY.md.proposed written", async () => {
+    const existing = bigMemory(12);
+    ws.writeFile("MEMORY.md", existing);
+    ws.writeFile("memory/2026-06-15.md", "# 2026-06-15\n\n- user prefers dark mode\n");
+    const provider = new StubProvider(["- one lone fact\n"]); // far too short
+
+    const result = await distillMemory(STUB_CONFIG, { scope: "global" }, { workspace: ws, now: NOW, provider });
+
+    expect(result.ok).toBe(false);
+    expect(result.note).toMatch(/lossy/i);
+    // Signals the scheduler that the LLM ran and this input was consumed.
+    expect(result.proposedRejection).toBe(true);
+    // MEMORY.md is untouched.
+    expect(ws.readFile("MEMORY.md")).toBe(existing);
+    // The candidate was stashed as a proposal.
+    expect(ws.readFile("MEMORY.md.proposed")).toContain("one lone fact");
+  });
+
+  test("does NOT truncate a large (>16k) existing MEMORY.md on the way into the LLM prompt", async () => {
+    // Regression for Phase A: the former MAX_GLOBAL_CHARS=16k input cap was
+    // removed. Seed a MEMORY.md well past 16k (~30k) and assert the FULL body,
+    // including its very last fact, reaches the provider prompt uncut.
+    const existing = bigMemory(700); // ~700 bullets, comfortably > 30k chars
+    expect(existing.length).toBeGreaterThan(30_000);
+    ws.writeFile("MEMORY.md", existing);
+    ws.writeFile("memory/2026-06-15.md", "# 2026-06-15\n\n- user prefers dark mode\n");
+    // Return the existing verbatim so the gate passes; we only care about input.
+    const provider = new StubProvider([existing]);
+
+    await distillMemory(STUB_CONFIG, { scope: "global" }, { workspace: ws, now: NOW, provider });
+
+    const prompt = String(provider.calls[0]?.messages[0]?.content ?? "");
+    // The full existing file — first and LAST fact — must be present, uncut.
+    expect(prompt).toContain("curated fact number 0 ");
+    expect(prompt).toContain("curated fact number 699 ");
+    expect(prompt.length).toBeGreaterThan(existing.length);
+  });
+
+  test("accepts a good longer output: MEMORY.md overwritten, exactly one snapshot of the PRE-write content", async () => {
+    const existing = bigMemory(10);
+    ws.writeFile("MEMORY.md", existing);
+    ws.writeFile("memory/2026-06-15.md", "# 2026-06-15\n\n- user prefers dark mode\n");
+    const goodOutput = bigMemory(12, "curated fact") + "- user prefers dark mode\n";
+    const provider = new StubProvider([goodOutput]);
+
+    const result = await distillMemory(STUB_CONFIG, { scope: "global" }, { workspace: ws, now: NOW, provider });
+
+    expect(result.ok).toBe(true);
+    const after = ws.readFile("MEMORY.md") ?? "";
+    expect(after).toContain("dark mode");
+
+    // Exactly one snapshot, containing the OLD (pre-write) content.
+    const backupsDir = join(wsDir, "memory", ".backups");
+    expect(existsSync(backupsDir)).toBe(true);
+    const snaps = readdirSync(backupsDir).filter((f) => /^MEMORY-.*\.md$/.test(f));
+    expect(snaps.length).toBe(1);
+    expect(readFileSync(join(backupsDir, snaps[0]), "utf-8")).toBe(existing);
+  });
+
+  test("trivial existing MEMORY.md: stub output is always written, no false rejection", async () => {
+    // Empty MEMORY.md is trivial -> gate bypassed.
+    ws.writeFile("MEMORY.md", "");
+    ws.writeFile("memory/2026-06-15.md", "# 2026-06-15\n\n- a new fact\n");
+    const provider = new StubProvider(["- a new fact\n"]);
+
+    const result = await distillMemory(STUB_CONFIG, { scope: "global" }, { workspace: ws, now: NOW, provider });
+
+    expect(result.ok).toBe(true);
+    expect(ws.readFile("MEMORY.md")).toContain("a new fact");
+    // No pre-write content to snapshot -> no snapshot written.
+    expect(existsSync(join(wsDir, "memory", ".backups"))).toBe(false);
+  });
+
+  test("empty model output still hits the existing guard: MEMORY.md and .proposed untouched", async () => {
+    const existing = bigMemory(12);
+    ws.writeFile("MEMORY.md", existing);
+    ws.writeFile("memory/2026-06-15.md", "# 2026-06-15\n\n- something\n");
+    const provider = new StubProvider([]); // empty stream
+
+    const result = await distillMemory(STUB_CONFIG, { scope: "global" }, { workspace: ws, now: NOW, provider });
+
+    expect(result.ok).toBe(false);
+    expect(result.note).toMatch(/empty output/i);
+    // The empty-output guard runs BEFORE the anti-lossy path.
+    expect(ws.readFile("MEMORY.md")).toBe(existing);
+    expect(ws.readFile("MEMORY.md.proposed")).toBeNull();
   });
 });
 

@@ -252,8 +252,15 @@ describe("memory-distill-pipeline", () => {
       const daily = (await sendRequest(ws, "memory.distill", { scope: "daily" })).payload as any;
       expect(daily.ok).toBe(true);
 
-      // 2) global: model emits a consolidated MEMORY.md that includes the fact.
-      stubProvider = new StubProvider("# MEMORY\n\n- Shipped the memory feature.\n");
+      // 2) global: model emits a FULL consolidated MEMORY.md that includes the
+      // fact. It must be substantial enough to clear the anti-lossy gate against
+      // the seeded template MEMORY.md (a one-line output would be rejected as
+      // lossy — that guard is the point of Phase A of #14).
+      stubProvider = new StubProvider(
+        "# MEMORY.md — Long-Term Memory\n\n" +
+          "_Your curated memory. Distilled facts, decisions, and lessons — not raw logs._\n\n" +
+          "## Facts\n\n- Shipped the memory feature.\n- User is actively building the memory pipeline.\n",
+      );
       const global = (await sendRequest(ws, "memory.distill", { scope: "global" })).payload as any;
       expect(global.ok).toBe(true);
       expect(global.file).toBe("MEMORY.md");

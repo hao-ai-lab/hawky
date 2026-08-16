@@ -719,3 +719,90 @@ describe("formatDate()", () => {
     expect(formatDate(new Date(2026, 8, 9))).toBe("2026-09-09");
   });
 });
+
+// =============================================================================
+// snapshotAndPrune()
+// =============================================================================
+
+describe("WorkspaceManager.snapshotAndPrune()", () => {
+  test("writes memory/.backups/MEMORY-<ISO>.md with the OLD content and returns an absolute path", () => {
+    const wsDir = join(tempDir, "workspace");
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+    ws.writeFile("MEMORY.md", "# MEMORY\n\n- keep this fact\n");
+
+    const path = ws.snapshotAndPrune("MEMORY.md", { now: new Date("2026-07-09T14:30:00.000Z") });
+    expect(path).not.toBeNull();
+    expect(path!.startsWith("/") || /^[A-Za-z]:\\/.test(path!)).toBe(true);
+    expect(path).toContain(join("memory", ".backups"));
+    // ':' and '.' replaced so the filename is filesystem-safe. A short random
+    // suffix follows the timestamp to avoid same-clock collisions.
+    expect(path).toMatch(/MEMORY-2026-07-09T14-30-00-000Z-[0-9a-f]{6}\.md$/);
+    expect(existsSync(path!)).toBe(true);
+    expect(readFileSync(path!, "utf-8")).toBe("# MEMORY\n\n- keep this fact\n");
+  });
+
+  test("two snapshots with the SAME injected clock do not collide (both retained)", () => {
+    const wsDir = join(tempDir, "workspace");
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+    const now = new Date("2026-07-09T14:30:00.000Z");
+
+    ws.writeFile("MEMORY.md", "# MEMORY\n\n- first snapshot content\n");
+    const a = ws.snapshotAndPrune("MEMORY.md", { now });
+    ws.writeFile("MEMORY.md", "# MEMORY\n\n- second snapshot content\n");
+    const b = ws.snapshotAndPrune("MEMORY.md", { now });
+
+    // Same timestamp, but distinct filenames — neither clobbers the other.
+    expect(a).not.toBe(b);
+    const backupsDir = join(wsDir, "memory", ".backups");
+    const files = require("node:fs").readdirSync(backupsDir).filter((f: string) => /^MEMORY-.*\.md$/.test(f));
+    expect(files.length).toBe(2);
+    expect(readFileSync(a!, "utf-8")).toBe("# MEMORY\n\n- first snapshot content\n");
+    expect(readFileSync(b!, "utf-8")).toBe("# MEMORY\n\n- second snapshot content\n");
+  });
+
+  test("missing or empty file returns null and writes nothing", () => {
+    const wsDir = join(tempDir, "workspace");
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+
+    // Missing file (init() seeds a template MEMORY.md, so remove it first).
+    ws.deleteFile("MEMORY.md");
+    expect(ws.snapshotAndPrune("MEMORY.md")).toBeNull();
+
+    // Empty (whitespace-only) file.
+    ws.writeFile("MEMORY.md", "   \n  \n");
+    expect(ws.snapshotAndPrune("MEMORY.md")).toBeNull();
+    expect(existsSync(join(wsDir, "memory", ".backups"))).toBe(false);
+  });
+
+  test("prunes to keep=N — after N+K snapshots only the N newest (by ISO name) remain", () => {
+    const wsDir = join(tempDir, "workspace");
+    const ws = new WorkspaceManager(wsDir);
+    ws.init();
+
+    const keep = 3;
+    const total = 6;
+    let lastKept: string[] = [];
+    for (let i = 0; i < total; i++) {
+      ws.writeFile("MEMORY.md", `# MEMORY\n\n- snapshot ${i}\n`);
+      // Distinct, chronologically-increasing timestamps.
+      const now = new Date(Date.UTC(2026, 6, 9, 0, 0, i));
+      ws.snapshotAndPrune("MEMORY.md", { keep, now });
+    }
+
+    const backupsDir = join(wsDir, "memory", ".backups");
+    const files = require("node:fs").readdirSync(backupsDir).filter((f: string) => /^MEMORY-.*\.md$/.test(f)).sort();
+    expect(files.length).toBe(keep);
+    // The newest `keep` timestamps (seconds 03,04,05) survive.
+    lastKept = ["03", "04", "05"];
+    for (const sec of lastKept) {
+      expect(files.some((f: string) => f.includes(`00-00-${sec}-000Z`))).toBe(true);
+    }
+    // The oldest (seconds 00,01,02) were pruned.
+    for (const sec of ["00", "01", "02"]) {
+      expect(files.some((f: string) => f.includes(`00-00-${sec}-000Z`))).toBe(false);
+    }
+  });
+});

@@ -690,6 +690,10 @@ export class MemoryIndex {
     }
 
     for (const entry of entries) {
+      // Skip hidden dirs/files, notably memory/.backups/ — MEMORY.md snapshots
+      // are inert recovery artifacts and must not be indexed as live memory
+      // (they would surface stale, superseded facts in memory_search).
+      if (entry.startsWith(".")) continue;
       const absPath = join(dir, entry);
       try {
         if (!isRealPathInsideRoot(this.workspacePath, absPath)) continue;

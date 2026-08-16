@@ -306,7 +306,9 @@ describe("buildSystemPrompt — bootstrap injection", () => {
   test("shows truncation warning for large files", () => {
     const wsDir = makeWorkspace();
     const ws = new WorkspaceManager(wsDir);
-    ws.writeFile("MEMORY.md", "x".repeat(50_000));
+    // MEMORY.md gets a larger injection cap (curated memory is injected whole up
+    // to ~60k); exceed that so the head/tail truncation still fires here.
+    ws.writeFile("MEMORY.md", "x".repeat(80_000));
 
     const prompt = buildSystemPrompt({
       working_directory: "/tmp",

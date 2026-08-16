@@ -36,6 +36,7 @@ import { listSessions } from "../storage/session.js";
 import { extractSessionText } from "./session-extract.js";
 import { getPrompt } from "../prompts/index.js";
 import { createSubsystemLogger } from "../logging/index.js";
+import { decideGlobalWrite, sliceSessionTail } from "./anti-lossy.js";
 
 const log = createSubsystemLogger("memory/distill");
 
@@ -84,10 +85,11 @@ function buildDistillProvider(config: HawkyConfig, model: string): LLMProvider {
 
 /** Cap the transcript so a long session can't blow the context window. */
 const MAX_TRANSCRIPT_CHARS = 24_000;
-/** Cap how much existing global memory we feed back in for consolidation. */
-const MAX_GLOBAL_CHARS = 16_000;
 const MAX_DAILY_OUTPUT_TOKENS = 1024;
-const MAX_GLOBAL_OUTPUT_TOKENS = 2048;
+// Raised (was 2048) so a full-rewrite of a grown MEMORY.md is not itself
+// truncated — output truncation would be exactly the lossiness the anti-lossy
+// gate then rejects. Consolidation runs only every 6h, so the cost is bounded.
+const MAX_GLOBAL_OUTPUT_TOKENS = 8192;
 
 export interface DistillRequest {
   /** Backend session key, e.g. "realtime:abc". Defaults to most recent realtime session. */
@@ -108,6 +110,14 @@ export interface DistillResult {
   mocked: boolean;
   /** Human-readable note (e.g. "no transcript found"). */
   note?: string;
+  /**
+   * Set on the global scope when the anti-lossy gate rejected the candidate and
+   * stashed it as MEMORY.md.proposed. The LLM DID run and consumed the current
+   * inputs — a re-run against the same daily logs would just reproduce the same
+   * rejected output. The scheduler uses this to advance its watermark so it does
+   * not re-invoke the LLM every tick until daily inputs actually change.
+   */
+  proposedRejection?: boolean;
 }
 
 // -----------------------------------------------------------------------------
@@ -136,7 +146,9 @@ async function assembleTranscript(sessionKey?: string): Promise<{ text: string; 
   const session = chosen[0];
   try {
     const res = await extractSessionText(session.filePath);
-    const text = res.text.trim().slice(0, MAX_TRANSCRIPT_CHARS);
+    // Keep the TAIL of a long session (where actionable content usually is)
+    // instead of the opening.
+    const text = sliceSessionTail(res.text.trim(), MAX_TRANSCRIPT_CHARS);
     return { text, sourceId: session.id };
   } catch (err) {
     log.debug("extractSessionText failed", {
@@ -247,9 +259,12 @@ async function distillGlobal(
   engine: DistillEngine,
   workspace: WorkspaceManager,
   req: DistillRequest,
+  now?: Date,
 ): Promise<DistillResult> {
   const file = "MEMORY.md";
-  const existing = (workspace.readFile(file) ?? "").slice(0, MAX_GLOBAL_CHARS);
+  // Feed the FULL existing MEMORY.md back in (no input truncation) — clipping it
+  // was itself a source of lossiness.
+  const existing = workspace.readFile(file) ?? "";
 
   // Feed the last few daily logs back in for consolidation.
   const recentLogs = workspace.listDailyLogs().slice(-5);
@@ -299,7 +314,37 @@ async function distillGlobal(
     }
   }
 
-  workspace.writeFile(file, consolidated.trimEnd() + "\n");
+  // Anti-lossy gate: refuse to overwrite MEMORY.md with a candidate that looks
+  // like it dropped a large fraction of the existing content. On rejection we
+  // keep MEMORY.md and stash the candidate as MEMORY.md.proposed for review.
+  const finalContent = consolidated.trimEnd() + "\n";
+  const decision = decideGlobalWrite(existing, finalContent);
+
+  if (decision.action === "propose") {
+    workspace.writeFile("MEMORY.md.proposed", finalContent);
+    log.warn("global consolidation rejected as lossy; wrote MEMORY.md.proposed, kept MEMORY.md", {
+      reason: decision.reason,
+      oldLen: decision.oldLen,
+      newLen: decision.newLen,
+      oldFacts: decision.oldFacts,
+      newFacts: decision.newFacts,
+    });
+    return {
+      ok: false,
+      scope: "global",
+      file,
+      preview: preview(existing),
+      mocked: Boolean(req.mock),
+      note: `Consolidation output looked lossy (${decision.reason}); kept MEMORY.md, wrote MEMORY.md.proposed.`,
+      proposedRejection: true,
+    };
+  }
+
+  // Snapshot the OLD file before overwriting (no-op when trivial/empty).
+  workspace.snapshotAndPrune("MEMORY.md", { keep: 20, now });
+  // Atomic overwrite: a crash mid-write must not truncate MEMORY.md — the whole
+  // point of this feature is data-loss safety.
+  workspace.writeFileAtomic(file, finalContent);
   log.info("global consolidation complete", {
     file,
     dailyLogs: dailyBlocks.length,
@@ -337,7 +382,7 @@ export async function distillMemory(
   };
 
   if (req.scope === "global") {
-    return distillGlobal(engine, workspace, req);
+    return distillGlobal(engine, workspace, req, now);
   }
   return distillDaily(engine, workspace, req, now);
 }
