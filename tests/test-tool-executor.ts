@@ -4,6 +4,9 @@
 // =============================================================================
 
 import { describe, expect, test, afterEach, beforeEach } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   PermissionCache,
   executeTools,
@@ -14,6 +17,7 @@ import {
 } from "../src/agent/tool_executor.js";
 import { ToolRegistry, resetToolRegistry } from "../src/tools/registry.js";
 import { LoopGuard } from "../src/agent/loop_guard.js";
+import { setWorkspaceDir, resetWorkspaceDir } from "../src/storage/workspace.js";
 import type {
   ToolDefinition,
   ToolContext,
@@ -1676,5 +1680,389 @@ describe("executeTools — config rules", () => {
     );
 
     expect(results[0].result.type).toBe("text");
+  });
+});
+
+// =============================================================================
+// Headless permission floor — file-write workspace envelope + hard-block floor
+//
+// The change under test constrains what a headless lane (cron / heartbeat /
+// sub-agent, permissionResolver=null) may do WITHOUT a human in the loop:
+//   - hard-block floor: dangerous file paths (~/.ssh/authorized_keys, home
+//     dotfiles, .git/... etc.) AND dangerous nodes system.run inner commands
+//     are denied outright, beating any config allow rule.
+//   - auto-approve envelope: file writes OUTSIDE the working dirs are denied;
+//     in-workspace non-dangerous writes still auto-approve (memory/cron case).
+//   - bash denylist is UNCHANGED: a non-safe, non-dangerous command still
+//     auto-approves so sub-agents can run builds/tests.
+// =============================================================================
+
+describe("executeTools — headless file-write floor", () => {
+  let registry: ToolRegistry;
+  let guard: LoopGuard;
+  let workspace: string;
+  let outsideDir: string;
+
+  // A write_file / edit_file tool that actually writes input.file_path to disk,
+  // so we can assert the file was (or was NOT) created when the call is denied.
+  function makeFsTool(name: string): ToolDefinition {
+    return makeTool(name, "ask_user", {
+      executeFn: async (input: any) => {
+        writeFileSync(String(input.file_path), String(input.content ?? ""));
+        return { type: "text" as const, content: `${name}:wrote` };
+      },
+    });
+  }
+
+  // A nodes tool that records whether it actually ran (to prove denial blocks execution).
+  let nodesRan: boolean;
+  function makeNodesTool(): ToolDefinition {
+    return makeTool("nodes", "ask_user", {
+      executeFn: async () => {
+        nodesRan = true;
+        return { type: "text" as const, content: "nodes:ran" };
+      },
+    });
+  }
+
+  beforeEach(() => {
+    registry = new ToolRegistry();
+    guard = new LoopGuard(40);
+    // Canonicalize: on macOS tmpdir() lives under /var -> /private/var. The
+    // containment check realpaths the cwd but falls back to the lexical path
+    // for a not-yet-created file, so an un-canonicalized cwd would spuriously
+    // fail containment. Real sessions run with a canonical working directory.
+    workspace = realpathSync(mkdtempSync(join(tmpdir(), "hawky-ws-")));
+    outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "hawky-out-")));
+    nodesRan = false;
+  });
+
+  afterEach(() => {
+    resetToolRegistry();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  function headlessCtx() {
+    return makeContext({ working_directory: workspace, headless: true });
+  }
+
+  // 1. write_file to a DANGEROUS path -> denied by hard-block floor, file NOT created.
+  test("headless: write_file to a dangerous path (~/.ssh/authorized_keys) is denied and not created", async () => {
+    registry.register(makeFsTool("write_file"));
+    const cache = new PermissionCache();
+    const { events, emit } = collectEvents();
+    const dangerousPath = `${process.env.HOME}/.ssh/authorized_keys`;
+
+    const results = await executeTools(
+      [makeCall("t1", "write_file", { file_path: dangerousPath, content: "pwned" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null, // no resolver — cron / sub-agent lane
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("Dangerous file path blocked in headless mode");
+    // The file was never written (execute never ran).
+    expect(existsSync(dangerousPath)).toBe(false);
+    // No tool_use_start fired — the call never reached execution.
+    expect(events.some((e) => e.type === "tool_use_start")).toBe(false);
+  });
+
+  // 2. write_file OUTSIDE the working dir but non-dangerous -> denied by workspace envelope.
+  test("headless: write_file outside the working dir is denied by the workspace envelope", async () => {
+    registry.register(makeFsTool("write_file"));
+    const cache = new PermissionCache();
+    const { events, emit } = collectEvents();
+    const outsidePath = join(outsideDir, "note.txt");
+
+    const results = await executeTools(
+      [makeCall("t1", "write_file", { file_path: outsidePath, content: "hi" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("File write outside the workspace blocked in headless mode");
+    expect(existsSync(outsidePath)).toBe(false);
+    // The envelope denial happens after the tool is approved-for-prompt but
+    // before execution; no tool_use_start / execution occurred.
+    expect(events.some((e) => e.type === "tool_use_start")).toBe(false);
+  });
+
+  // 3. write_file INSIDE the working dir -> allowed and executed (memory/cron case).
+  test("headless: write_file inside the working dir is allowed and executed", async () => {
+    registry.register(makeFsTool("write_file"));
+    const cache = new PermissionCache();
+    const { emit } = collectEvents();
+    const inPath = join(workspace, "memory.md");
+
+    const results = await executeTools(
+      [makeCall("t1", "write_file", { file_path: inPath, content: "distilled" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("text");
+    expect(results[0].result.content).toBe("write_file:wrote");
+    expect(existsSync(inPath)).toBe(true);
+    expect(readFileSync(inPath, "utf8")).toBe("distilled");
+  });
+
+  // 4. edit_file: one in-workspace allowed + one dangerous/outside denied.
+  test("headless: edit_file inside the working dir is allowed and executed", async () => {
+    registry.register(makeFsTool("edit_file"));
+    const cache = new PermissionCache();
+    const { emit } = collectEvents();
+    const inPath = join(workspace, "edit-me.txt");
+    // Pre-create so this resembles a genuine edit.
+    writeFileSync(inPath, "before");
+
+    const results = await executeTools(
+      [makeCall("t1", "edit_file", { file_path: inPath, content: "after" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("text");
+    expect(readFileSync(inPath, "utf8")).toBe("after");
+  });
+
+  test("headless: edit_file to a dangerous path (home dotfile) is denied by the floor", async () => {
+    registry.register(makeFsTool("edit_file"));
+    const cache = new PermissionCache();
+    const { events, emit } = collectEvents();
+    const dangerousPath = `${process.env.HOME}/.zshrc`;
+
+    const results = await executeTools(
+      [makeCall("t1", "edit_file", { file_path: dangerousPath, content: "evil" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("Dangerous file path blocked in headless mode");
+    expect(events.some((e) => e.type === "tool_use_start")).toBe(false);
+  });
+
+  // 5. nodes invoke system.run with a dangerous inner command in headless -> denied.
+  test("headless: nodes system.run with a dangerous inner command is denied (floor beats everything)", async () => {
+    registry.register(makeNodesTool());
+    const cache = new PermissionCache();
+    const { events, emit } = collectEvents();
+
+    const results = await executeTools(
+      [makeCall("t1", "nodes", {
+        action: "invoke",
+        command: "system.run",
+        params: { command: ["rm", "-rf", "~"] },
+      })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("Dangerous node command blocked in headless mode");
+    expect(nodesRan).toBe(false);
+    expect(events.some((e) => e.type === "tool_use_start")).toBe(false);
+  });
+
+  // 6. REGRESSION: non-safe, non-dangerous bash still auto-approves headless.
+  //    Proves we did NOT tighten the bash denylist.
+  test("headless: non-safe non-dangerous bash (`echo hello`) still auto-approves and runs", async () => {
+    // `echo hello` is NOT on the safe-bash allowlist and NOT dangerous, so
+    // it falls through the headless envelope and auto-approves.
+    registry.register(makeTool("bash", "ask_user", {
+      executeFn: async (input: any) => ({ type: "text" as const, content: `ran:${input.command}` }),
+    }));
+    const cache = new PermissionCache();
+    const { emit } = collectEvents();
+
+    const results = await executeTools(
+      [makeCall("t1", "bash", { command: "echo hello" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("text");
+    expect(results[0].result.content).toBe("ran:echo hello");
+  });
+
+  // 7. configRules allow rule for the out-of-workspace write -> allowed (explicit opt-in).
+  test("headless: an allow rule matching the out-of-workspace write makes it allowed (envelope honors opt-in)", async () => {
+    registry.register(makeFsTool("write_file"));
+    const cache = new PermissionCache();
+    const { emit } = collectEvents();
+    const outsidePath = join(outsideDir, "opt-in.txt");
+
+    const results = await executeTools(
+      [makeCall("t1", "write_file", { file_path: outsidePath, content: "allowed" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+      { allow: [`Write(${outsideDir}/*)`] },
+    );
+
+    expect(results[0].result.type).toBe("text");
+    expect(results[0].result.content).toBe("write_file:wrote");
+    expect(existsSync(outsidePath)).toBe(true);
+  });
+
+  // 8. SYMLINK ESCAPE: write_file to a not-yet-existing leaf under an in-tree
+  //    symlink whose target is OUTSIDE the workspace must be denied. Before the
+  //    fix, realpath of the non-existent leaf fell back to the lexical path
+  //    `<ws>/link/pwned.txt` (still under <ws>/) and was wrongly allowed, then
+  //    the write followed the symlink and landed outside the workspace.
+  test("headless: write_file through an in-tree symlink to an outside dir is denied and not created outside", async () => {
+    registry.register(makeFsTool("write_file"));
+    const cache = new PermissionCache();
+    const { emit } = collectEvents();
+
+    // <ws>/outlink -> outsideDir (a real symlink inside the workspace).
+    const linkPath = join(workspace, "outlink");
+    symlinkSync(outsideDir, linkPath);
+    // Target a not-yet-existing leaf under the symlink.
+    const escapePath = join(linkPath, "pwned.txt");
+    const realTarget = join(outsideDir, "pwned.txt");
+
+    const results = await executeTools(
+      [makeCall("t1", "write_file", { file_path: escapePath, content: "pwned" })],
+      registry,
+      headlessCtx(),
+      cache,
+      null,
+      guard,
+      emit,
+    );
+
+    expect(results[0].result.type).toBe("error");
+    expect(results[0].result.content).toContain("File write outside the workspace blocked in headless mode");
+    // The write never ran, so nothing landed outside the workspace.
+    expect(existsSync(realTarget)).toBe(false);
+  });
+
+  // 9. MEMORY REGRESSION: headless memory writes target getWorkspaceDir()
+  //    (~/.hawky/workspace), a fixed path independent of the session cwd. When
+  //    the gateway is launched from a different dir (working_directory != the
+  //    workspace), those writes must still be allowed via the implicit
+  //    workspace-dir allowance in the envelope.
+  test("headless: write_file to the memory workspace dir is allowed even when cwd differs", async () => {
+    const memWorkspace = realpathSync(mkdtempSync(join(tmpdir(), "hawky-mem-")));
+    setWorkspaceDir(memWorkspace);
+    try {
+      registry.register(makeFsTool("write_file"));
+      const cache = new PermissionCache();
+      const { emit } = collectEvents();
+      // Session cwd is `workspace` (the launch dir), NOT the memory workspace.
+      const memPath = join(memWorkspace, "memory", "2026-07-09.md");
+      mkdirSync(join(memWorkspace, "memory"), { recursive: true });
+
+      const results = await executeTools(
+        [makeCall("t1", "write_file", { file_path: memPath, content: "distilled" })],
+        registry,
+        makeContext({ working_directory: workspace, headless: true }),
+        cache,
+        null,
+        guard,
+        emit,
+      );
+
+      expect(results[0].result.type).toBe("text");
+      expect(results[0].result.content).toBe("write_file:wrote");
+      expect(existsSync(memPath)).toBe(true);
+    } finally {
+      resetWorkspaceDir();
+      rmSync(memWorkspace, { recursive: true, force: true });
+    }
+  });
+
+  // 10. The implicit workspace allowance is scoped to memory targets ONLY.
+  //     Widening it to the whole workspace root would let a headless lane plant
+  //     a workspace skill (which overrides bundled/user skills) or overwrite a
+  //     bootstrap file injected into the system prompt — a self-reprogramming
+  //     vector. MEMORY.md (consolidation) IS allowed; skills/ and other
+  //     workspace-root files are NOT.
+  test("headless: MEMORY.md write is allowed but workspace skills / bootstrap files are denied", async () => {
+    const memWorkspace = realpathSync(mkdtempSync(join(tmpdir(), "hawky-mem-")));
+    setWorkspaceDir(memWorkspace);
+    try {
+      registry.register(makeFsTool("write_file"));
+
+      // MEMORY.md (consolidation target) -> allowed.
+      {
+        const cache = new PermissionCache();
+        const { emit } = collectEvents();
+        const memoryMd = join(memWorkspace, "MEMORY.md");
+        const results = await executeTools(
+          [makeCall("t1", "write_file", { file_path: memoryMd, content: "curated" })],
+          registry, makeContext({ working_directory: workspace, headless: true }),
+          cache, null, guard, emit,
+        );
+        expect(results[0].result.type).toBe("text");
+        expect(existsSync(memoryMd)).toBe(true);
+      }
+
+      // Workspace skill injection -> denied.
+      {
+        const cache = new PermissionCache();
+        const { emit } = collectEvents();
+        const skillPath = join(memWorkspace, "skills", "evil", "SKILL.md");
+        const results = await executeTools(
+          [makeCall("t2", "write_file", { file_path: skillPath, content: "malicious skill" })],
+          registry, makeContext({ working_directory: workspace, headless: true }),
+          cache, null, guard, emit,
+        );
+        expect(results[0].result.type).toBe("error");
+        expect(results[0].result.content).toContain("outside the workspace blocked in headless mode");
+        expect(existsSync(skillPath)).toBe(false);
+      }
+
+      // Bootstrap file at workspace root (injected into the system prompt) -> denied.
+      {
+        const cache = new PermissionCache();
+        const { emit } = collectEvents();
+        const agentsMd = join(memWorkspace, "AGENTS.md");
+        const results = await executeTools(
+          [makeCall("t3", "write_file", { file_path: agentsMd, content: "poisoned instructions" })],
+          registry, makeContext({ working_directory: workspace, headless: true }),
+          cache, null, guard, emit,
+        );
+        expect(results[0].result.type).toBe("error");
+        expect(existsSync(agentsMd)).toBe(false);
+      }
+    } finally {
+      resetWorkspaceDir();
+      rmSync(memWorkspace, { recursive: true, force: true });
+    }
   });
 });
