@@ -321,7 +321,7 @@ describe("Error handling", () => {
 
     const r = await doSearch({ query: "test" });
     expect(r.type).toBe("error");
-    expect(r.content).toContain("Failed to parse");
+    expect(r.content).toContain("Search error (brave)");
   });
 
   test("malformed response (missing web.results) returns no results", async () => {
