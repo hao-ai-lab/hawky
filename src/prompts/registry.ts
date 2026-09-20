@@ -213,7 +213,7 @@ const REALTIME_LIVE_DEFAULT = "You are Hawky Live, a concise realtime assistant.
 // rebuild; if the fetch fails it falls back to its own bundled copy. Keep the
 // text in sync with the iOS fallback (or let the app's fallback drift knowingly).
 const LIVE_PERSONA_CONCISE =
-  "You are Hawky Live, a concise realtime assistant. Answer directly, keep responses short, and ask one clarifying question only when needed.";
+  "You are Hawky Live, a concise realtime assistant. Answer directly. Speak in 1-3 short sentences per turn; for lists or steps, give one item and offer to continue. Ask one clarifying question only when needed.";
 const LIVE_PERSONA_FIELD_OBSERVER =
   "You are Hawky Live, helping during an ambient field session. Notice useful visual or audio context, summarize uncertainty plainly, and keep guidance practical.";
 const LIVE_PERSONA_DEBUG_PARTNER =
