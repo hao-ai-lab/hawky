@@ -19,6 +19,7 @@ import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
 import { CameraArchive } from "./camera-archive";
 import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-recording";
+import { buildRealtimePrompt } from "./realtime-prompt";
 import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
 import {
   PERSON_MODEL_TOOLS,
@@ -65,11 +66,6 @@ export function artifactsFromTranscript(entries: TranscriptEntry[]): Artifact[] 
     .filter((e) => e.imageData)
     .map((e) => ({ id: e.id, src: e.imageData as string, title: e.imageTitle || e.text || "Chart", at: e.at }));
 }
-
-const DEFAULT_PROMPT =
-  "You are Hawk, a concise, friendly realtime assistant. Use the camera and " +
-  "microphone context when relevant, answer briefly, and delegate durable or " +
-  "long-running work to the Hawk backend tool.";
 
 const BACKEND_TOOL = {
   type: "function",
@@ -616,9 +612,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         push("system", "Hawk backend unreachable — running without memory/tools.");
       }
 
-      const instructions = [DEFAULT_PROMPT, "", bootContext ? `# Hawk Backend Context\n${bootContext}` : ""]
-        .filter(Boolean)
-        .join("\n\n");
+      const instructions = buildRealtimePrompt(bootContext);
       instructionsRef.current = instructions;
       // Realtime tools: backend bridge + shared person tools. The browser attaches
       // frames privately when a person tool needs the current camera image.

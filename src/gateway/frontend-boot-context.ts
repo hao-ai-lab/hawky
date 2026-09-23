@@ -12,6 +12,7 @@ import type {
   ExtensionFrontendToolContribution,
   ExtensionManifest,
 } from "../extensions/types.js";
+import { renderFrontendBootPrompt } from "./frontend-boot-prompt.js";
 import { MethodError } from "./methods.js";
 import type { GatewayServer } from "./server.js";
 
@@ -274,61 +275,30 @@ export function buildFrontendBootContext(
 
   const warnings: string[] = [];
   const sources: string[] = [];
-  const sections: string[] = [
-    "# Backend Boot Context",
-    "",
-    "You are joining an existing Hawky-backed realtime session. Use this context silently unless the user asks about it.",
-    "",
-    "## Session",
-    `- Channel: ${channelId}`,
-    `- Backend session: ${sessionKey}`,
-    `- Frontend participant: ${participantId}`,
-    `- Mode: ${mode}`,
-    `- Capabilities: ${capabilities.length > 0 ? capabilities.join(", ") : "unspecified"}`,
-  ];
-
-  if (tools.length > 0) {
-    sections.push("", "## Toolbox");
-    sections.push("The frontend realtime agent has these callable tools. Prefer fast local tools for simple facts and delegate durable work to the backend session bridge.");
-    for (const tool of tools) {
-      sections.push(formatToolForPrompt(tool));
-    }
-  }
-
   const contextFiles = loadContextFiles(workspace);
-
-  if (contextFiles.length > 0) {
-    sections.push("", "## Relevant Memory");
-    for (const file of contextFiles) {
-      sources.push(file.filename);
-      sections.push(formatContextFile(file));
-    }
-  } else {
+  sources.push(...contextFiles.map(file => file.filename));
+  if (contextFiles.length === 0) {
     warnings.push("No identity, soul, user, or memory files were found in the Hawky workspace.");
   }
 
-  const dailyLogs = workspace.listDailyLogs().slice(-2).reverse();
-  if (dailyLogs.length > 0) {
-    sections.push("", "## Recent Daily Logs");
-    for (const log of dailyLogs) {
-      const path = `memory/${log}`;
-      const content = workspace.readFile(path);
-      if (!content?.trim()) continue;
-      sources.push(path);
-      sections.push(`### ${path}\n${content.trim()}`);
-    }
-  }
-
-  sections.push(
-    "",
-    "## Behavior Notes",
-    "- Treat this boot context as private context, not as a user message.",
-    "- Do not recite this context at startup.",
-    "- If the user asks for durable work, use the Hawky bridge tools instead of pretending the frontend can do it locally.",
-    "- If memory seems missing or stale, ask the backend agent or search memory through the available tools.",
-  );
-
-  const fullContext = sections.join("\n");
+  // Keep the current memory selection and character budget. Rendering is separate
+  // so changing the character or prompt layout never requires changing file I/O.
+  const dailyLogs = workspace.listDailyLogs().slice(-2).reverse().flatMap(log => {
+    const filename = `memory/${log}`;
+    const content = workspace.readFile(filename);
+    if (!content?.trim()) return [];
+    sources.push(filename);
+    return [{ filename, content }];
+  });
+  const fullContext = renderFrontendBootPrompt({
+    identity: contextFiles.find(file => file.filename === "IDENTITY.md")?.content,
+    soul: contextFiles.find(file => file.filename === "SOUL.md")?.content,
+    memory: contextFiles.filter(file => file.filename !== "IDENTITY.md" && file.filename !== "SOUL.md"),
+    dailyLogs,
+    mode,
+    capabilities,
+    tools,
+  });
   const context = maxChars ? truncateMiddle(fullContext, maxChars) : fullContext;
 
   return {
@@ -401,10 +371,6 @@ function cleanFrontendToolDefinition(value: unknown): FrontendToolDefinition | u
     tool.x_tool_metadata = metadata;
   }
   return tool;
-}
-
-function formatContextFile(file: BootstrapFile): string {
-  return `### ${file.filename}\n${file.content.trim()}`;
 }
 
 function loadContextFiles(workspace: WorkspaceManager): BootstrapFile[] {
@@ -483,13 +449,6 @@ function isJSONSchemaObject(value: unknown): value is JSONSchemaObject {
     (value as Record<string, unknown>).properties !== null &&
     !Array.isArray((value as Record<string, unknown>).properties),
   );
-}
-
-function formatToolForPrompt(tool: OpenAIFunctionToolDefinition): string {
-  const required = Array.isArray(tool.parameters.required) && tool.parameters.required.length > 0
-    ? ` Required: ${tool.parameters.required.join(", ")}.`
-    : "";
-  return `- ${tool.name}: ${tool.description}${required}`;
 }
 
 function truncateMiddle(text: string, maxChars: number): string {

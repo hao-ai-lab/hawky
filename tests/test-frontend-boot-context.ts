@@ -51,6 +51,29 @@ afterEach(() => {
 });
 
 describe("frontend.boot_context", () => {
+  test("keeps routing IDs in metadata and character prose separate from unchanged memory", () => {
+    writeFileSync(join(workspaceDir, "IDENTITY.md"), "# Identity\n\nYour name is **Hawk**.\n");
+    writeFileSync(join(workspaceDir, "SOUL.md"), "## Soul\n\n- Be _candid_.\n- Use `plain language`.\n");
+    writeFileSync(join(workspaceDir, "memory", "2026-06-03.md"), "Old daily fact.");
+    writeFileSync(join(workspaceDir, "memory", "2026-06-04.md"), "Recent daily fact.");
+    const result = buildFrontendBootContext({
+      session_key: "private-session-id", channel_id: "private-channel-id", participant_id: "private-device-id",
+    }, { workspace: new WorkspaceManager(workspaceDir) });
+    expect(result.session_key).toBe("private-session-id");
+    expect(result.channel_id).toBe("private-channel-id");
+    expect(result.participant_id).toBe("private-device-id");
+    expect(result.context).not.toMatch(/private-(session|channel|device)-id/);
+    expect(result.context).toContain("Your name is Hawk.");
+    expect(result.context).toContain("Be candid.");
+    expect(result.context).toContain("Use plain language.");
+    expect(result.context).not.toContain("**Hawk**");
+    expect(result.context).toContain("# Memory\n\nLive startup should use backend boot context.");
+    expect(result.context).toContain("Recent daily fact.");
+    expect(result.context).not.toContain("Old daily fact.");
+    expect(result.context.indexOf("Identity:")).toBeLessThan(result.context.indexOf("Soul:"));
+    expect(result.context.indexOf("Soul:")).toBeLessThan(result.context.indexOf("## Relevant Memory"));
+  });
+
   test("builds compact deterministic context from workspace memory", () => {
     const result = buildFrontendBootContext(
       {
@@ -239,7 +262,7 @@ describe("frontend.boot_context", () => {
     expect(result.ok).toBe(true);
     expect(result.session_key).toBe("realtime:abc");
     expect(result.first_contact.reason).toBe("initialized");
-    expect(result.context).toContain("Backend session: realtime:abc");
+    expect(result.context).not.toContain("realtime:abc");
   });
 
   test("excludes installation bootstrap from realtime context even on a fresh workspace", () => {

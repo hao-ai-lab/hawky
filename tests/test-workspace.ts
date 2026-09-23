@@ -576,9 +576,9 @@ describe("Template content", () => {
     ws.init();
 
     const content = ws.readFile("SOUL.md")!;
-    expect(content).toContain("genuinely helpful");
-    expect(content).toContain("Have opinions");
-    expect(content).toContain("Boundaries");
+    expect(content).toContain("Have your own judgment");
+    expect(content).toContain("Silence is comfortable");
+    expect(content).not.toContain("wake up fresh");
   });
 
   test("USER.md contains profile fields", () => {
@@ -592,16 +592,15 @@ describe("Template content", () => {
     expect(content).toContain("Context");
   });
 
-  test("IDENTITY.md contains identity fields", () => {
+  test("IDENTITY.md establishes Hawk without first-contact setup", () => {
     const wsDir = join(tempDir, "workspace");
     const ws = new WorkspaceManager(wsDir);
     ws.init();
 
     const content = ws.readFile("IDENTITY.md")!;
-    expect(content).toContain("Name:");
-    expect(content).toContain("Creature:");
-    expect(content).toContain("Vibe:");
-    expect(content).toContain("Emoji:");
+    expect(content).toContain("Your name is Hawk");
+    expect(content).toContain("Your character is established");
+    expect(content).not.toContain("Fill this in");
   });
 
   test("AGENTS.md contains session startup instructions", () => {
