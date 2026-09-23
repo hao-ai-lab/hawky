@@ -19,6 +19,7 @@ import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
 import { CameraArchive } from "./camera-archive";
 import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-recording";
+import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
 import {
   PERSON_MODEL_TOOLS,
   type PersonModelToolName,
@@ -393,8 +394,8 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     const t = text.trim();
     if (!t) return;
     const entry: TranscriptEntry = { id: entryId(), kind: "user", text: t, at: new Date().toLocaleTimeString() };
+    const id = assistantTextRef.current.currentEntryId;
     setTranscript((cur) => {
-      const id = assistantEntryIdRef.current;
       const idx = id ? cur.findIndex((e) => e.id === id) : -1;
       if (idx >= 0) {
         const next = [...cur];
@@ -410,11 +411,11 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   // shortly after, to avoid an RPC per word. Only user/assistant turns.
   const pendingTurnsRef = useRef<Array<{ role: "user" | "assistant"; text: string; timestamp: string }>>([]);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persistTurn = useCallback((role: "user" | "assistant", text: string) => {
+  const persistTurn = useCallback((role: "user" | "assistant", text: string, identity?: { responseId: string; itemId?: string; contentIndex: number }) => {
     const t = text.trim();
     if (!t) return;
     // Auto-title the session from its first user message (ChatGPT-style).
-    cameraArchiveRef.current?.record("message.completed", { role, text: t });
+    cameraArchiveRef.current?.record("message.completed", { role, text: t, ...identity });
     if (role === "user") void useSessionStore.getState().maybeAutoTitle(liveSessionKeyRef.current, t);
     pendingTurnsRef.current.push({ role, text: t, timestamp: new Date().toISOString() });
     if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
@@ -450,15 +451,9 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     }
   }, [rpc]);
 
-  // Live-streaming assistant bubble: the id is tracked so deltas append to the
-  // same entry; cleared when the response finishes. `producedText` records
-  // whether the CURRENT response already emitted assistant text, so the
-  // response.done fallback doesn't re-add an already-shown transcript.
-  const assistantEntryIdRef = useRef<string | null>(null);
-  const responseProducedTextRef = useRef(false);
-  // True once the current response's assistant turn has been persisted (prevents
-  // double-persist when both text.done and audio_transcript.done fire).
-  const responsePersistedRef = useRef(false);
+  // Provider state changes synchronously in event handlers. React receives
+  // immutable snapshots; replaying a render cannot persist a turn twice.
+  const assistantTextRef = useRef(new RealtimeTranscript());
   // True while a response is in flight (between response.created and
   // response.done). Lets us only send response.cancel when there is actually
   // something to cancel — otherwise the Realtime API errors with
@@ -471,48 +466,16 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   const staySilentRef = useRef(false);
   const silenceTranscriptRef = useRef<string[]>([]);
   const silenceFrameCountRef = useRef(0);
-  function streamAssistant(delta: string) {
-    if (!delta) return;
-    responseProducedTextRef.current = true;
+  function applyAssistantText(update: AssistantText | undefined) {
+    if (!update) return;
+    const entry: TranscriptEntry = { id: update.id, at: update.at, text: update.text, kind: "assistant" };
     setTranscript((cur) => {
-      const next = [...cur];
-      const id = assistantEntryIdRef.current;
-      const idx = id ? next.findIndex((e) => e.id === id) : -1;
-      if (idx >= 0) {
-        next[idx] = { ...next[idx], text: next[idx].text + delta };
-      } else {
-        const newId = entryId();
-        assistantEntryIdRef.current = newId;
-        next.push({ id: newId, kind: "assistant", text: delta, at: new Date().toLocaleTimeString() });
-      }
-      return next.slice(-200);
+      const exists = cur.some(e => e.id === entry.id);
+      return (exists ? cur.map(e => e.id === entry.id ? entry : e) : [...cur, entry]).slice(-200);
     });
-  }
-  function endAssistantStream(finalText?: string) {
-    const id = assistantEntryIdRef.current;
-    assistantEntryIdRef.current = null;
-    // Persist the assistant turn at most ONCE per response: in audio mode the API
-    // can emit BOTH output_text.done and output_audio_transcript.done for the
-    // same turn, which would otherwise double-persist.
-    const alreadyPersisted = responsePersistedRef.current;
-    if (id) {
-      setTranscript((cur) => {
-        const next = cur.map((e) =>
-          e.id === id && typeof finalText === "string" && finalText.trim() ? { ...e, text: finalText.trim() } : e,
-        );
-        const entry = next.find((e) => e.id === id);
-        if (entry?.text.trim() && !alreadyPersisted) {
-          responsePersistedRef.current = true;
-          persistTurn("assistant", entry.text);
-        }
-        return next;
-      });
-    } else if (finalText && finalText.trim() && !alreadyPersisted) {
-      responseProducedTextRef.current = true;
-      responsePersistedRef.current = true;
-      push("assistant", finalText);
-      persistTurn("assistant", finalText);
-    }
+    if (update.completed) persistTurn("assistant", update.text, {
+      responseId: update.responseId, itemId: update.itemId, contentIndex: update.contentIndex,
+    });
   }
 
   const sendRealtime = useCallback((event: unknown) => {
@@ -589,7 +552,8 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     setPhase("connecting");
     setError(null);
     setBridgeOffline(false);
-    assistantEntryIdRef.current = null;
+    assistantTextRef.current.reset();
+    activeResponseRef.current = false;
     // Pin the session key for the entire life of THIS session so every async
     // path (bridge tool, transcript persistence, boot context) uses the same one.
     liveSessionKeyRef.current = sessionKey;
@@ -875,20 +839,18 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
 
     // New response starting → reset the per-response guards.
     if (type === "response.created") {
-      responseProducedTextRef.current = false;
-      responsePersistedRef.current = false;
-      assistantEntryIdRef.current = null;
-      activeResponseRef.current = true;
+      assistantTextRef.current.start(ev.response?.id);
+      activeResponseRef.current = assistantTextRef.current.active;
       return;
     }
 
     // --- Assistant TEXT output (text modality): delta + done ---
     if (type === "response.output_text.delta" && typeof ev.delta === "string") {
-      streamAssistant(ev.delta);
+      applyAssistantText(assistantTextRef.current.delta(ev, ev.delta));
       return;
     }
     if (type === "response.output_text.done") {
-      endAssistantStream(typeof ev.text === "string" ? ev.text : undefined);
+      applyAssistantText(assistantTextRef.current.complete(ev, typeof ev.text === "string" ? ev.text : undefined));
       return;
     }
 
@@ -901,11 +863,11 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       typeof ev.delta === "string"
     ) {
       flashSpeaking();
-      if (settings.assistantTranscript) streamAssistant(ev.delta);
+      if (settings.assistantTranscript) applyAssistantText(assistantTextRef.current.delta(ev, ev.delta));
       return;
     }
     if (type === "response.output_audio_transcript.done" || type === "response.audio_transcript.done") {
-      if (settings.assistantTranscript) endAssistantStream(typeof ev.transcript === "string" ? ev.transcript : undefined);
+      if (settings.assistantTranscript) applyAssistantText(assistantTextRef.current.complete(ev, typeof ev.transcript === "string" ? ev.transcript : undefined));
       return;
     }
 
@@ -915,32 +877,12 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       return;
     }
 
-    // Fallback: only if THIS response produced no assistant text via deltas/done
-    // (covers API variants that send neither), drain it from the final response.
-    // Guarded by responseProducedTextRef so a normally-streamed transcript is
-    // NOT shown a second time.
+    // Final output can fill in missing transcript events. The tracker keeps
+    // completed parts idempotent and never finalizes another response's bubble.
     if (type === "response.done" || type === "response.completed") {
-      const out = ev.response?.output;
-      if (!responseProducedTextRef.current && !responsePersistedRef.current && settings.assistantTranscript && Array.isArray(out)) {
-        for (const item of out) {
-          const content = item?.content;
-          if (Array.isArray(content)) {
-            for (const c of content) {
-              const t = c?.transcript ?? (c?.type === "text" ? c?.text : undefined);
-              if (typeof t === "string" && t.trim()) {
-                responsePersistedRef.current = true;
-                push("assistant", t);
-                persistTurn("assistant", t);
-                break;
-              }
-            }
-          }
-        }
-      }
-      assistantEntryIdRef.current = null;
-      responseProducedTextRef.current = false;
-      responsePersistedRef.current = false;
-      activeResponseRef.current = false;
+      const updates = assistantTextRef.current.finish(ev.response ?? {});
+      if (settings.assistantTranscript) updates.forEach(applyAssistantText);
+      activeResponseRef.current = assistantTextRef.current.active;
       return;
     }
 
