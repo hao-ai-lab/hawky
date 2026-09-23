@@ -49,6 +49,8 @@ import type { PushService, PushSubscriptionJSON } from "./push.js";
 import { WorkspaceManager, WORKSPACE_FILES } from "../storage/workspace.js";
 import { updateSessionMeta, loadSessionMeta, persistLastTurnUsage, sessionKeyToId, getSessionsDir } from "../storage/session.js";
 import { loadConfig } from "../storage/config.js";
+import { archiveCameraFrame, archiveCameraReceipt } from "../storage/camera-archive.js";
+import { beginRealtimeArchive, appendRealtimeEvent, saveRealtimeImage, saveRealtimeReceipt } from "../storage/realtime-archive.js";
 import { peekTaskStore } from "../tools/task_global.js";
 import type { CronStore } from "./cron-store.js";
 import type { HeartbeatService } from "./heartbeat.js";
@@ -1819,6 +1821,13 @@ export function registerAgentMethods(
   // session.list (message count) and reloads via session.history. Mirrors how
   // the fork path injects context (loop.setHistory + sessionManager.append).
   // -------------------------------------------------------------------------
+  server.registerMethod("session.archiveCameraFrame", (_conn, params) => archiveCameraFrame(params));
+  server.registerMethod("realtime.archive.start", (_conn, params) => beginRealtimeArchive(params as Parameters<typeof beginRealtimeArchive>[0]));
+  server.registerMethod("realtime.archive.append", (_conn, params) => appendRealtimeEvent(params as Parameters<typeof appendRealtimeEvent>[0]));
+  server.registerMethod("realtime.archive.image", (_conn, params) => saveRealtimeImage(params as Parameters<typeof saveRealtimeImage>[0]));
+  server.registerMethod("realtime.archive.receipt", (_conn, params) => saveRealtimeReceipt(params as Parameters<typeof saveRealtimeReceipt>[0]));
+  server.registerMethod("session.archiveCameraReceipt", (_conn, params) => archiveCameraReceipt(params));
+
   server.registerMethod("session.appendMessages", (_conn, params) => {
     const p = params as
       | { sessionKey?: string; messages?: Array<{ role?: string; text?: string; timestamp?: string }> }
