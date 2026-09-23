@@ -12,6 +12,7 @@ import type { DelegationTask } from "./delegation-types.js";
 export interface DelegationObserver {
   signal: AbortSignal;
   readOnly?: boolean;
+  runtime?: (details: { sessionId?: string; model?: string }) => void;
   started: (model: string | undefined) => void;
   event: (event: StreamEvent) => void;
 }
@@ -107,13 +108,17 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
       return { task: recover(conn, previous), promise: active.get(key)?.promise ?? Promise.resolve(previous) };
     }
     const continued = p.continueTask ? lookup(conn, { ownerSession, id: p.continueTask }) : undefined;
-    const readOnly = continued?.readOnly ?? p.execution === "read_only";
+    const runtime = continued?.runtime ?? p.runtime ?? "native";
+    if (!["native", "codex", "claude"].includes(runtime)) throw new MethodError("INVALID_REQUEST", "Unknown backend runtime");
+    // External CLIs can load their own tools and hooks. Treat them as writers even
+    // when the request sounds read-only; only the native tool allowlist is enforced.
+    const readOnly = runtime === "native" && (continued?.readOnly ?? p.execution === "read_only");
     const dependsOn: string[] = Array.isArray(p.dependsOn) ? [...new Set<string>(p.dependsOn.map((id: unknown) => String(id)))] : [];
     for (const dependency of dependsOn) lookup(conn, { ownerSession, id: dependency });
     conn.bindSession(ownerSession);
-    const task: DelegationTask = { id, ownerSession, backendSession: continued?.backendSession ?? (readOnly ? `${ownerSession}-work-${id}` : `${ownerSession}-bridge`),
+    const task: DelegationTask = { id, ownerSession, backendSession: continued?.backendSession ?? (readOnly ? `${ownerSession}-work-${id}` : `${ownerSession}${runtime === "native" ? "" : `-${runtime}`}-bridge`),
       readOnly, dependsOn, continues: continued?.id,
-      runtime: "native", request: p.message, status: "queued", createdAt: Date.now(), events: [],
+      runtime, authentication: runtime === "native" ? "provider_config" : "cli_managed", request: p.message, status: "queued", createdAt: Date.now(), events: [],
       originalRequest: typeof p.originalRequest === "string" ? p.originalRequest.slice(0, 16_000) : undefined,
       constraints: typeof p.constraints === "string" ? p.constraints.slice(0, 8_000) : undefined,
       context: Array.isArray(p.context) ? p.context.slice(-12).filter((m: any) => ["user", "assistant"].includes(m.role) && typeof m.text === "string")
@@ -140,6 +145,11 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
         const reply = await queue.run(task.backendSession, !!task.readOnly, controller.signal, () => execute(conn, task, {
           readOnly: task.readOnly,
           signal: controller.signal,
+          runtime(details) {
+            if (details.model) task.model = details.model;
+            if (details.sessionId) task.runtimeSessionId = details.sessionId;
+            publish(conn, task, "runtime.bound", details);
+          },
           started(model) {
             controller.signal.throwIfAborted();
             task.model = model; task.status = "running"; task.startedAt = Date.now();
@@ -177,7 +187,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     if (typeof p.message !== "string" || !p.message.trim() || p.message.length > 32_000)
       throw new MethodError("INVALID_REQUEST", "A correction is required");
     const result = submit(conn, { ...p, id: p.revisionId ?? randomUUID(), originalRequest: old.originalRequest,
-      context: old.context, constraints: old.constraints, execution: old.readOnly ? "read_only" : "serial", supersedes: old.id });
+      runtime: old.runtime, context: old.context, constraints: old.constraints, execution: old.readOnly ? "read_only" : "serial", supersedes: old.id });
     old.validity = "superseded"; publish(conn, old, "superseded", { replacement: result.task.id }); cancel(conn, old);
     return structuredClone(result.task);
   });

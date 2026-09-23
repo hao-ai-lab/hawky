@@ -69,6 +69,7 @@ export interface LiveSettings {
   cameraPosition: (typeof CAMERA_POSITION)[number];
   // Hawk bridge
   backendBridge: boolean;
+  backendRuntime: "native" | "codex" | "claude";
   bridgeRequired: boolean;
   bridgeSessionMode: (typeof BRIDGE_SESSION_MODE)[number];
   bridgeFeedMode: (typeof BRIDGE_FEED_MODE)[number];
@@ -103,6 +104,7 @@ export const DEFAULT_LIVE_SETTINGS: LiveSettings = {
   customFps: 1,
   cameraPosition: "front",
   backendBridge: true,
+  backendRuntime: "native",
   bridgeRequired: false,
   bridgeSessionMode: "active_chat",
   bridgeFeedMode: "on_demand",

@@ -519,3 +519,51 @@ describe("codex external runtime JSONL parsing", () => {
     }
   });
 });
+
+describe("persistent delegated CLI conversations", () => {
+  for (const kind of ["codex", "claude"] as const) {
+    test(`${kind} resumes the confirmed conversation after a runtime restart without replaying history`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hawk-resume-")); cleanup.push(dir);
+      const binary = join(dir, kind), capture = join(dir, "invocation.json");
+      const events = kind === "codex" ? [
+        { type: "thread.started", thread_id: "runtime-conversation-42" },
+        { type: "item.completed", item: { type: "agent_message", text: "fixture result" } },
+        { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 2 } },
+      ] : [
+        { type: "system", subtype: "init", session_id: "runtime-conversation-42", model: "fixture-claude" },
+        { type: "result", subtype: "success", result: "fixture result", session_id: "runtime-conversation-42" },
+      ];
+      writeFileSync(binary, `#!${process.execPath}\nimport {writeFileSync} from 'node:fs';\nconst input = await Bun.stdin.text();\nwriteFileSync(${JSON.stringify(capture)}, JSON.stringify({args: process.argv.slice(2), input}));\nfor (const e of ${JSON.stringify(events)}) console.log(JSON.stringify(e));\n`, { mode: 0o755 });
+      const env = kind === "codex" ? "HAWKY_CODEX_BIN" : "HAWKY_CLAUDE_BIN", previous = process.env[env];
+      process.env[env] = binary;
+      try {
+        let sessionId: string | undefined, model: string | undefined;
+        const options = { runtimeKind: kind, sessionKey: "web:persistent", cwd: dir, history: [], persistent: true,
+          emit: () => {}, onRuntime: (d: { sessionId?: string; model?: string }) => { sessionId ??= d.sessionId; model ??= d.model; } };
+        await new ExternalAgentRuntime().sendMessage({ ...options, message: "Remember fixture 42" });
+        expect(sessionId).toBe("runtime-conversation-42");
+        let invocation = JSON.parse(readFileSync(capture, "utf8"));
+        expect(invocation.args).not.toContain("--no-session-persistence");
+        await new ExternalAgentRuntime().sendMessage({ ...options, runtimeSessionId: sessionId, message: "What was the fixture?",
+          history: [{ role: "user", content: [{ type: "text", text: "MUST NOT REPLAY THIS HISTORY" }] }] });
+        invocation = JSON.parse(readFileSync(capture, "utf8"));
+        expect(invocation.args).toContain(kind === "codex" ? "resume" : "--resume");
+        expect(invocation.args).toContain(sessionId);
+        expect(JSON.stringify(invocation)).not.toContain("MUST NOT REPLAY");
+        expect(kind === "codex" ? invocation.input : invocation.args.at(-1)).toBe("What was the fixture?");
+        expect(model).toBe(kind === "claude" ? "fixture-claude" : undefined);
+      } finally { if (previous === undefined) delete process.env[env]; else process.env[env] = previous; }
+    });
+  }
+  test("structured runtime errors and permission denials do not become successful answers", async () => {
+    expect(parseClaudeJsonLine(JSON.stringify({ type: "result", is_error: true, result: "Login required" }))?.error).toBe("Login required");
+    expect(parseClaudeJsonLine(JSON.stringify({ type: "result", permission_denials: [{ tool_name: "Write" }] }))?.error).toContain("needs tool permission");
+    const dir = mkdtempSync(join(tmpdir(), "hawk-runtime-fail-")); cleanup.push(dir);
+    const binary = join(dir, "codex");
+    writeFileSync(binary, '#!/bin/sh\ncat >/dev/null\nprintf \'%s\\n\' \'{"type":"turn.failed","error":{"message":"Login required"}}\'\n', { mode: 0o755 });
+    const previous = process.env.HAWKY_CODEX_BIN; process.env.HAWKY_CODEX_BIN = binary;
+    try {
+      await expect(new ExternalAgentRuntime().sendMessage({ runtimeKind: "codex", sessionKey: "failure", cwd: dir, history: [], message: "test", emit: () => {} })).rejects.toThrow("Login required");
+    } finally { if (previous === undefined) delete process.env.HAWKY_CODEX_BIN; else process.env.HAWKY_CODEX_BIN = previous; }
+  });
+});

@@ -261,6 +261,8 @@ function LiveSection() {
 
       <Section title="Live · Hawk bridge" footer="How Live delegates durable work + memory to the backend agent.">
         <Row label="Backend agent bridge"><Toggle checked={s.backendBridge} onChange={(v) => s.set("backendBridge", v)} /></Row>
+        <ExternalRuntimeToggle />
+        <Row label="Backend runtime" detail="Codex and Claude use their local CLI login and permission settings.">{sel("backendRuntime", [{ value: "native", label: "Hawk provider" }, { value: "codex", label: "Codex CLI" }, { value: "claude", label: "Claude Code CLI" }] as const)}</Row>
         <Row label="Require gateway connection"><Toggle checked={s.bridgeRequired} onChange={(v) => s.set("bridgeRequired", v)} /></Row>
         <Row label="Session mode">{sel("bridgeSessionMode", [{ value: "temporary", label: "New realtime channel" }, { value: "fixed", label: "Fixed channel" }, { value: "active_chat", label: "Active session" }] as const)}</Row>
         <Row label="Feed mode">{sel("bridgeFeedMode", [{ value: "on_demand", label: "On-demand tools" }, { value: "follow_stream", label: "Follow session stream" }] as const)}</Row>
@@ -310,4 +312,29 @@ function AboutSection() {
       <Row label="Out of scope" detail="Glasses, native Safety vision (iPhone-only)" />
     </Section>
   );
+}
+
+function ExternalRuntimeToggle() {
+  const rpc = useSocketStore(s => s.rpc);
+  const status = useSocketStore(s => s.status);
+  const [enabled, setEnabled] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (status !== "connected") return;
+    let active = true;
+    void rpc("config.get").then((c: any) => { if (active) setEnabled(c.experiments?.agent_runtimes === true); })
+      .catch(e => { if (active) setError(String(e)); });
+    return () => { active = false; };
+  }, [rpc, status]);
+  async function update(value: boolean) {
+    if (saving || status !== "connected") return;
+    setSaving(true);
+    try { await rpc("config.update", { experiments: { agent_runtimes: value } }); setEnabled(value); setError(""); }
+    catch (e) { setError(String(e)); }
+    finally { setSaving(false); }
+  }
+  return <Row label="Enable CLI runtimes" detail={error || (saving ? "Saving…" : "Uses Codex or Claude installed on the gateway host.")}>
+    <Toggle checked={enabled} onChange={v => void update(v)} />
+  </Row>;
 }

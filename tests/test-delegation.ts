@@ -138,3 +138,18 @@ test("dependent work consumes the completed result and does not run after a fail
   const failed = await g.call("delegation.run", { ...request, id: "blocked", dependsOn: ["bad"] });
   expect(failed.status).toBe("failed"); expect(started).not.toContain("blocked");
 });
+
+test("external runtime choices retain their own conversation and serialize even read-only requests", async () => {
+  const g = gateway(async (_c, t, observer) => {
+    observer.started(undefined); observer.runtime?.({ sessionId: `cli-${t.runtime}`, model: t.runtime === "claude" ? "reported-model" : undefined });
+    return { reply: t.backendSession };
+  });
+  const a = await g.call("delegation.run", { ...request, runtime: "codex", execution: "read_only" });
+  expect(a.runtime).toBe("codex"); expect(a.model).toBeUndefined(); expect(a.runtimeSessionId).toBe("cli-codex");
+  expect(a.backendSession).toBe("web:test-codex-bridge"); expect(a.readOnly).toBe(false);
+  const b = await g.call("delegation.run", { ...request, id: "second", runtime: "claude", continueTask: a.id });
+  expect(b.runtime).toBe("codex"); expect(b.backendSession).toBe(a.backendSession);
+  const c = await g.call("delegation.run", { ...request, id: "claude", runtime: "claude" });
+  expect(c.backendSession).not.toBe(a.backendSession); expect(c.model).toBe("reported-model");
+  expect(() => g.call("delegation.submit", { ...request, id: "bad", runtime: "made-up" })).toThrow("Unknown backend runtime");
+});

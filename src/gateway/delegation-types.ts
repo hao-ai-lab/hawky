@@ -16,6 +16,8 @@ export interface DelegationTask {
   dependsOn?: string[];
   continues?: string;
   model?: string;
+  runtimeSessionId?: string;
+  authentication?: "provider_config" | "cli_managed";
   request: string;
   originalRequest?: string;
   constraints?: string;

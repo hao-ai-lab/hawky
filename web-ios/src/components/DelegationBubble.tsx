@@ -26,6 +26,8 @@ export function DelegationBubble({ task }: { task: DelegationTask }) {
     </summary>
     <div className="mt-3 space-y-3 break-words text-xs">
       <p>{task.runtime} · {task.model || "Model reported by runtime when available"}</p>
+      <p>{task.authentication === "cli_managed" ? "Authentication managed by the local CLI" : "Authentication from the gateway provider configuration"}</p>
+      {task.runtimeSessionId && <p>Runtime conversation: {task.runtimeSessionId}</p>}
       <div><strong>Request</strong><p className="mt-1 whitespace-pre-wrap">{task.request}</p></div>
       {task.originalRequest && <div><strong>Your words</strong><p className="whitespace-pre-wrap">{task.originalRequest}</p></div>}
       {task.brief && <details><summary className="cursor-pointer">Exact backend brief</summary><pre className="whitespace-pre-wrap">{task.brief}</pre></details>}

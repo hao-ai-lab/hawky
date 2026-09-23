@@ -891,6 +891,15 @@ export function registerAgentMethods(
               cwd: session.workingDirectory,
               history: session.loop.getHistory(),
               message: userMessage,
+              persistent: !!observer,
+              runtimeSessionId: observer ? loadSessionMeta()[sessionKey]?.externalSessionId : undefined,
+              onRuntime: observer ? details => {
+                updateSessionMeta(sessionKey, {
+                  ...(details.sessionId ? { externalSessionId: details.sessionId } : {}),
+                  ...(details.model ? { externalModel: details.model } : {}),
+                });
+                observer.runtime?.(details);
+              } : undefined,
               emit: (event) => {
                 observer?.event(event);
                 srv.broadcastToSession(sessionKey, `agent.${event.type}`, event);
@@ -1123,8 +1132,12 @@ export function registerAgentMethods(
     };
   }
   server.registerMethod("chat.send", (conn, params, srv) => sendChat(conn, params, srv));
-  registerDelegationMethods(server, (conn, task, observer) =>
-    sendChat(conn, { sessionKey: task.backendSession, message: task.brief ?? task.request }, server, observer), {
+  registerDelegationMethods(server, (conn, task, observer) => {
+    if (task.runtime !== "native" && !externalAgentRuntimesEnabled()) throw new MethodError("FORBIDDEN", "Enable CLI runtimes in Settings > Live > Hawk bridge before using Codex or Claude.");
+    const session = sessions.getOrCreate(task.backendSession, conn.workingDirectory || undefined, task.runtime);
+    if (session.runtimeKind !== task.runtime) throw new MethodError("CONFLICT", "Backend session is bound to a different runtime");
+    return sendChat(conn, { sessionKey: task.backendSession, message: task.brief ?? task.request }, server, observer);
+  }, {
       cancel: task => {
         const session = sessions.get(task.backendSession);
         session?.loop.cancel(); session?.externalRuntime?.cancel(); cancelPendingPermissions(task.backendSession);

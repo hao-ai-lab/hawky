@@ -1123,6 +1123,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         // chart) so we can surface the result here instead of a static ack.
         submittingTasksRef.current.add(toolEntryId);
         delegation = await rpc("delegation.submit", { id: toolEntryId, ownerSession: liveSessionKeyRef.current, message,
+          runtime: useLiveSettings.getState().backendRuntime,
           originalRequest: transcriptRef.current.filter(e => e.kind === "user").at(-1)?.text,
           constraints: args.constraints, execution: args.execution, dependsOn: args.depends_on, continueTask: args.continue_task,
           context: transcriptRef.current.filter(e => e.kind === "user" || e.kind === "assistant").slice(-12).map(e => ({ role: e.kind, text: e.text })),
