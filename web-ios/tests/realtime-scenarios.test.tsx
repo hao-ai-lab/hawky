@@ -183,6 +183,7 @@ it("the recorded running/running/completed checks stay in diagnostics instead of
     return original(method, params);
   });
   const s = await session();
+  await act(async () => { s.channel.receive({ type: "conversation.item.input_audio_transcription.completed", transcript: "Is it done?" }); });
   for (const callId of ["check-1", "check-2", "check-3"]) await act(async () => {
     s.channel.receive({ ...call("session_task_control", { action: "status", task_id: "task-1" }), call_id: callId });
   });
@@ -205,10 +206,86 @@ it("a failed status lookup remains visible and can be explained without retrying
   });
   const s = await session();
   await act(async () => {
+    s.channel.receive({ type: "conversation.item.input_audio_transcription.completed", transcript: "Is it done?" });
     s.channel.receive(call("session_task_control", { action: "status", task_id: "missing" }));
     await vi.advanceTimersByTimeAsync(300);
   });
   expect(output(s.channel)[0]).toMatchObject({ ok: false, error: "Delegation not found" });
   expect(s.result.current.transcript.some(e => e.kind === "warning" && e.text.includes("Delegation not found"))).toBe(true);
   expect(s.channel.sent.find(e => e.type === "response.create").response.tool_choice).toBe("none");
+});
+
+it.each([false, true])("restores interrupted results silently, including a late recovery snapshot (late=%s)", async late => {
+  const tasks = ["listing", "path"].map(id => ({ id, ownerSession: "web:scenario", backendSession: `web:scenario-${id}`, runtime: "native",
+    request: id, result: `Previously answered ${id}`, status: "completed", delivery: "interrupted", createdAt: 1, events: [] }));
+  const original = rpc.getMockImplementation()!;
+  let visible = !late;
+  rpc.mockImplementation(async (method: string, params: any) => {
+    if (method === "delegation.list") return { tasks: visible ? tasks : [] };
+    return original(method, params);
+  });
+  const s = await session();
+  visible = true;
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  const restored = s.channel.sent.filter(e => e.item?.role === "system");
+  expect(restored).toHaveLength(2);
+  expect(restored.every(e => e.item.content[0].text.startsWith("Restored backend task context."))).toBe(true);
+  expect(s.channel.sent.some(e => e.type === "response.create")).toBe(false);
+  expect(s.result.current.transcript.filter(e => e.delegation)).toHaveLength(2);
+
+  // A user message gets a normal reply, not a deferred replay of old results.
+  await act(async () => { s.result.current.sendText("Let's talk about something else."); await vi.advanceTimersByTimeAsync(300); });
+  const replies = s.channel.sent.filter(e => e.type === "response.create");
+  expect(replies).toHaveLength(1);
+  expect(replies[0].response.metadata.task_ids).toBeUndefined();
+  expect(replies[0].response.tool_choice).toBeUndefined();
+
+  await act(async () => { const stopped = s.result.current.stop(); await vi.advanceTimersByTimeAsync(100); await stopped; });
+  await act(async () => { await s.result.current.start(); Peer.all[1].channel.open(); await vi.advanceTimersByTimeAsync(5000); });
+  expect(Peer.all[1].channel.sent.filter(e => e.item?.role === "system")).toHaveLength(2);
+  expect(Peer.all[1].channel.sent.some(e => e.type === "response.create")).toBe(false);
+  expect(rpc.mock.calls.some(c => c[0] === "delegation.submit" || c[0] === "delegation.delivery")).toBe(false);
+});
+
+it("holds fresh completions until the user speaks and current playback finishes, then delivers both task IDs", async () => {
+  const tasks = ["a", "b"].map(id => ({ id, ownerSession: "web:scenario", backendSession: `web:scenario-${id}`, runtime: "native",
+    request: `Read ${id}`, status: "running", validity: "current", createdAt: 1, events: [] as any[] }));
+  const original = rpc.getMockImplementation()!;
+  rpc.mockImplementation(async (method: string, params: any) => method === "delegation.list" ? { tasks } : original(method, params));
+  const s = await session();
+  const finish = (index: number) => {
+    const task = { ...tasks[index], status: "completed", result: `Result ${tasks[index].id}`, events: [{ seq: 1, at: Date.now(), type: "completed" }] };
+    for (const listener of useSocketStore.getState().eventListeners) listener({ type: "event", event: "delegation.updated", payload: { task } });
+  };
+  // A previously running job completes after reconnect, before the first word.
+  await act(async () => { finish(0); await vi.advanceTimersByTimeAsync(5000); });
+  expect(s.channel.sent.some(e => e.type === "response.create")).toBe(false);
+  await act(async () => {
+    s.channel.receive({ type: "input_audio_buffer.speech_started" });
+    await vi.advanceTimersByTimeAsync(500);
+  });
+  expect(s.channel.sent.some(e => e.type === "response.create")).toBe(false);
+  await act(async () => {
+    s.channel.receive({ type: "input_audio_buffer.speech_stopped" });
+    s.channel.receive({ type: "response.created", response: { id: "conversation" } });
+    s.channel.receive({ type: "output_audio_buffer.started", response_id: "conversation" });
+    finish(1);
+    s.channel.receive({ type: "response.done", response: { id: "conversation", status: "completed" } });
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  // Generation ending must not be mistaken for the end of audible speech.
+  expect(s.channel.sent.some(e => e.type === "response.create")).toBe(false);
+  await act(async () => { s.channel.receive({ type: "output_audio_buffer.stopped", response_id: "conversation" }); await vi.advanceTimersByTimeAsync(100); });
+  const replies = s.channel.sent.filter(e => e.type === "response.create");
+  expect(replies).toHaveLength(1);
+  expect(replies[0].response).toMatchObject({ tool_choice: "none", metadata: { task_ids: "a,b" } });
+  await act(async () => {
+    const metadata = replies[0].response.metadata;
+    s.channel.receive({ type: "response.created", response: { id: "results", metadata } });
+    s.channel.receive({ type: "response.done", response: { id: "results", status: "completed", metadata } });
+    s.channel.receive({ type: "output_audio_buffer.stopped", response_id: "results" });
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(rpc.mock.calls.filter(c => c[0] === "delegation.delivery" && c[1].state === "played").map(c => c[1].id)).toEqual(["a", "b"]);
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
 });

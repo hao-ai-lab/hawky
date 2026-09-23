@@ -82,3 +82,15 @@ it("coalescing and busy retries preserve the no-tools constraint on status repli
   await tick();
   expect(sent[1].response.tool_choice).toBe("none");
 });
+
+it("a connection can wait for the first typed turn while retaining a fresh completion", async () => {
+  replies.waitForUser();
+  replies.request({ metadata: { task_id: "fresh" }, tool_choice: "none" });
+  await tick(); expect(sent).toHaveLength(0);
+  replies.userTurn();
+  await tick(); expect(sent).toHaveLength(1);
+  expect(sent[0].response.metadata.task_ids).toBe("fresh");
+  replies.reset(); replies.waitForUser();
+  replies.request({ metadata: { task_id: "next" } });
+  await tick(); expect(sent).toHaveLength(1);
+});

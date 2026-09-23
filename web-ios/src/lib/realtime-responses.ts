@@ -15,6 +15,7 @@ export class RealtimeResponses {
   private userSpeaking = false;
   private playing = false;
   private silent = false;
+  private awaitingUser = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private serial = 0;
   private retryUntil = 0;
@@ -28,6 +29,8 @@ export class RealtimeResponses {
     this.schedule();
   }
   setSilent(value: boolean) { this.silent = value; this.schedule(); }
+  waitForUser() { this.awaitingUser = true; }
+  userTurn() { this.awaitingUser = false; this.schedule(); }
   invalidateTask(id: string) {
     this.invalidTasks.add(id);
     this.pending = this.pending.filter(i => i.reply.metadata?.task_id !== id);
@@ -50,7 +53,7 @@ export class RealtimeResponses {
     this.timer = setTimeout(() => { this.timer = undefined; this.flush(); }, Math.max(80, this.retryUntil - Date.now()));
   }
   private flush() {
-    if (this.silent || this.userSpeaking || this.playing || this.active.size || this.requested || !this.pending.length) return;
+    if (this.awaitingUser || this.silent || this.userSpeaking || this.playing || this.active.size || this.requested || !this.pending.length) return;
     const intents = this.pending.splice(0, 3);
     const eventId = `hawk-response-${++this.serial}`;
     const instructions = intents.map(i => i.reply.instructions).filter(Boolean).join("\n");
@@ -71,7 +74,7 @@ export class RealtimeResponses {
   /** Returns true only for errors owned and recovered by this coordinator. */
   observe(event: any): boolean {
     const type = event.type;
-    if (type === "input_audio_buffer.speech_started") this.userSpeaking = true;
+    if (type === "input_audio_buffer.speech_started") { this.userSpeaking = true; this.userTurn(); }
     if (type === "input_audio_buffer.speech_stopped") { this.userSpeaking = false; this.retryUntil = Date.now() + 250; }
     if (type === "output_audio_buffer.started") {
       this.playing = true; this.playingResponse = event.response_id;
@@ -114,6 +117,6 @@ export class RealtimeResponses {
   reset() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined; this.pending = []; this.requested = null; this.active.clear(); this.owned.clear(); this.invalidTasks.clear(); this.invalidResponses.clear(); this.playingResponse = undefined;
-    this.userSpeaking = false; this.playing = false; this.silent = false; this.retryUntil = 0;
+    this.userSpeaking = false; this.playing = false; this.silent = false; this.awaitingUser = false; this.retryUntil = 0;
   }
 }
