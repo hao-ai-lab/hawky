@@ -246,6 +246,17 @@ describe("external agent runtime executable resolution", () => {
       .toBe("not-a-real-hawky-runtime");
   });
 
+  test("MCP uses the actual source CLI when launched by a custom gateway script", () => {
+    const saved = process.argv[1], savedBin = process.env.HAWKY_BIN;
+    try {
+      process.argv[1] = "/tmp/custom-gateway.ts"; delete process.env.HAWKY_BIN;
+      const config = JSON.parse(buildClaudeMcpConfig());
+      expect(config.mcpServers.hawky.args[0]).toEndWith("/src/index.ts");
+      expect(config.mcpServers.hawky.args).toContain("mcp");
+      expect(config.mcpServers.hawky.args).not.toContain("/tmp/custom-gateway.ts");
+    } finally { process.argv[1] = saved; if (savedBin !== undefined) process.env.HAWKY_BIN = savedBin; }
+  });
+
   test("MCP server command falls back to the renamed 'hawky' executable when no entrypoint is available", () => {
     // When process.argv[1] is unavailable (e.g. a bundled runtime), the MCP
     // server command resolves the installed CLI by name. After the Hawky

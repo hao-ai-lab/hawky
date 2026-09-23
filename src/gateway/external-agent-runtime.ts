@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ChatMessage, StreamEvent, TokenUsage } from "../agent/types.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import type { SessionRuntimeKind } from "../storage/session.js";
@@ -660,7 +661,11 @@ function resolveHawkyMcpServerCommand(runtimeKind: "codex" | "claude" = "codex")
     };
   }
 
-  const entrypoint = process.argv[1];
+  if (process.env.HAWKY_BIN?.trim()) return { command: resolveRuntimeExecutable("hawky"), args: ["mcp"] };
+  // A gateway may be launched by a custom script. That script is not the
+  // Hawky CLI and must not be spawned again as an MCP server.
+  const sourceCli = fileURLToPath(new URL("../index.ts", import.meta.url));
+  const entrypoint = existsSync(sourceCli) ? sourceCli : process.argv[1];
   if (entrypoint) {
     return {
       command: process.execPath,
