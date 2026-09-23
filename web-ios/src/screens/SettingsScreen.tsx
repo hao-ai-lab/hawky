@@ -2,7 +2,7 @@
 // Settings Screen — web-styled settings for web-ios.
 //
 // Sections: Connection, OpenAI key (BYOK), Agent (config.get), Live (the
-// iOS-matched realtime settings: model, voice, response, system prompt, turn
+// iOS-matched realtime settings: model, voice, response, turn
 // detection + VAD, reasoning, tool choice, backend bridge), Appearance, About.
 // Web-conventional controls (selects, sliders, checkboxes), not iOS pills.
 // =============================================================================
@@ -15,7 +15,7 @@ import {
 } from "../lib/live-settings";
 import { Header } from "../components/Header";
 import { Icon } from "../components/Icon";
-import { Section, Row, Field, TextField, TextArea, Select, Slider, Button, Toggle } from "../components/Form";
+import { Section, Row, TextField, Select, Slider, Button, Toggle } from "../components/Form";
 import { useTheme } from "../lib/theme";
 import { useNav, HIDEABLE, NAV } from "../lib/nav";
 
@@ -218,12 +218,6 @@ function LiveSection() {
         <Row label="User transcript" detail="Transcribe your speech"><Toggle checked={s.userTranscript} onChange={(v) => s.set("userTranscript", v)} /></Row>
         <Row label="Assistant transcript"><Toggle checked={s.assistantTranscript} onChange={(v) => s.set("assistantTranscript", v)} /></Row>
         <Row label="Transcription model">{sel("transcribeModel", TRANSCRIBE_MODELS)}</Row>
-      </Section>
-
-      <Section title="Live · Prompt">
-        <Field label="System prompt" hint="Steers the realtime agent (persona + behavior).">
-          <TextArea value={s.systemPrompt} onChange={(v) => s.set("systemPrompt", v)} rows={5} />
-        </Field>
       </Section>
 
       <Section title="Live · Model configuration">

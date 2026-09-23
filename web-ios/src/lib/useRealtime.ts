@@ -323,15 +323,13 @@ function safeJSON(raw: string): Record<string, any> | null {
 
 export interface UseRealtimeOptions {
   sessionKey: string;
-  prompt?: string;
 }
 
-export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
+export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const rpc = useSocketStore((s) => s.rpc);
   const gatewayStatus = useSocketStore((s) => s.status);
-  // Live settings (model, voice, prompt, VAD, reasoning, tool choice, bridge).
+  // Live settings (model, voice, VAD, reasoning, tool choice, bridge).
   const settings = useLiveSettings();
-  const effectivePrompt = prompt ?? settings.systemPrompt ?? DEFAULT_PROMPT;
 
   const [phase, setPhase] = useState<LivePhase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -618,7 +616,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         push("system", "Hawk backend unreachable — running without memory/tools.");
       }
 
-      const instructions = [effectivePrompt, "", bootContext ? `# Hawk Backend Context\n${bootContext}` : ""]
+      const instructions = [DEFAULT_PROMPT, "", bootContext ? `# Hawk Backend Context\n${bootContext}` : ""]
         .filter(Boolean)
         .join("\n\n");
       instructionsRef.current = instructions;
@@ -764,7 +762,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       startingRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rpc, sessionKey, micOn, cameraOn, staySilent, effectivePrompt, settings, sendRealtime, teardown, closing]);
+  }, [rpc, sessionKey, micOn, cameraOn, staySilent, settings, sendRealtime, teardown, closing]);
   startRef.current = start;
 
   const stop = useCallback(async () => {

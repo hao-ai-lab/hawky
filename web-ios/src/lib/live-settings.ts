@@ -63,7 +63,6 @@ export interface LiveSettings {
   cocktailParty: boolean;
   safetyCheck: boolean;           // iPhone-only pipeline (shown, noted)
   visualDedup: boolean;
-  systemPrompt: string;
   // Inputs
   visualCadence: (typeof VISUAL_CADENCE)[number];
   customFps: number;              // when cadence=custom
@@ -100,10 +99,6 @@ export const DEFAULT_LIVE_SETTINGS: LiveSettings = {
   cocktailParty: false,
   safetyCheck: false,
   visualDedup: false,
-  systemPrompt:
-    "You are Hawk, a concise, friendly realtime assistant. Use the camera and " +
-    "microphone context when relevant, answer briefly, and delegate durable or " +
-    "long-running work to the Hawk backend tool.",
   visualCadence: "0.2",
   customFps: 1,
   cameraPosition: "front",
@@ -119,7 +114,8 @@ const KEY = "hawky-ios-live-settings";
 function load(): LiveSettings {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...DEFAULT_LIVE_SETTINGS, ...JSON.parse(raw) };
+    // Keep only supported settings; old browsers may still have a prompt override.
+    if (raw) return extract({ ...DEFAULT_LIVE_SETTINGS, ...JSON.parse(raw) });
   } catch { /* ignore */ }
   return { ...DEFAULT_LIVE_SETTINGS };
 }
