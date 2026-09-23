@@ -19,6 +19,7 @@ import { MAX_SINGLE_IMAGE_BASE64, MAX_TOTAL_IMAGE_BASE64 } from "../agent/image-
 import { executeInSession } from "./lanes.js";
 import { CommandLane } from "./types.js";
 import { MethodError } from "./methods.js";
+import { registerDelegationMethods, type DelegationObserver } from "./delegation-methods.js";
 import { resolveWsPermission, getPendingPermissionForSession } from "./ws-permission.js";
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -217,7 +218,7 @@ export function registerAgentMethods(
     if (!content) {
       throw new MethodError("INVALID_REQUEST", "content is required");
     }
-    conn.bindSession(sessionKey);
+    if (!observer) conn.bindSession(sessionKey);
     const created = await intentionLoop.handleCreateIntention(
       { content, when: p?.when, where: p?.where },
       sessionKey,
@@ -618,7 +619,7 @@ export function registerAgentMethods(
   // -------------------------------------------------------------------------
   // chat.send — route message through command queue → agent loop
   // -------------------------------------------------------------------------
-  server.registerMethod("chat.send", async (conn, params, srv) => {
+  async function sendChat(conn: GatewayConnection, params: unknown, srv: GatewayServer, observer?: DelegationObserver) {
     const p = params as {
       message?: string;
       sessionKey?: string;
@@ -770,8 +771,11 @@ export function registerAgentMethods(
     await executeInSession(sessionKey, CommandLane.Main, async () => {
       const session = sessions.getOrCreate(sessionKey, conn.workingDirectory || undefined);
 
+      observer?.started(session.runtimeKind === "native" ? config?.model : undefined);
+
       // Subscribe to agent stream events → broadcast to all clients on this session
       const unsub = session.loop.subscribe((event: StreamEvent) => {
+        observer?.event(event);
         srv.broadcastToSession(sessionKey, `agent.${event.type}`, event);
         // Capture usage/cost for token pressure check and meta persistence.
         // A 0% / $0 done event is a legitimate short-turn signal, not a
@@ -881,6 +885,7 @@ export function registerAgentMethods(
               history: session.loop.getHistory(),
               message: userMessage,
               emit: (event) => {
+                observer?.event(event);
                 srv.broadcastToSession(sessionKey, `agent.${event.type}`, event);
                 if (event.type === "done") {
                   sawDoneEvent = true;
@@ -1109,7 +1114,10 @@ export function registerAgentMethods(
       reply: assistantText || "",
       ...(lastToolImage ? { image: lastToolImage } : {}),
     };
-  });
+  }
+  server.registerMethod("chat.send", (conn, params, srv) => sendChat(conn, params, srv));
+  registerDelegationMethods(server, (conn, task, observer) =>
+    sendChat(conn, { sessionKey: task.backendSession, message: task.request }, server, observer));
 
   // -------------------------------------------------------------------------
   // chat.cancel — cancel the current agent turn for a session

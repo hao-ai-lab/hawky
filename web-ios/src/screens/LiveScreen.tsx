@@ -18,6 +18,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { useRealtime, artifactsFromTranscript, type LivePhase, type TranscriptEntry, type Artifact } from "../lib/useRealtime";
 import { useSocketStore } from "../lib/socket-store";
 import { useSessionStore } from "../lib/session-store";
+import { DelegationBubble } from "../components/DelegationBubble";
 import { Icon, type IconName } from "../components/Icon";
 import { Logo } from "../components/Logo";
 import { SessionMenu } from "../components/SessionMenu";
@@ -360,6 +361,7 @@ function Bubble({ entry }: { entry: TranscriptEntry }) {
  *  running = purple (spinner), ok = green (check), error = red (warning). */
 function ToolBubble({ entry }: { entry: TranscriptEntry }) {
   const openArtifact = useContext(OpenArtifactContext);
+  if (entry.delegation) return <DelegationBubble task={entry.delegation} />;
   const m = /^([a-zA-Z0-9_]+)\s*\((.*)\)$/s.exec(entry.text);
   const name = m ? m[1] : entry.text;
   const args = m ? m[2] : "";

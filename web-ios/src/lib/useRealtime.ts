@@ -19,6 +19,7 @@ import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
 import { CameraArchive } from "./camera-archive";
 import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-recording";
+import type { DelegationTask } from "../../../src/gateway/delegation-types";
 import { RealtimeStartup } from "./realtime-startup";
 import { buildRealtimePrompt } from "./realtime-prompt";
 import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
@@ -45,6 +46,7 @@ export interface TranscriptEntry {
   toolDetail?: string;
   /** Wall-clock ms the call took (set when finished). */
   toolMs?: number;
+  delegation?: DelegationTask;
   /** A `data:` image URL to render with this entry (e.g. a generated chart). */
   imageData?: string;
   /** A human title for the image artifact (e.g. the chart title). */
@@ -164,18 +166,11 @@ function entryId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-/** Derive the separate backend channel a Live session delegates to, so the
- *  agent's internal turns don't pollute the user's conversation. */
-function bridgeKey(liveKey: string): string {
-  return `${liveKey}-bridge`;
-}
-
 /** A short, friendly label for a tool-call bubble (no raw JSON args). */
 function toolLabel(name: string, args: Record<string, any>): string {
   if (name === "session_send_message") {
     const m = typeof args.message === "string" ? args.message.trim() : "";
-    const short = m.length > 60 ? m.slice(0, 60) + "…" : m;
-    return short ? `Delegating: ${short}` : "Delegating to backend";
+    return m ? `Delegating: ${m}` : "Delegating to backend";
   }
   if (name === "send_photo") {
     const to = typeof args.to === "string" && args.to.trim() ? args.to.trim() : "Slack DM";
@@ -285,8 +280,8 @@ export function mapHistoryToTranscript(
       // its image if it carried one, e.g. a chart).
       if (rawText.startsWith(TOOL_MARKER)) {
         try {
-          const t = JSON.parse(rawText.slice(TOOL_MARKER.length)) as { label: string; status: ToolStatus; detail?: string; ms?: number; image?: string; imageTitle?: string };
-          out.push({ id: entryId(), kind: "tool", text: t.label, at, toolStatus: t.status, toolDetail: t.detail, toolMs: t.ms, imageData: t.image, imageTitle: t.imageTitle });
+          const t = JSON.parse(rawText.slice(TOOL_MARKER.length)) as { label: string; status: ToolStatus; detail?: string; ms?: number; image?: string; imageTitle?: string; delegation?: DelegationTask };
+          out.push({ id: entryId(), kind: "tool", text: t.label, at, toolStatus: t.status, toolDetail: t.detail, toolMs: t.ms, imageData: t.image, imageTitle: t.imageTitle, delegation: t.delegation });
         } catch { /* ignore a malformed marker */ }
         continue;
       }
@@ -325,6 +320,7 @@ export interface UseRealtimeOptions {
 export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const rpc = useSocketStore((s) => s.rpc);
   const gatewayStatus = useSocketStore((s) => s.status);
+  const subscribe = useSocketStore((s) => s.subscribe);
   // Live settings (model, voice, VAD, reasoning, tool choice, bridge).
   const settings = useLiveSettings();
 
@@ -341,6 +337,13 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const [historyKey, setHistoryKey] = useState<string | null>(null);
   const historyRequestRef = useRef<{ key: string; promise: Promise<void>; failed: boolean } | null>(null);
   const transcriptSessionRef = useRef<string | null>(null);
+  useEffect(() => subscribe(event => {
+    if (event.event !== "delegation.updated") return;
+    const task = (event.payload as { task?: DelegationTask })?.task;
+    if (!task || task.ownerSession !== sessionKey) return;
+    setTranscript(cur => cur.map(entry => entry.id === task.id || entry.delegation?.id === task.id
+      ? { ...entry, delegation: task } : entry));
+  }), [subscribe, sessionKey]);
   const startupRef = useRef<RealtimeStartup | null>(null);
   const readyRef = useRef(false);
   const [micOn, setMicOn] = useState(true);
@@ -425,13 +428,13 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Persist a tool-call record so it survives in history. The gateway only
   // accepts user/assistant turns, so we encode the tool as an assistant message
   // with a marker that mapHistoryToTranscript decodes back into a tool bubble.
-  const persistTool = useCallback((label: string, status: ToolStatus, detail: string, ms: number, imageData?: string, imageTitle?: string) => {
+  const persistTool = useCallback((label: string, status: ToolStatus, detail: string, ms: number, imageData?: string, imageTitle?: string, delegation?: DelegationTask) => {
     // Charts persist into history by embedding the data: URL in the marker. Cap
     // the size so a huge image can't bloat the session (it still shows live).
     const image = imageData && imageData.length <= 600_000 ? imageData : undefined;
     pendingTurnsRef.current.push({
       role: "assistant",
-      text: `${TOOL_MARKER}${JSON.stringify({ label, status, detail, ms, image, imageTitle: image ? imageTitle : undefined })}`,
+      text: `${TOOL_MARKER}${JSON.stringify({ label, status, detail, ms, image, imageTitle: image ? imageTitle : undefined, delegation })}`,
       timestamp: new Date().toISOString(),
     });
     if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
@@ -1000,6 +1003,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     let output: Record<string, unknown>;
     let ok = true;
     let detail = "";
+    let delegation: DelegationTask | undefined;
     let toolImage: string | undefined; // data: URL for an image result (chart)
     try {
       if (name === "session_send_message") {
@@ -1009,16 +1013,15 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         // so the backend agent's internal turns don't pollute the conversation.
         // chat.send now returns the agent's final reply + any image (e.g. a
         // chart) so we can surface the result here instead of a static ack.
-        const bridge = (await rpc("chat.send", { sessionKey: bridgeKey(liveSessionKeyRef.current), message })) as
-          { reply?: string; image?: { base64?: string; media_type?: string } };
-        const reply = (bridge.reply ?? "").trim();
-        if (bridge.image?.base64) {
-          toolImage = `data:${bridge.image.media_type || "image/png"};base64,${bridge.image.base64}`;
+        delegation = await rpc("delegation.run", { id: toolEntryId, ownerSession: liveSessionKeyRef.current, message }) as DelegationTask;
+        const reply = (delegation.result ?? "").trim();
+        if (delegation.image?.base64) {
+          toolImage = `data:${delegation.image.media_type || "image/png"};base64,${delegation.image.base64}`;
         }
-        // Give the realtime model the backend's actual answer so it can speak it
-        // (and not keep "waiting"). Keep it bounded.
-        output = { ok: true, result: reply ? reply.slice(0, 4000) : "Done.", has_chart: !!toolImage };
-        detail = reply || (toolImage ? "Chart ready." : "Done.");
+        ok = delegation.status === "completed";
+        output = { ok, task_id: delegation.id, status: delegation.status,
+          result: reply.slice(0, 4000), ...(delegation.error ? { error: delegation.error } : {}), has_chart: !!toolImage };
+        detail = delegation.error || reply || "Backend returned no answer.";
       } else if (WEB_PERSON_TOOL_NAMES.has(name as PersonModelToolName)) {
         const personToolName = name as PersonModelToolName;
         const toolArgs: Record<string, unknown> = { ...args, session_key: liveSessionKeyRef.current };
@@ -1089,11 +1092,11 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     if (archive !== cameraArchiveRef.current || connection !== dcRef.current) return;
     archive?.record("tool.completed", { callId, name, status: ok ? "ok" : "error", output, detail, ms });
     setTranscript((cur) => cur.map((e) =>
-      e.id === toolEntryId ? { ...e, toolStatus: ok ? "ok" : "error", toolDetail: detail, toolMs: ms, imageData: toolImage, imageTitle } : e,
+      e.id === toolEntryId ? { ...e, toolStatus: ok ? "ok" : "error", toolDetail: detail, toolMs: ms, imageData: toolImage, imageTitle, delegation } : e,
     ));
     // Persist the finished tool record so it appears when the session reloads
     // (carry the image + title so charts survive a history reload).
-    persistTool(toolLabel(name, args), ok ? "ok" : "error", detail, ms, toolImage, imageTitle);
+    persistTool(toolLabel(name, args), ok ? "ok" : "error", detail, ms, toolImage, imageTitle, delegation);
 
     sendRealtime({
       type: "conversation.item.create",
