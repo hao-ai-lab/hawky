@@ -17,6 +17,8 @@ import { byokParam } from "./byok";
 import { getUserMediaSafe, mediaUnavailableReason } from "./media";
 import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
+import { CameraArchive } from "./camera-archive";
+import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-recording";
 import {
   PERSON_MODEL_TOOLS,
   type PersonModelToolName,
@@ -356,6 +358,14 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   // event handler) so they never diverge into two sessions if the active key
   // changes mid-session. Falls back to the latest sessionKey when idle.
   const liveSessionKeyRef = useRef(sessionKey);
+  const cameraArchiveRef = useRef<CameraArchive | null>(null);
+  const connectionArchivesRef = useRef<CameraArchive[]>([]);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectCountRef = useRef(0);
+  const startRef = useRef<() => Promise<void>>(async () => {});
+  const attemptRef = useRef(0);
+  const startingRef = useRef(false);
+  const [closing, setClosing] = useState(false);
   useEffect(() => { if (phase === "idle" || phase === "failed") liveSessionKeyRef.current = sessionKey; }, [sessionKey, phase]);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -366,7 +376,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   const frameTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const canStart = gatewayStatus === "connected" && (phase === "idle" || phase === "failed");
+  const canStart = !closing && gatewayStatus === "connected" && (phase === "idle" || phase === "failed");
 
   function push(kind: TranscriptKind, text: string) {
     const t = text.trim();
@@ -404,6 +414,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     const t = text.trim();
     if (!t) return;
     // Auto-title the session from its first user message (ChatGPT-style).
+    cameraArchiveRef.current?.record("message.completed", { role, text: t });
     if (role === "user") void useSessionStore.getState().maybeAutoTitle(liveSessionKeyRef.current, t);
     pendingTurnsRef.current.push({ role, text: t, timestamp: new Date().toISOString() });
     if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
@@ -506,14 +517,19 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
 
   const sendRealtime = useCallback((event: unknown) => {
     const dc = dcRef.current;
-    if (dc && dc.readyState === "open") dc.send(JSON.stringify(event));
+    if (!dc || dc.readyState !== "open") return false;
+    dc.send(JSON.stringify(event));
+    const outgoing = event as { type?: string; session?: unknown };
+    if (outgoing.type === "session.update") cameraArchiveRef.current?.record("context.updated", { session: outgoing.session });
+    return true;
   }, []);
 
   const teardown = useCallback(() => {
+    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
     if (frameTimerRef.current) { clearInterval(frameTimerRef.current); frameTimerRef.current = null; }
     if (safetyTimerRef.current) { clearInterval(safetyTimerRef.current); safetyTimerRef.current = null; }
-    dcRef.current?.close(); dcRef.current = null;
-    pcRef.current?.close(); pcRef.current = null;
+    const dc = dcRef.current; dcRef.current = null; dc?.close();
+    const pc = pcRef.current; pcRef.current = null; pc?.close();
     mediaRef.current?.getTracks().forEach((t) => t.stop());
     mediaRef.current = null;
     if (videoElRef.current) videoElRef.current.srcObject = null;
@@ -527,7 +543,11 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   }, []);
 
   // Tear down on unmount.
-  useEffect(() => () => teardown(), [teardown]);
+  useEffect(() => () => {
+    attemptRef.current++;
+    cameraArchiveRef.current?.record("connection.interrupted", { reason: "page_unmounted" });
+    teardown();
+  }, [teardown]);
 
   // Load the selected session's chat history into the transcript when the
   // session changes (e.g. picking one from the Hawk History menu). Skipped
@@ -559,9 +579,13 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   }, [sessionKey, gatewayStatus]);
 
   const start = useCallback(async () => {
+    if (startingRef.current || closing) return;
     const blocked = mediaUnavailableReason();
     if (blocked) { setError(blocked); setPhase("failed"); push("warning", blocked); return; }
 
+    startingRef.current = true;
+    const attempt = ++attemptRef.current;
+    teardown();
     setPhase("connecting");
     setError(null);
     setBridgeOffline(false);
@@ -571,12 +595,33 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     liveSessionKeyRef.current = sessionKey;
     // KEEP the loaded history visible and capture it to replay into the realtime
     // model, so resuming an old session continues the prior conversation.
-    const priorTurns = transcriptRef.current
+    let priorTurns = transcriptRef.current
       .filter((e) => (e.kind === "user" || e.kind === "assistant") && e.text.trim())
       .map((e) => ({ role: e.kind as "user" | "assistant", text: e.text.trim() }))
       .slice(-30); // cap replay so the realtime session prompt stays bounded
 
     try {
+      const recording = await openLiveRecording(rpc, sessionKey);
+      if (attempt !== attemptRef.current) {
+        clearLiveRecording(sessionKey, recording.liveSessionId);
+        await new CameraArchive(rpc, sessionKey, crypto.randomUUID(), () => {}, recording.liveSessionId).end(false);
+        return;
+      }
+      const continuingInThisPage = cameraArchiveRef.current?.liveSessionId === recording.liveSessionId;
+      if (recording.resumed && !continuingInThisPage && recording.messages) priorTurns = recording.messages;
+      if (!continuingInThisPage) connectionArchivesRef.current = [];
+      const archive = new CameraArchive(rpc, sessionKey, crypto.randomUUID(),
+        message => push("warning", message), recording.liveSessionId);
+      cameraArchiveRef.current = archive;
+      connectionArchivesRef.current.push(archive);
+      if (recording.resumed && !continuingInThisPage) {
+        // The ID survives reloads, but the in-memory upload queue does not.
+        // Preserve that uncertainty even if all subsequent uploads succeed.
+        archive.markInterruptedDelivery();
+        archive.record("session.resumed", { previousDelivery: "unknown_after_page_interruption" });
+      }
+      archive.record("connection.started", { resumed: recording.resumed, model: settings.model });
+      if (recording.resumed) push("system", "Resuming the same live recording after an interruption.");
       // 1) Gateway boot context (memory packet) — best-effort.
       let bootContext = "";
       try {
@@ -612,6 +657,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         ...WEB_PERSON_TOOLS,
         SEND_PHOTO_TOOL, GENERATE_CHART_TOOL,
       ];
+      if (attempt !== attemptRef.current) return;
 
       // 2) Mint a realtime client secret (BYOK-aware), using the chosen model.
       const broker = (await rpc("live.openaiClientSecret", {
@@ -625,6 +671,9 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
       if (broker.ok === false) throw new Error(broker.error ?? "Realtime broker failed");
       const token = clientSecretValue(broker);
       if (!token) throw new Error("Realtime broker did not return a client secret");
+      if (attempt !== attemptRef.current) return;
+      archive.record("context.initial", { model: broker.model ?? settings.model, instructions, tools,
+        reasoningEffort: settings.reasoningEffort, restoredMessageCount: priorTurns.length });
 
       // 3) Capture mic/camera (camera position from settings).
       const media = await getUserMediaSafe({
@@ -633,6 +682,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
           ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: settings.cameraPosition === "back" ? "environment" : "user" }
           : false,
       });
+      if (attempt !== attemptRef.current) { media.getTracks().forEach(t => t.stop()); return; }
       mediaRef.current = media;
       if (videoElRef.current) videoElRef.current.srcObject = media;
 
@@ -649,7 +699,28 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
 
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
+      const disconnected = () => {
+        if (pcRef.current !== pc || reconnectTimerRef.current) return;
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          if (pcRef.current !== pc || (pc.connectionState === "connected" && dc.readyState === "open")) return;
+          archive.record("connection.disconnected", { state: pc.connectionState });
+          teardown();
+          setPhase("failed");
+          if (++reconnectCountRef.current <= 3) {
+            push("system", "Connection interrupted; reconnecting within the same recording.");
+            reconnectTimerRef.current = setTimeout(() => { reconnectTimerRef.current = null; void startRef.current(); }, 1000);
+          } else push("warning", "Connection interrupted. Tap Start to resume this recording.");
+        }, 2000);
+      };
+      pc.addEventListener("connectionstatechange", () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "disconnected") disconnected();
+      });
+      dc.addEventListener("close", disconnected);
       dc.addEventListener("open", () => {
+        if (pcRef.current !== pc) return;
+        reconnectCountRef.current = 0;
+        archive.record("connection.connected", { model: broker.model ?? settings.model });
         const wantAudio = micOn && settings.responseModality === "audio";
         const interrupt = settings.bargeIn !== "let_finish";
         const session: Record<string, unknown> = {
@@ -674,6 +745,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         // Replay prior turns into the realtime conversation so it continues the
         // last session (without triggering a response — these are silent
         // conversation items, like iOS's history replay).
+        archive.record("context.restored", { messages: priorTurns });
         for (const turn of priorTurns) {
           sendRealtime({
             type: "conversation.item.create",
@@ -690,7 +762,8 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         push("system", `Connected to ${broker.model ?? settings.model}.`);
         if (cameraOn && cadenceFps(settings) > 0) startFrameLoop(cadenceFps(settings));
       });
-      dc.addEventListener("message", (e) => handleMessage(String(e.data)));
+      const cameraArchive = cameraArchiveRef.current;
+      dc.addEventListener("message", (e) => { if (pcRef.current === pc) void handleMessage(String(e.data), cameraArchive); });
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -700,23 +773,48 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
       });
       if (!sdpRes.ok) throw new Error(`OpenAI Realtime call failed (HTTP ${sdpRes.status})`);
-      await pc.setRemoteDescription({ type: "answer", sdp: await sdpRes.text() });
+      const answer = await sdpRes.text();
+      if (attempt !== attemptRef.current) return;
+      await pc.setRemoteDescription({ type: "answer", sdp: answer });
     } catch (err) {
+      if (attempt !== attemptRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
+      cameraArchiveRef.current?.record("connection.failed", { message: msg });
       setError(msg);
       setPhase("failed");
       push("warning", msg);
       teardown();
+      if (reconnectCountRef.current > 0 && reconnectCountRef.current < 3) {
+        reconnectCountRef.current++;
+        reconnectTimerRef.current = setTimeout(() => { reconnectTimerRef.current = null; void startRef.current(); }, 2000);
+      }
+    } finally {
+      startingRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rpc, sessionKey, micOn, cameraOn, staySilent, effectivePrompt, settings, sendRealtime, teardown]);
+  }, [rpc, sessionKey, micOn, cameraOn, staySilent, effectivePrompt, settings, sendRealtime, teardown, closing]);
+  startRef.current = start;
 
-  const stop = useCallback(() => {
+  const stop = useCallback(async () => {
+    if (closing) return;
+    setClosing(true);
+    attemptRef.current++;
+    const archive = cameraArchiveRef.current;
+    archive?.record("connection.ended", { reason: "user_stop" });
+    if (archive?.liveSessionId) clearLiveRecording(liveSessionKeyRef.current, archive.liveSessionId);
     teardown();
     setPhase("idle");
-    push("system", "Session ended.");
+    push("system", "Session ended. Saving the recording…");
     void flushTurns(); // persist any queued turns immediately
-  }, [teardown, flushTurns]);
+    try {
+      if (archive?.liveSessionId) {
+        const results = await Promise.all(connectionArchivesRef.current.map(a => a.drain()));
+        const toolsPending = transcriptRef.current.some(e => e.kind === "tool" && e.toolStatus === "running");
+        await archive.end(results.every(Boolean) && !toolsPending);
+      }
+    } catch { push("warning", "Recording could not be finalized; its folder remains open or incomplete."); }
+    finally { cameraArchiveRef.current = null; connectionArchivesRef.current = []; setClosing(false); }
+  }, [teardown, flushTurns, closing]);
 
   function startFrameLoop(fps: number) {
     if (frameTimerRef.current) clearInterval(frameTimerRef.current);
@@ -727,16 +825,30 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   function sendCameraFrame() {
     const video = videoElRef.current;
     if (!video || video.readyState < 2) return;
+    if (!mediaRef.current?.getVideoTracks().some(track => track.enabled)) return;
     const canvas = document.createElement("canvas");
     canvas.width = 512;
     canvas.height = Math.max(1, Math.round((video.videoHeight / Math.max(video.videoWidth, 1)) * canvas.width));
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    sendRealtime({
+    // Encode ONCE and reuse the exact string for provider + archive. drawImage
+    // and toDataURL are synchronous browser work; async uploads do not remove
+    // this main-thread cost. 512px width / JPEG quality 0.7 bound typical size,
+    // but height and scene detail still affect encoding time and byte count.
+    const image = canvas.toDataURL("image/jpeg", 0.7);
+    const frameId = crypto.randomUUID();
+    const itemId = frameId.replace(/-/g, "");
+    const capturedAt = new Date().toISOString();
+    const sent = sendRealtime({
       type: "conversation.item.create",
-      item: { type: "message", role: "user", content: [{ type: "input_image", image_url: canvas.toDataURL("image/jpeg", 0.7) }] },
+      event_id: frameId,
+      item: { id: itemId, type: "message", role: "user", content: [{ type: "input_image", image_url: image }] },
     });
+    if (!sent) return;
+    // "sent" means handed to the data channel, not provider acceptance. Enqueue
+    // without awaiting gateway disk I/O; observe() later matches provider ACKs.
+    cameraArchiveRef.current?.enqueue({ frameId, itemId, capturedAt, sentAt: new Date().toISOString(), image });
     if (staySilentRef.current) silenceFrameCountRef.current += 1;
   }
 
@@ -755,9 +867,10 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sendRealtime, micOn, persistTurn]);
 
-  async function handleMessage(raw: string) {
+  async function handleMessage(raw: string, archive = cameraArchiveRef.current) {
     const ev = safeJSON(raw);
     if (!ev) return;
+    archive?.observe(ev);
     const type = ev.type as string;
 
     // New response starting → reset the per-response guards.
@@ -889,9 +1002,12 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   }
 
   async function handleFunctionCall(ev: Record<string, any>) {
+    const archive = cameraArchiveRef.current;
+    const connection = dcRef.current;
     const callId = String(ev.call_id ?? "");
     const name = String(ev.name ?? "");
     const args = safeJSON(String(ev.arguments ?? "{}")) ?? {};
+    archive?.record("tool.requested", { callId, name, arguments: args });
 
     // Push a RUNNING tool bubble (compact label) and remember its id so we can
     // flip it to ok (green) / error (red) when the call finishes.
@@ -989,6 +1105,10 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     // if the tool produced one, e.g. a chart). The side panel derives its
     // artifact list from the transcript, so no separate state to update.
     const ms = Math.round(performance.now() - startedAt);
+    // A tool can outlive Stop/reconnect. Never inject its result into a new
+    // recording or connection; Stop marks a recording with pending tools incomplete.
+    if (archive !== cameraArchiveRef.current || connection !== dcRef.current) return;
+    archive?.record("tool.completed", { callId, name, status: ok ? "ok" : "error", output, detail, ms });
     setTranscript((cur) => cur.map((e) =>
       e.id === toolEntryId ? { ...e, toolStatus: ok ? "ok" : "error", toolDetail: detail, toolMs: ms, imageData: toolImage, imageTitle } : e,
     ));
@@ -1147,6 +1267,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   return {
     // state
     phase, error, transcript, historyLoading, micOn, cameraOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart,
+    resumable: hasLiveRecording(sessionKey),
     // refs (bind to <video>/<audio> in the screen)
     videoElRef, audioElRef,
     // actions

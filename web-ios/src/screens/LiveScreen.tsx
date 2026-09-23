@@ -43,7 +43,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const rt = previewMode ? { ...realRt, ...previewOverrides(previewMode) } : realRt;
   const {
     phase, error, transcript, historyLoading, micOn, cameraOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
-    canStart, videoElRef, audioElRef, start, stop, sendText,
+    canStart, resumable, videoElRef, audioElRef, start, stop, sendText,
     toggleMic, toggleCamera, toggleStaySilent, toggleCocktailParty, toggleSafety,
   } = rt;
 
@@ -183,7 +183,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
               : "max-md:flex max-md:justify-center"
           }`}>
             <ControlBar
-              phase={phase} canStart={canStart} isConnected={isConnected}
+              phase={phase} canStart={canStart} isConnected={isConnected} resumable={resumable}
               micOn={micOn} cameraOn={cameraOn} staySilent={staySilent} cocktailParty={cocktailParty} safetyOn={safetyOn} speaking={speaking}
               onStart={() => void start()} onStop={stop}
               onToggleMic={toggleMic} onToggleCamera={toggleCamera} onToggleSilent={toggleStaySilent} onToggleCocktail={toggleCocktailParty} onToggleSafety={toggleSafety}
@@ -234,7 +234,7 @@ const Composer = memo(function Composer({ onSend }: { onSend: (text: string) => 
 // Control bar (web style: a centered row of round controls)
 // -----------------------------------------------------------------------------
 function ControlBar(p: {
-  phase: LivePhase; canStart: boolean; isConnected: boolean;
+  phase: LivePhase; canStart: boolean; isConnected: boolean; resumable: boolean;
   micOn: boolean; cameraOn: boolean; staySilent: boolean; cocktailParty: boolean; safetyOn: boolean; speaking: boolean;
   onStart: () => void; onStop: () => void;
   onToggleMic: () => void; onToggleCamera: () => void; onToggleSilent: () => void; onToggleCocktail: () => void; onToggleSafety: () => void;
@@ -250,7 +250,7 @@ function ControlBar(p: {
           <Ctrl on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
         </>
       )}
-      <PrimaryButton phase={p.phase} canStart={p.canStart} onStart={p.onStart} onStop={p.onStop} />
+      <PrimaryButton phase={p.phase} canStart={p.canStart} resumable={p.resumable} onStart={p.onStart} onStop={p.onStop} />
     </div>
   );
 }
@@ -268,16 +268,16 @@ function Ctrl({ on, onIcon, offIcon, label, onClick, pulse, danger }: {
   );
 }
 
-function PrimaryButton({ phase, canStart, onStart, onStop }: { phase: LivePhase; canStart: boolean; onStart: () => void; onStop: () => void }) {
+function PrimaryButton({ phase, canStart, resumable, onStart, onStop }: { phase: LivePhase; canStart: boolean; resumable: boolean; onStart: () => void; onStop: () => void }) {
   // End button sits inline with the toggle row when connected → keep it the same
   // 44px footprint as the toggles; the idle call button is larger and prominent.
   if (phase === "connected" || phase === "paused") {
     return <button onClick={onStop} aria-label="End session" className="pressable grid h-11 w-11 place-items-center rounded-full bg-danger text-white shadow-glass"><Icon name="xmark" className="h-5 w-5" /></button>;
   }
   if (phase === "connecting") {
-    return <div className="grid h-14 w-14 place-items-center rounded-full bg-danger/80 text-white"><span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" /></div>;
+    return <button onClick={onStop} aria-label="Cancel session" className="grid h-14 w-14 place-items-center rounded-full bg-danger/80 text-white"><span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" /></button>;
   }
-  return <button onClick={onStart} disabled={!canStart} aria-label="Start session" className="pressable grid h-14 w-14 place-items-center rounded-full bg-ok text-white shadow-glass disabled:opacity-40"><Icon name="phone" className="h-6 w-6" filled /></button>;
+  return <button onClick={onStart} disabled={!canStart} aria-label={resumable ? "Resume session" : "Start session"} title={resumable ? "Resume session" : "Start session"} className="pressable grid h-14 w-14 place-items-center rounded-full bg-ok text-white shadow-glass disabled:opacity-40"><Icon name="phone" className="h-6 w-6" filled /></button>;
 }
 
 // -----------------------------------------------------------------------------
@@ -306,7 +306,7 @@ function Transcript({ entries, phase, loading }: { entries: TranscriptEntry[]; p
             </>
           )}
           {phase === "connecting" && <p className="text-sm text-white/55">Connecting…</p>}
-          {phase === "failed" && <p className="text-sm text-white/55">Session ended — tap the call button to retry.</p>}
+          {phase === "failed" && <p className="text-sm text-white/55">Connection interrupted — tap the call button to resume.</p>}
         </div>
       </div>
     );
