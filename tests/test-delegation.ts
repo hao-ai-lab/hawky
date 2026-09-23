@@ -176,3 +176,17 @@ test("late generation completion cannot turn interrupted audio into delivered wo
   expect(deliver("generated", "response-2").delivery).toBe("played");
   expect(g.call("delegation.get", request).status).toBe("completed");
 });
+
+test("streamed output is batched without losing text or event order", async () => {
+  const g = gateway(async (_c, _t, observer) => {
+    observer.started("fixture");
+    for (let i = 0; i < 100; i++) observer.event({ type: "text", content: `word${i} ` });
+    observer.event({ type: "tool_use_start", name: "read_file", tool_use_id: "read", input: {} });
+    observer.event({ type: "text", content: "Final output", replace: true });
+    return { reply: "Final output" };
+  });
+  const task = await g.call("delegation.run", request);
+  expect(task.preview).toBe("Final output");
+  expect(task.events.map((e: any) => e.type)).toEqual(["queued", "started", "agent.text", "agent.tool_use_start", "agent.text", "completed"]);
+  expect(task.events[2].data.events).toHaveLength(100);
+});

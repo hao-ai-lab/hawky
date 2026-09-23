@@ -18,11 +18,11 @@ export function DelegationBubble({ task, image, onImageClick }: { task: Delegati
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   }
   const duration = task.completedAt ? `${((task.completedAt - task.createdAt) / 1000).toFixed(1)}s` : "";
-  return <details className="my-2 w-full max-w-2xl rounded-card border border-white/15 bg-white/5 p-3">
+  return <details className="group my-2 w-full max-w-2xl rounded-card border border-white/15 bg-white/5 p-3">
     <summary className="cursor-pointer text-sm">
       <span className="font-medium">Backend task</span>
       <span className="ml-2 text-white/60">{task.status} {duration}</span>
-      <span className="mt-1 block truncate text-white/70">{task.request}</span>
+      <span className="mt-1 block truncate text-white/70 group-open:whitespace-normal">{task.request}</span>
     </summary>
     <div className="mt-3 space-y-3 break-words text-xs">
       <p>{task.runtime} · {task.model || "Model reported by runtime when available"}</p>
@@ -54,6 +54,7 @@ export function DelegationBubble({ task, image, onImageClick }: { task: Delegati
           {e.data != null && <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">{JSON.stringify(e.data, null, 2)}</pre>}
         </li>)}
       </ol>
+      {task.preview && !task.result && <div><strong>Latest backend output</strong><p className="max-h-48 overflow-auto whitespace-pre-wrap">{task.preview}</p></div>}
       {task.result && <div><strong>Backend answer</strong><p className="mt-1 whitespace-pre-wrap">{task.result}</p></div>}
       {image && <button aria-label="Zoom backend image" onClick={onImageClick}><img src={image} alt="Backend result" className="max-h-64 rounded object-contain" /></button>}
       {task.error && <p role="alert" className="text-danger">{task.error}</p>}

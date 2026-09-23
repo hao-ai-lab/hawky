@@ -133,6 +133,13 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
         task.error = "Delegation exceeded its 180 second deadline.";
         cancel(conn, task);
       }, 180_000);
+      let textTimer: ReturnType<typeof setTimeout> | undefined;
+      let textEvents: StreamEvent[] = [];
+      const flushText = () => {
+        if (textTimer) clearTimeout(textTimer);
+        textTimer = undefined;
+        if (textEvents.length) { const events = textEvents; textEvents = []; publish(conn, task, "agent.text", { events }); }
+      };
       try {
         controller.signal.throwIfAborted();
         for (const dependency of task.dependsOn ?? []) {
@@ -157,6 +164,15 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
           },
           event(event) {
             if ((event.type === "text" || event.type === "tool_use_start") && !task.firstOutputAt) task.firstOutputAt = Date.now();
+            if (event.type === "text") {
+              task.preview = (event.replace ? event.content : (task.preview ?? "") + event.content).slice(-8000);
+              textEvents.push(event);
+              // Persist/broadcast at most ~7 text updates per second; retain all
+              // deltas in the journal, and flush before tools or terminal events.
+              if (!textTimer) textTimer = setTimeout(flushText, 150);
+              return;
+            }
+            flushText();
             if (event.type === "error") task.error = event.content;
             if (!controller.signal.aborted) {
               if (event.type === "permission_request" || event.type === "ask_user_request") task.status = "needs_input";
@@ -171,7 +187,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
         task.status = controller.signal.aborted ? "cancelled" : "failed";
         task.error ??= error instanceof Error ? error.message : String(error);
       } finally {
-        clearTimeout(timer);
+        clearTimeout(timer); flushText();
         task.completedAt = Date.now(); publish(conn, task, task.status, { result: task.result, error: task.error });
         active.delete(key);
       }

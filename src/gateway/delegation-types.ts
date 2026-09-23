@@ -35,6 +35,7 @@ export interface DelegationTask {
   firstOutputAt?: number;
   completedAt?: number;
   result?: string;
+  preview?: string;
   image?: { base64?: string; media_type?: string };
   error?: string;
   events: DelegationEvent[];
