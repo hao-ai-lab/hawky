@@ -17,3 +17,16 @@ it("preserves long input and output inside an expandable task", () => {
   fireEvent.click(view.container.querySelector("summary")!);
   expect(details.open).toBe(false);
 });
+
+it("keeps backend images available to the existing artifact viewer", async () => {
+  const { delegationEntry } = await import("../src/lib/delegation-view");
+  const { artifactsFromTranscript } = await import("../src/lib/useRealtime");
+  const task: DelegationTask = { id: "image-task", ownerSession: "web:a", backendSession: "web:a-bridge", runtime: "native",
+    request: "Chart the data", status: "completed", createdAt: 1000, events: [], image: { media_type: "image/png", base64: "fixture" } };
+  const entry = delegationEntry(task);
+  expect(artifactsFromTranscript([entry])[0].src).toBe("data:image/png;base64,fixture");
+  let opened = false;
+  const view = render(<DelegationBubble task={task} image={entry.imageData} onImageClick={() => { opened = true; }} />);
+  fireEvent.click(view.getByLabelText("Zoom backend image"));
+  expect(opened).toBe(true);
+});

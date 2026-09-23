@@ -2,7 +2,7 @@ import type { DelegationTask } from "../../../src/gateway/delegation-types";
 import { useState } from "react";
 import { useSocketStore } from "../lib/socket-store";
 
-export function DelegationBubble({ task }: { task: DelegationTask }) {
+export function DelegationBubble({ task, image, onImageClick }: { task: DelegationTask; image?: string; onImageClick?: () => void }) {
   const rpc = useSocketStore(s => s.rpc);
   const [error, setError] = useState("");
   const [correction, setCorrection] = useState("");
@@ -55,6 +55,7 @@ export function DelegationBubble({ task }: { task: DelegationTask }) {
         </li>)}
       </ol>
       {task.result && <div><strong>Backend answer</strong><p className="mt-1 whitespace-pre-wrap">{task.result}</p></div>}
+      {image && <button aria-label="Zoom backend image" onClick={onImageClick}><img src={image} alt="Backend result" className="max-h-64 rounded object-contain" /></button>}
       {task.error && <p role="alert" className="text-danger">{task.error}</p>}
       {task.status === "completed" && <p className="text-white/50">Backend turn finished. This does not confirm the answer has been spoken.</p>}
     </div>

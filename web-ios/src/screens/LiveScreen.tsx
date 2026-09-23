@@ -361,7 +361,8 @@ function Bubble({ entry }: { entry: TranscriptEntry }) {
  *  running = purple (spinner), ok = green (check), error = red (warning). */
 function ToolBubble({ entry }: { entry: TranscriptEntry }) {
   const openArtifact = useContext(OpenArtifactContext);
-  if (entry.delegation) return <DelegationBubble task={entry.delegation} />;
+  if (entry.delegation) return <DelegationBubble task={entry.delegation} image={entry.imageData}
+    onImageClick={() => entry.imageData && openArtifact?.({ id: entry.id, src: entry.imageData, title: entry.imageTitle || entry.text, at: entry.at })} />;
   const m = /^([a-zA-Z0-9_]+)\s*\((.*)\)$/s.exec(entry.text);
   const name = m ? m[1] : entry.text;
   const args = m ? m[2] : "";

@@ -1,3 +1,4 @@
+import { delegationEntry } from "./delegation-view";
 // =============================================================================
 // useRealtime — the Live engine for the web-ios app (#681)
 //
@@ -364,13 +365,13 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       const previous = tasksRef.current.get(task.id);
       if ((previous?.events.at(-1)?.seq ?? 0) > (task.events.at(-1)?.seq ?? 0)) return;
       tasksRef.current.set(task.id, task);
-      if (task.validity === "superseded") responsesRef.current?.invalidateTask(task.id);
+      if (task.validity === "superseded") {
+        responsesRef.current?.invalidateTask(task.id);
+        if (previous?.validity !== "superseded" && readyRef.current) sendRealtime({ type: "conversation.item.create",
+          item: { type: "message", role: "system", content: [{ type: "input_text", text: `Backend task ${task.id} was superseded by a correction. Its result is no longer current; do not present it as the answer.` }] } });
+      }
       setTranscript(cur => {
-        const entry = { id: task.id, kind: "tool" as const, text: `Delegating: ${task.request}`,
-          at: new Date(task.createdAt).toLocaleTimeString(), delegation: task,
-          toolStatus: (["completed", "failed", "cancelled", "interrupted"].includes(task.status)
-            ? task.status === "completed" ? "ok" : "error" : "running") as ToolStatus,
-          toolDetail: task.error || task.result };
+        const entry = delegationEntry(task);
         return cur.some(e => e.id === task.id || e.delegation?.id === task.id)
           ? cur.map(e => e.id === task.id || e.delegation?.id === task.id ? { ...e, ...entry } : e)
           : [...cur, entry];
@@ -637,8 +638,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         for (const task of tasksRef.current.values()) {
           if (task.ownerSession !== key) continue;
           const existing = entries.find(e => e.delegation?.id === task.id);
-          if (existing) existing.delegation = task;
-          else entries.push({ id: task.id, kind: "tool", text: `Delegating: ${task.request}`, at: new Date(task.createdAt).toLocaleTimeString(), delegation: task });
+          if (existing) Object.assign(existing, delegationEntry(task));
+          else entries.push(delegationEntry(task));
         }
         transcriptSessionRef.current = key;
         transcriptRef.current = entries;
@@ -1214,7 +1215,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     if (archive !== cameraArchiveRef.current || connection !== dcRef.current) return;
     archive?.record(delegation ? "tool.accepted" : "tool.completed", { callId, name, status: ok ? "ok" : "error", output, detail, ms });
     setTranscript((cur) => cur.map((e) =>
-      e.id === toolEntryId ? { ...e, toolStatus: delegation ? "running" : ok ? "ok" : "error", toolDetail: detail, toolMs: ms, imageData: toolImage, imageTitle, delegation } : e,
+      e.id === toolEntryId ? { ...e, toolStatus: delegation ? "running" : ok ? "ok" : "error", toolDetail: detail, toolMs: ms, imageData: toolImage, imageTitle, delegation, ...(delegation ? delegationEntry(delegation) : {}) } : e,
     ));
     // Persist the finished tool record so it appears when the session reloads
     // (carry the image + title so charts survive a history reload).
