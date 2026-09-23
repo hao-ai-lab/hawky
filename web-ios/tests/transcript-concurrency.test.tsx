@@ -143,3 +143,39 @@ it("a late response.done preserves both a cancelled partial and the newer respon
   await s.send(delta(" Still streaming.", "r2", "i2"));
   expect(s.texts()).toEqual(["Interrupted partial", "New response. Still streaming."]);
 });
+
+it.each([false, true])("a pending history response cannot erase live text (StrictMode=%s)", async strict => {
+  let resolveHistory!: (value: unknown) => void;
+  const pendingHistory = new Promise(resolve => { resolveHistory = resolve; });
+  history = () => pendingHistory;
+  const s = await session(strict);
+  await s.send(start(), delta("Visible live reply."));
+  expect(s.texts()).toEqual(["Visible live reply."]);
+  await act(async () => { resolveHistory({ messages: [] }); });
+  expect(s.result.current.phase).toBe("connected");
+  expect(s.result.current.historyLoading).toBe(false);
+  expect(s.texts()).toEqual(["Visible live reply."]);
+});
+
+it.each([false, true])("a rejected stale history request cannot clear live text (StrictMode=%s)", async strict => {
+  let rejectHistory!: (reason: Error) => void;
+  const pendingHistory = new Promise((_, reject) => { rejectHistory = reject; });
+  history = () => pendingHistory;
+  const s = await session(strict);
+  await s.send(start(), delta("Keep this reply."));
+  await act(async () => { rejectHistory(new Error("history request timed out")); });
+  expect(s.texts()).toEqual(["Keep this reply."]);
+  expect(s.result.current.historyLoading).toBe(false);
+});
+
+it("loads history while idle, but does not reload it on Stop", async () => {
+  history = async () => ({ messages: [{ role: "assistant", content: "Earlier reply." }] });
+  const s = renderHook(() => useRealtime({ sessionKey: "web:idle-history" }), { wrapper: StrictMode });
+  await act(async () => {});
+  expect(s.result.current.transcript.map(e => e.text)).toEqual(["Earlier reply."]);
+  const historyRequests = rpc.mock.calls.filter(c => c[0] === "session.history").length;
+  await act(async () => { await s.result.current.start(); Peer.all[0].channel.open(); });
+  await act(async () => { void s.result.current.stop(); await vi.advanceTimersByTimeAsync(100); });
+  expect(rpc.mock.calls.filter(c => c[0] === "session.history")).toHaveLength(historyRequests);
+  expect(s.result.current.transcript.some(e => e.text === "Earlier reply.")).toBe(true);
+});

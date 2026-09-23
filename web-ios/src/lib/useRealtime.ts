@@ -343,6 +343,7 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
   // The instructions sent at connect — Cocktail Party appends to these live.
   const instructionsRef = useRef("");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const historyGenerationRef = useRef(0);
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [staySilent, setStaySilent] = useState(false);
@@ -519,20 +520,22 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     if (gatewayStatus !== "connected") return;
     if (phase === "connecting" || phase === "connected" || phase === "paused") return;
     let active = true;
+    const generation = ++historyGenerationRef.current;
+    const isCurrent = () => active && generation === historyGenerationRef.current;
     setHistoryLoading(true);
     void (async () => {
       try {
         const res = (await rpc("session.history", { sessionKey, limit: 100 })) as {
           messages?: Array<{ role: string; content: unknown; timestamp?: string }>;
         };
-        if (!active) return;
+        if (!isCurrent()) return;
         // Artifacts are derived from the transcript, so loading history restores
         // the full chronological chart list automatically.
         setTranscript(mapHistoryToTranscript(res.messages ?? []));
       } catch {
-        if (active) setTranscript([]);
+        if (isCurrent()) setTranscript([]);
       } finally {
-        if (active) setHistoryLoading(false);
+        if (isCurrent()) setHistoryLoading(false);
       }
     })();
     return () => { active = false; };
@@ -547,6 +550,11 @@ export function useRealtime({ sessionKey, prompt }: UseRealtimeOptions) {
     if (blocked) { setError(blocked); setPhase("failed"); push("warning", blocked); return; }
 
     startingRef.current = true;
+    // A history fetch started while idle can return after live text arrives.
+    // Invalidate it synchronously, including its error/finally paths. Phase is
+    // deliberately not an effect dependency: Stop must not reload old history.
+    historyGenerationRef.current++;
+    setHistoryLoading(false);
     const attempt = ++attemptRef.current;
     teardown();
     setPhase("connecting");
