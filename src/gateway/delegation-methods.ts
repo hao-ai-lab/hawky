@@ -76,8 +76,16 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     if (task.startedAt) options.cancel?.(task);
     return task;
   }
-  server.registerMethod("delegation.get", (conn, p) => lookup(conn, p));
-  server.registerMethod("delegation.list", (conn, p) => ({ tasks: db().list(owner(conn), scope(p)).map(t => recover(conn, active.get(keyOf(conn, t.id))?.task ?? t)) }));
+  function recordStatusCheck(conn: GatewayConnection, task: DelegationTask, p: any) {
+    // UI recovery polls omit this marker. Only explicit model checks enter the
+    // task journal, so background refreshes do not fill it with repeated reads.
+    if (typeof p?.statusCheck === "string" && p.statusCheck.length > 0 && p.statusCheck.length <= 128)
+      publish(conn, task, "status.checked", { callId: p.statusCheck, status: task.status });
+    return task;
+  }
+  server.registerMethod("delegation.get", (conn, p) => recordStatusCheck(conn, lookup(conn, p), p));
+  server.registerMethod("delegation.list", (conn, p) => ({ tasks: db().list(owner(conn), scope(p))
+    .map(t => recordStatusCheck(conn, recover(conn, active.get(keyOf(conn, t.id))?.task ?? t), p)) }));
   server.registerMethod("delegation.cancel", (conn, p) => cancel(conn, lookup(conn, p)));
   server.registerMethod("delegation.respond", (conn, raw) => {
     const p = raw as any, task = lookup(conn, p);

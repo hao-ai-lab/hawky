@@ -126,3 +126,89 @@ it("delegation acknowledges once, survives an interruption, and injects only cur
   await act(async () => { s.channel.receive({ type: "input_audio_buffer.speech_stopped" }); await vi.advanceTimersByTimeAsync(500); });
   expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
 });
+
+it("submission waits for push completion; status replies cannot start another tool loop", async () => {
+  const task = { id: "", ownerSession: "web:scenario", backendSession: "web:scenario-bridge", runtime: "native",
+    request: "Read alpha.txt", status: "running", validity: "current", createdAt: Date.now(), events: [] as any[] };
+  const original = rpc.getMockImplementation()!;
+  rpc.mockImplementation(async (method: string, params: any) => {
+    if (method === "delegation.submit") { task.id = params.id; return structuredClone(task); }
+    if (method === "delegation.get") return structuredClone(task);
+    return original(method, params);
+  });
+  useLiveSettings.getState().set("toolChoice", "required");
+  const s = await session();
+  await act(async () => { s.channel.receive(call("session_send_message", { message: task.request })); await vi.advanceTimersByTimeAsync(3000); });
+  expect(output(s.channel)[0]).toMatchObject({ accepted: true, note: expect.stringContaining("Do not poll") });
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(0);
+  expect(rpc.mock.calls.filter(c => c[0] === "delegation.get")).toHaveLength(0);
+
+  // Explicit user progress question. The model gets one spoken continuation,
+  // with tools disabled even if the session setting normally requires a tool.
+  await act(async () => {
+    s.channel.receive({ type: "conversation.item.input_audio_transcription.completed", transcript: "Is it done?" });
+    s.channel.receive(call("session_task_control", { action: "status", task_id: task.id }));
+    await vi.advanceTimersByTimeAsync(300);
+  });
+  const reply = s.channel.sent.filter(e => e.type === "response.create").at(-1)!;
+  expect(reply.response.tool_choice).toBe("none");
+  expect(output(s.channel).at(-1).status).toBe("running");
+  expect(rpc).toHaveBeenCalledWith("delegation.get", expect.objectContaining({ id: task.id, statusCheck: "call-session_task_control" }));
+  expect(s.result.current.transcript.filter(e => e.kind === "tool")).toHaveLength(1);
+
+  await act(async () => {
+    s.channel.receive({ type: "response.created", response: { id: "status-answer", metadata: reply.response.metadata } });
+    s.channel.receive({ type: "response.done", response: { id: "status-answer", status: "completed", metadata: reply.response.metadata } });
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
+
+  // The backend notification still initiates a result reply, with no polling.
+  await act(async () => {
+    const finished = { ...task, status: "completed", result: "alpha-value=73", events: [{ seq: 1, at: Date.now(), type: "completed" }] };
+    for (const listener of useSocketStore.getState().eventListeners) listener({ type: "event", event: "delegation.updated", payload: { task: finished } });
+    await vi.advanceTimersByTimeAsync(300);
+  });
+  const replies = s.channel.sent.filter(e => e.type === "response.create");
+  expect(replies).toHaveLength(2);
+  expect(replies[1].response).toMatchObject({ tool_choice: "none", metadata: { task_ids: task.id } });
+  expect(rpc.mock.calls.filter(c => c[0] === "delegation.get")).toHaveLength(1);
+});
+
+it("the recorded running/running/completed checks stay in diagnostics instead of three transcript bubbles", async () => {
+  const original = rpc.getMockImplementation()!;
+  let n = 0;
+  rpc.mockImplementation(async (method: string, params: any) => {
+    if (method === "delegation.get") return { id: "task-1", request: "Read alpha.txt", status: ++n < 3 ? "running" : "completed" };
+    return original(method, params);
+  });
+  const s = await session();
+  for (const callId of ["check-1", "check-2", "check-3"]) await act(async () => {
+    s.channel.receive({ ...call("session_task_control", { action: "status", task_id: "task-1" }), call_id: callId });
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+  expect(output(s.channel).map(o => o.status)).toEqual(["running", "running", "completed"]);
+  expect(s.result.current.transcript.filter(e => e.kind === "tool")).toHaveLength(0);
+  const persisted = rpc.mock.calls.filter(c => c[0] === "session.appendMessages").flatMap(c => c[1].messages);
+  expect(persisted.some(m => m.text.includes("session_task_control"))).toBe(false);
+  const logged = rpc.mock.calls.filter(c => c[0] === "realtime.archive.append" && c[1].event.type === "tool.completed");
+  expect(logged.map(c => c[1].event.data.callId)).toEqual(["check-1", "check-2", "check-3"]);
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
+  expect(s.channel.sent.find(e => e.type === "response.create").response.tool_choice).toBe("none");
+});
+
+it("a failed status lookup remains visible and can be explained without retrying a tool", async () => {
+  const original = rpc.getMockImplementation()!;
+  rpc.mockImplementation(async (method: string, params: any) => {
+    if (method === "delegation.get") throw new Error("Delegation not found");
+    return original(method, params);
+  });
+  const s = await session();
+  await act(async () => {
+    s.channel.receive(call("session_task_control", { action: "status", task_id: "missing" }));
+    await vi.advanceTimersByTimeAsync(300);
+  });
+  expect(output(s.channel)[0]).toMatchObject({ ok: false, error: "Delegation not found" });
+  expect(s.result.current.transcript.some(e => e.kind === "warning" && e.text.includes("Delegation not found"))).toBe(true);
+  expect(s.channel.sent.find(e => e.type === "response.create").response.tool_choice).toBe("none");
+});

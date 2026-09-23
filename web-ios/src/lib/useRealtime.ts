@@ -76,7 +76,7 @@ const BACKEND_TOOL = {
   type: "function",
   name: "session_send_message",
   description:
-    "Send a concise request or context packet to the Hawk backend agent for durable work, tool use, memory, files, or longer reasoning.",
+    "Send a concise request or context packet to the Hawk backend agent for durable work, tool use, memory, files, or longer reasoning. Briefly acknowledge before calling when useful. Completion arrives automatically; do not poll task status.",
   parameters: {
     type: "object",
     properties: {
@@ -93,7 +93,7 @@ const BACKEND_TOOL = {
 
 const BACKEND_CONTROL_TOOL = {
   type: "function", name: "session_task_control",
-  description: "List or check authoritative backend task status, cancel work only when asked, or revise a task after a user correction. Stopping speech does not cancel backend work.",
+  description: "List or check backend task status only when the user asks about progress. Never poll: completion arrives automatically. Cancel work only when asked, or revise after a user correction. Stopping speech does not cancel backend work.",
   parameters: { type: "object", properties: {
     action: { type: "string", enum: ["list", "status", "cancel", "revise"] },
     task_id: { type: "string", description: "Task ID from a delegation result; required except for list." },
@@ -564,7 +564,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       if (!sent) continue;
       injectedTasksRef.current.add(task.id);
       sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"],
-        metadata: { task_id: task.id }, instructions: "Answer using current backend task status. Briefly report newly finished work at an appropriate gap. Do not repeat results already conveyed or call completed work pending." } });
+        tool_choice: "none", metadata: { task_id: task.id }, instructions: "Answer using current backend task status. Briefly report newly finished work at an appropriate gap. Do not repeat results already conveyed or call completed work pending." } });
     }
   };
   useEffect(() => { if (phase === "connected") injectTasksRef.current(); }, [phase]);
@@ -1100,11 +1100,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const args = safeJSON(String(ev.arguments ?? "{}")) ?? {};
     archive?.record("tool.requested", { callId, name, arguments: args });
 
-    // Push a RUNNING tool bubble (compact label) and remember its id so we can
-    // flip it to ok (green) / error (red) when the call finishes.
+    const statusCheck = name === "session_task_control" && ["status", "list"].includes(args.action);
+    // Read-only control calls are diagnostics on the existing task, not new work.
+    // Other tools retain their own running/result bubble.
     const toolEntryId = entryId();
     const startedAt = performance.now();
-    setTranscript((cur) => [
+    if (!statusCheck) setTranscript((cur) => [
       ...cur.slice(-200),
       { id: toolEntryId, kind: "tool", text: toolLabel(name, args), at: new Date().toLocaleTimeString(), toolStatus: "running" },
     ]);
@@ -1133,14 +1134,14 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         if ((latest?.events.at(-1)?.seq ?? 0) > (delegation.events.at(-1)?.seq ?? 0)) delegation = latest!;
         tasksRef.current.set(delegation.id, delegation);
         output = { accepted: true, task_id: delegation.id, status: delegation.status,
-          note: "Submission acknowledged. This is not proof of accomplishment. Consult the status; results arrive separately. Use session_task_control to check, revise, or cancel." };
+          note: "Submission acknowledged; this is not proof of accomplishment. Completion arrives automatically. Do not poll or check status unless the user asks about progress. Return to the live conversation while the backend works." };
         detail = "Backend accepted the task.";
       } else if (name === "session_task_control") {
         const action = String(args.action);
         const method = ({ list: "delegation.list", status: "delegation.get", cancel: "delegation.cancel", revise: "delegation.revise" } as Record<string, string>)[action];
         if (!method) throw new Error("Unknown task action");
         output = await rpc(method, { ownerSession: liveSessionKeyRef.current, id: args.task_id,
-          message: args.message, revisionId: toolEntryId }) as Record<string, unknown>;
+          message: args.message, revisionId: toolEntryId, ...(statusCheck ? { statusCheck: callId } : {}) }) as Record<string, unknown>;
         const report = (t: any) => ({ task_id: t.id, request: t.request, status: t.status, validity: t.validity,
           result: t.result?.slice(0, 12000), error: t.error, input: t.input });
         output = Array.isArray(output.tasks) ? { tasks: output.tasks.map(report) } : report(output);
@@ -1214,12 +1215,13 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     // recording or connection; Stop marks a recording with pending tools incomplete.
     if (archive !== cameraArchiveRef.current || connection !== dcRef.current) return;
     archive?.record(delegation ? "tool.accepted" : "tool.completed", { callId, name, status: ok ? "ok" : "error", output, detail, ms });
-    setTranscript((cur) => cur.map((e) =>
+    if (!statusCheck) setTranscript((cur) => cur.map((e) =>
       e.id === toolEntryId ? { ...e, toolStatus: delegation ? "running" : ok ? "ok" : "error", toolDetail: detail, toolMs: ms, imageData: toolImage, imageTitle, delegation, ...(delegation ? delegationEntry(delegation) : {}) } : e,
     ));
     // Persist the finished tool record so it appears when the session reloads
     // (carry the image + title so charts survive a history reload).
-    persistTool(toolLabel(name, args), ok ? "ok" : "error", detail, ms, toolImage, imageTitle, delegation);
+    if (!statusCheck) persistTool(toolLabel(name, args), ok ? "ok" : "error", detail, ms, toolImage, imageTitle, delegation);
+    else if (!ok) push("warning", `Could not check backend task status: ${detail}`);
 
     sendRealtime({
       type: "conversation.item.create",
@@ -1227,8 +1229,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     });
     submittingTasksRef.current.delete(toolEntryId);
     injectTasksRef.current();
+    // A successful submission is asynchronous: only completion (or a new user
+    // turn) wakes the model. Do not create an acknowledgement -> status loop.
+    if (delegation) return;
     sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"],
-      ...(delegation ? { instructions: "Submission is acknowledged. Briefly acknowledge only if needed. Use the latest task status; do not claim results before they arrive." } : {}) } });
+      ...(name === "session_task_control" ? { tool_choice: "none",
+        instructions: "Answer the user's request using the returned task state. If work is still running, say so briefly and wait for its automatic completion update. Do not check status again." } : {}) } });
   }
 
   // --- Live toggles that take effect mid-session ---

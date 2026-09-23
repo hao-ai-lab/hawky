@@ -190,3 +190,19 @@ test("streamed output is batched without losing text or event order", async () =
   expect(task.events.map((e: any) => e.type)).toEqual(["queued", "started", "agent.text", "agent.tool_use_start", "agent.text", "completed"]);
   expect(task.events[2].data.events).toHaveLength(100);
 });
+
+test("explicit status checks are durable task activity; recovery polling stays quiet", async () => {
+  const g = gateway(async () => ({ reply: "done" }));
+  await g.call("delegation.run", request);
+  const before = g.events.length;
+  g.call("delegation.get", request);
+  g.call("delegation.list", { ownerSession: request.ownerSession });
+  expect(g.events).toHaveLength(before);
+  const checked = g.call("delegation.get", { ...request, statusCheck: "call-status-1" });
+  expect(checked.events.at(-1)).toMatchObject({ type: "status.checked", data: { callId: "call-status-1", status: "completed" } });
+  const reopened = gateway(async () => { throw new Error("must not rerun"); });
+  expect(reopened.call("delegation.get", request).events.at(-1)).toMatchObject({ type: "status.checked" });
+  const listed = g.call("delegation.list", { ownerSession: request.ownerSession, statusCheck: "call-list-1" });
+  expect(listed.tasks[0].events.at(-1).data.callId).toBe("call-list-1");
+  expect(() => g.call("delegation.get", { ...request, ownerSession: "other", statusCheck: "bad" })).toThrow("not found");
+});

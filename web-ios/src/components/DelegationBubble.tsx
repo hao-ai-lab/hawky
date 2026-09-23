@@ -50,7 +50,7 @@ export function DelegationBubble({ task, image, onImageClick }: { task: Delegati
       {error && <p role="alert">{error}</p>}
       <ol className="max-h-64 space-y-2 overflow-y-auto">
         {task.events.filter(e => e.type !== "agent.text").map(e => <li key={e.seq}>
-          <span className="text-white/60">+{((e.at - task.createdAt) / 1000).toFixed(1)}s · {e.type}</span>
+          <span className="text-white/60">+{((e.at - task.createdAt) / 1000).toFixed(1)}s · {e.type === "status.checked" ? "Status checked" : e.type}</span>
           {e.data != null && <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">{JSON.stringify(e.data, null, 2)}</pre>}
         </li>)}
       </ol>

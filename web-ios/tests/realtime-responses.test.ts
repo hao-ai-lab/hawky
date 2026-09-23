@@ -72,3 +72,13 @@ it("a correction before response acknowledgement also suppresses late audio", as
   replies.observe({ type: "output_audio_buffer.started", response_id: "late" });
   expect(sent.at(-1)).toEqual({ type: "output_audio_buffer.clear" });
 });
+
+it("coalescing and busy retries preserve the no-tools constraint on status replies", async () => {
+  replies.request({ tool_choice: "none", instructions: "Report task status" });
+  replies.request({ instructions: "Another pending reply" });
+  await tick();
+  expect(sent[0].response.tool_choice).toBe("none");
+  replies.observe({ type: "error", error: { event_id: sent[0].event_id, code: "conversation_already_has_active_response" } });
+  await tick();
+  expect(sent[1].response.tool_choice).toBe("none");
+});

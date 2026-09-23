@@ -1,4 +1,4 @@
-type Reply = { output_modalities?: string[]; instructions?: string; metadata?: Record<string, string> };
+type Reply = { tool_choice?: "none"; output_modalities?: string[]; instructions?: string; metadata?: Record<string, string> };
 type Intent = { id: string; reply: Reply };
 /** Coordinates explicit replies with server VAD, generation and audio playback.
  * The provider can start a reply before response.created reaches us, so a local
@@ -57,6 +57,8 @@ export class RealtimeResponses {
     const taskIds = intents.map(i => i.reply.metadata?.task_id).filter(Boolean);
     const response = { ...intents.at(-1)!.reply,
       ...(instructions ? { instructions } : {}),
+      // Coalescing cannot accidentally re-enable tools on a status/result reply.
+      ...(intents.some(i => i.reply.tool_choice === "none") ? { tool_choice: "none" as const } : {}),
       metadata: { hawk_request: eventId, ...(taskIds.length ? { task_ids: taskIds.join(",") } : {}) } };
     // Reserve synchronously before sending, even if a fixture acknowledges inline.
     this.requested = { eventId, intents };
