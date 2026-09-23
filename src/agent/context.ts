@@ -11,7 +11,7 @@
 //   5. Git Safety — destructive operation warnings
 //   6. Silent Replies & Heartbeats — HEARTBEAT_OK guidance
 //   7. # Project Context — bootstrap files (AGENTS, SOUL, USER, IDENTITY,
-//      MEMORY, TOOLS, HEARTBEAT, BOOTSTRAP) with per-file truncation
+//      MEMORY, TOOLS, HEARTBEAT) with per-file truncation
 //   8. # Per-Repo Instructions — HAWKY.md / CLAUDE.md from project dir
 //
 // Per-turn reminders are injected into user messages (not system prompt).
@@ -265,7 +265,10 @@ export function formatBootstrapSection(
   for (const file of files) {
     lines.push(`## ${file.filename}`);
     lines.push("");
-    lines.push(file.content);
+    // Older workspaces retain the original installation instruction in AGENTS.md.
+    // Suppress only that known template paragraph; preserve other user content.
+    lines.push(file.filename === "AGENTS.md" ? file.content.replace(
+      "## First Run\n\nIf `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it (use its full workspace path). You won't need it again.\n\n", "") : file.content);
     lines.push("");
   }
 
