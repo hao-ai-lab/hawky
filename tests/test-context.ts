@@ -431,6 +431,10 @@ describe("formatBootstrapSection", () => {
     expect(section).not.toContain("HIGHEST PRIORITY");
     expect(section).toContain("## SOUL.md");
     expect(ws.exists("BOOTSTRAP.md")).toBe(true);
+    ws.writeFile("AGENTS.md", "## First Run\n\nIf `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it (use its full workspace path). You won't need it again.\n\n## Custom behavior\nRetain this user instruction.");
+    const legacy = formatBootstrapSection(wsDir)!;
+    expect(legacy).not.toContain("birth certificate");
+    expect(legacy).toContain("Retain this user instruction.");
   });
 
   test("returns null when workspace not initialized", () => {
