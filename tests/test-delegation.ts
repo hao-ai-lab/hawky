@@ -153,3 +153,26 @@ test("external runtime choices retain their own conversation and serialize even 
   expect(c.backendSession).not.toBe(a.backendSession); expect(c.model).toBe("reported-model");
   expect(() => g.call("delegation.submit", { ...request, id: "bad", runtime: "made-up" })).toThrow("Unknown backend runtime");
 });
+
+test("cancelling a dependent task settles before its prerequisite, without starting it", async () => {
+  let finish!: () => void;
+  const started: string[] = [];
+  const g = gateway(async (_c, task) => { started.push(task.id); await new Promise<void>(r => finish = r); return { reply: "done" }; });
+  const prerequisite = g.call("delegation.run", request);
+  const dependent = g.call("delegation.run", { ...request, id: "dependent", dependsOn: [request.id] });
+  await new Promise(r => setTimeout(r, 0));
+  g.call("delegation.cancel", { ...request, id: "dependent" });
+  expect((await dependent).status).toBe("cancelled"); expect(started).toEqual([request.id]);
+  finish(); await prerequisite;
+});
+
+test("late generation completion cannot turn interrupted audio into delivered work", async () => {
+  const g = gateway(async () => ({ reply: "answer" })); await g.call("delegation.run", request);
+  const deliver = (state: string, responseId = "response-1") => g.call("delegation.delivery", { ...request, state, responseId });
+  deliver("interrupted"); expect(deliver("generated").delivery).toBe("interrupted");
+  expect(deliver("played").delivery).toBe("interrupted");
+  expect(deliver("generated", "response-2").delivery).toBe("generated");
+  expect(deliver("played", "response-2").delivery).toBe("played");
+  expect(deliver("generated", "response-2").delivery).toBe("played");
+  expect(g.call("delegation.get", request).status).toBe("completed");
+});

@@ -112,7 +112,7 @@ describe("Live transcript — assistant audio transcript (no duplicates)", () =>
       { type: "response.output_text.done", text: "Hi there." },
       { type: "response.done", response: { output: [{ content: [{ transcript: "Hi there." }] }] } },
     ]);
-    act(() => { vi.advanceTimersByTime(1000); }); // flush persistence without exhausting the recurring task poll
+    act(() => { vi.advanceTimersByTime(1500); }); // flush persistence without exhausting the recurring task poll
 
     const assistantPersists = appended.filter((m) => m.role === "assistant");
     expect(assistantPersists).toHaveLength(1);

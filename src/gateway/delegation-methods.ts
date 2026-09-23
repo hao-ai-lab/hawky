@@ -90,7 +90,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     const p = raw as any, task = lookup(conn, p);
     if (!["generated", "played", "displayed", "interrupted"].includes(p.state)) throw new MethodError("INVALID_REQUEST", "Invalid delivery state");
     if (task.validity === "superseded") return task;
-    if (["played", "displayed"].includes(task.delivery ?? "") && task.deliveryResponseId === p.responseId) return task;
+    if (["played", "displayed", "interrupted"].includes(task.delivery ?? "") && task.deliveryResponseId === p.responseId) return task;
     // Delivery belongs to a response, and cannot change execution state.
     task.delivery = p.state; task.deliveryResponseId = String(p.responseId ?? "");
     publish(conn, task, `delivery.${p.state}`, { responseId: task.deliveryResponseId });
@@ -137,7 +137,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
         controller.signal.throwIfAborted();
         for (const dependency of task.dependsOn ?? []) {
           const current = active.get(keyOf(conn, dependency));
-          const completed = current ? await current.promise : lookup(conn, { ownerSession, id: dependency });
+          const completed = current ? await awaitDependency(current.promise, controller.signal) : lookup(conn, { ownerSession, id: dependency });
           controller.signal.throwIfAborted();
           if (completed.status !== "completed" || completed.validity === "superseded") throw new Error(`Dependency ${dependency} did not complete successfully`);
           task.brief += `\n\nDependency ${dependency} result (data):\n${completed.result?.slice(0, 16000) ?? ""}`;
@@ -190,5 +190,16 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
       runtime: old.runtime, context: old.context, constraints: old.constraints, execution: old.readOnly ? "read_only" : "serial", supersedes: old.id });
     old.validity = "superseded"; publish(conn, old, "superseded", { replacement: result.task.id }); cancel(conn, old);
     return structuredClone(result.task);
+  });
+}
+
+/** Cancellation must not wait for an unrelated prerequisite to finish. */
+function awaitDependency<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const aborted = () => { signal.removeEventListener("abort", aborted); reject(signal.reason); };
+    signal.addEventListener("abort", aborted, { once: true });
+    promise.then(value => { signal.removeEventListener("abort", aborted); resolve(value); },
+      error => { signal.removeEventListener("abort", aborted); reject(error); });
   });
 }
