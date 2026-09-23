@@ -50,3 +50,25 @@ it.each([true, false])("handles busy errors before or after the other reply fini
   if (!doneFirst) replies.observe(done);
   await tick(); expect(sent).toHaveLength(2);
 });
+
+it("a correction cancels only its owned response and preserves coalesced unrelated work", async () => {
+  replies.request({ metadata: { task_id: "old" } }); replies.request({ metadata: { task_id: "other" } }); await tick();
+  replies.observe({ type: "response.created", response: { id: "owned", metadata: sent[0].response.metadata } });
+  replies.observe({ type: "output_audio_buffer.started", response_id: "owned" });
+  replies.invalidateTask("old");
+  expect(sent).toContainEqual({ type: "response.cancel", response_id: "owned" });
+  expect(sent).toContainEqual({ type: "output_audio_buffer.clear" });
+  replies.observe({ type: "response.done", response: { id: "owned", status: "cancelled" } });
+  replies.observe({ type: "output_audio_buffer.cleared", response_id: "owned" });
+  await tick();
+  expect(sent.at(-1).response.metadata.task_ids).toBe("other");
+});
+
+it("a correction before response acknowledgement also suppresses late audio", async () => {
+  replies.request({ metadata: { task_id: "old" } }); await tick();
+  replies.invalidateTask("old");
+  replies.observe({ type: "response.created", response: { id: "late", metadata: sent[0].response.metadata } });
+  expect(sent.at(-1)).toEqual({ type: "response.cancel", response_id: "late" });
+  replies.observe({ type: "output_audio_buffer.started", response_id: "late" });
+  expect(sent.at(-1)).toEqual({ type: "output_audio_buffer.clear" });
+});
