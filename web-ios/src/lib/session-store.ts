@@ -88,7 +88,7 @@ export function cleanSessions(raw: SessionEntry[], activeKey: string): SessionEn
     const channel = s.key.includes(":") ? s.key.slice(0, s.key.indexOf(":")) : s.key;
     if (HIDDEN_CHANNELS.includes(channel)) return false;
     // Hide the per-session "-bridge" backend channels (agent delegation noise).
-    if (s.key.endsWith("-bridge")) return false;
+    if (s.key.endsWith("-bridge") || s.key.includes("-work-")) return false;
     if (s.messageCount <= 0 && s.key !== activeKey) return false;
     return true;
   });

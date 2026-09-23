@@ -12,6 +12,9 @@ export interface DelegationTask {
   ownerSession: string;
   backendSession: string;
   runtime: DelegationRuntime;
+  readOnly?: boolean;
+  dependsOn?: string[];
+  continues?: string;
   model?: string;
   request: string;
   originalRequest?: string;

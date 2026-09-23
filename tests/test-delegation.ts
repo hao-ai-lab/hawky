@@ -54,7 +54,7 @@ test("retries during execution share one operation", async () => {
   let finish!: () => void, runs = 0;
   const g = gateway(async () => { runs++; await new Promise<void>(r => finish = r); return { reply: "once" }; });
   const one = g.call("delegation.run", request), two = g.call("delegation.run", request);
-  await Promise.resolve();
+  await new Promise(r => setTimeout(r, 0));
   finish();
   expect((await one).result).toBe((await two).result);
   expect(runs).toBe(1);
@@ -69,7 +69,7 @@ test("submit acknowledges immediately; a correction supersedes old results and p
   });
   const accepted = g.call("delegation.submit", { ...request, originalRequest: "Read the whole file", constraints: "No summary" });
   expect(accepted.status).toBe("queued");
-  await Promise.resolve();
+  await new Promise(r => setTimeout(r, 0));
   const next = g.call("delegation.revise", { ...request, revisionId: "corrected", message: "Read tomorrow.txt in full" });
   expect(next.originalRequest).toBe("Read the whole file");
   expect(next.brief).toContain("No summary");
@@ -92,8 +92,49 @@ test("cancelled queued work never starts, while reconnect reads the same active 
 test("a gateway restart marks unfinished work interrupted without repeating side effects", async () => {
   let finish!: () => void;
   const g = gateway(async () => { await new Promise<void>(r => finish = r); return { reply: "done" }; });
-  g.call("delegation.submit", request); await Promise.resolve();
+  g.call("delegation.submit", request); await new Promise(r => setTimeout(r, 0));
   const reopened = gateway(async () => { throw new Error("must not run"); });
   expect(reopened.call("delegation.get", request).status).toBe("interrupted");
   finish(); await new Promise(r => setTimeout(r, 0));
+});
+
+test("two independent readers run concurrently, a third queues, and out-of-order results keep identity", async () => {
+  const finishes = new Map<string, () => void>(), started: string[] = [], completed: string[] = [];
+  const g = gateway(async (_c, t, observer) => {
+    observer.started("fixture"); started.push(t.id);
+    await new Promise<void>(r => finishes.set(t.id, r)); completed.push(t.id);
+    return { reply: `result-${t.id}` };
+  });
+  const run = (id: string) => g.call("delegation.run", { ...request, id, execution: "read_only" });
+  const a = run("a"), b = run("b"), c = run("c");
+  await new Promise(r => setTimeout(r, 0));
+  expect(started).toEqual(["a", "b"]);
+  finishes.get("b")!(); expect((await b).result).toBe("result-b");
+  await new Promise(r => setTimeout(r, 0)); expect(started).toEqual(["a", "b", "c"]);
+  finishes.get("a")!(); finishes.get("c")!(); await Promise.all([a, c]);
+  expect(completed[0]).toBe("b");
+  expect(g.call("delegation.get", { ...request, id: "a" }).result).toBe("result-a");
+});
+
+test("mutable tasks wait for readers and never overlap one another", async () => {
+  const finishes = new Map<string, () => void>(), started: string[] = [];
+  const g = gateway(async (_c, t) => { started.push(t.id); await new Promise<void>(r => finishes.set(t.id, r)); return { reply: "done" }; });
+  const a = g.call("delegation.run", { ...request, id: "reader", execution: "read_only" });
+  const b = g.call("delegation.run", { ...request, id: "writer" });
+  const c = g.call("delegation.run", { ...request, id: "other-writer" });
+  await new Promise(r => setTimeout(r, 0)); expect(started).toEqual(["reader"]);
+  finishes.get("reader")!(); await a; await new Promise(r => setTimeout(r, 0)); expect(started).toEqual(["reader", "writer"]);
+  finishes.get("writer")!(); await b; await new Promise(r => setTimeout(r, 0)); expect(started.at(-1)).toBe("other-writer");
+  finishes.get("other-writer")!(); await c;
+});
+
+test("dependent work consumes the completed result and does not run after a failed dependency", async () => {
+  const started: string[] = [];
+  const g = gateway(async (_c, t) => { started.push(t.id); if (t.id === "bad") throw new Error("fixture failure"); return { reply: t.brief }; });
+  await g.call("delegation.run", { ...request, id: "first", message: "evidence 123" });
+  const next = await g.call("delegation.run", { ...request, id: "next", dependsOn: ["first"] });
+  expect(next.result).toContain("Dependency first result"); expect(next.result).toContain("evidence 123");
+  await g.call("delegation.run", { ...request, id: "bad" });
+  const failed = await g.call("delegation.run", { ...request, id: "blocked", dependsOn: ["bad"] });
+  expect(failed.status).toBe("failed"); expect(started).not.toContain("blocked");
 });

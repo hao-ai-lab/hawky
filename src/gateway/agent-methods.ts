@@ -16,6 +16,7 @@ import type { AgentSessionManager } from "./agent-sessions.js";
 import type { StreamEvent } from "../agent/types.js";
 import { getCostTracker } from "../agent/cost-tracker.js";
 import { MAX_SINGLE_IMAGE_BASE64, MAX_TOTAL_IMAGE_BASE64 } from "../agent/image-sanitize.js";
+import { setCommandLaneConcurrency } from "./command-queue.js";
 import { executeInSession } from "./lanes.js";
 import { CommandLane } from "./types.js";
 import { MethodError } from "./methods.js";
@@ -178,6 +179,7 @@ export function registerAgentMethods(
   intentionLoop?: IntentionService,
   latentService?: LatentService,
 ): void {
+  setCommandLaneConcurrency(CommandLane.Delegation, 2);
   // Per-session compaction state (circuit breaker tracking)
   const compactionStates = new Map<string, CompactionState>();
   function getCompactionState(sessionKey: string): CompactionState {
@@ -768,10 +770,14 @@ export function registerAgentMethods(
     // bridge caller (web-ios Live) can surface the chart back in its transcript.
     let lastToolImage: { base64: string; media_type: string } | null = null;
 
-    await executeInSession(sessionKey, CommandLane.Main, async () => {
+    await executeInSession(sessionKey, observer ? CommandLane.Delegation : CommandLane.Main, async () => {
       observer?.signal.throwIfAborted();
       const session = sessions.getOrCreate(sessionKey, conn.workingDirectory || undefined);
 
+      if (observer?.readOnly) {
+        const allowed = new Set(["read_file", "glob", "grep", "memory_get", "memory_search", "web_search", "web_fetch", "ask_user"]);
+        for (const tool of session.registry.getAll()) if (!allowed.has(tool.name)) session.registry.unregister(tool.name);
+      }
       observer?.started(session.runtimeKind === "native" ? config?.model : undefined);
 
       // Subscribe to agent stream events → broadcast to all clients on this session

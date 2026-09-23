@@ -80,6 +80,9 @@ const BACKEND_TOOL = {
     type: "object",
     properties: {
       message: { type: "string", description: "The precise task. Preserve full-file versus summary requests and all corrections." },
+      execution: { type: "string", enum: ["serial", "read_only"], description: "Use read_only for independent reads/searches so two tasks can run concurrently. Read-only jobs cannot modify files or run commands. Otherwise use serial." },
+      depends_on: { type: "array", items: { type: "string" }, description: "IDs of tasks that must complete first." },
+      continue_task: { type: "string", description: "Continue this task's backend conversation; omit for unrelated work." },
       constraints: { type: "string", description: "Constraints and evidence required to consider the task complete." },
     },
     required: ["message"],
@@ -1121,7 +1124,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         submittingTasksRef.current.add(toolEntryId);
         delegation = await rpc("delegation.submit", { id: toolEntryId, ownerSession: liveSessionKeyRef.current, message,
           originalRequest: transcriptRef.current.filter(e => e.kind === "user").at(-1)?.text,
-          constraints: args.constraints,
+          constraints: args.constraints, execution: args.execution, dependsOn: args.depends_on, continueTask: args.continue_task,
           context: transcriptRef.current.filter(e => e.kind === "user" || e.kind === "assistant").slice(-12).map(e => ({ role: e.kind, text: e.text })),
         }) as DelegationTask;
         const latest = tasksRef.current.get(delegation.id);

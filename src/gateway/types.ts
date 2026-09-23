@@ -10,6 +10,7 @@
 
 export const enum CommandLane {
   Main = "main",
+  Delegation = "delegation",
   Cron = "cron",
   Subagent = "subagent",
 }

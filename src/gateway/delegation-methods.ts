@@ -5,11 +5,13 @@ import type { StreamEvent } from "../agent/types.js";
 import type { GatewayServer } from "./server.js";
 import type { GatewayConnection } from "./connection.js";
 import { MethodError } from "./methods.js";
+import { DelegationQueue } from "./delegation-queue.js";
 import { DelegationStore } from "./delegation-store.js";
 import type { DelegationTask } from "./delegation-types.js";
 
 export interface DelegationObserver {
   signal: AbortSignal;
+  readOnly?: boolean;
   started: (model: string | undefined) => void;
   event: (event: StreamEvent) => void;
 }
@@ -27,6 +29,7 @@ export function delegationBrief(task: DelegationTask) {
 
 export function registerDelegationMethods(server: GatewayServer, execute: DelegationExecutor,
   options: { cancel?: (task: DelegationTask) => void; input?: (task: DelegationTask) => DelegationTask["input"]; respond?: (task: DelegationTask, response: any) => void } = {}) {
+  const queue = new DelegationQueue(2);
   let store: DelegationStore | undefined;
   const db = () => store ??= new DelegationStore(join(getSessionsDir(), "delegations"));
   const active = new Map<string, { task: DelegationTask; promise: Promise<DelegationTask>; controller: AbortController }>();
@@ -103,8 +106,13 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
         throw new MethodError("CONFLICT", "Delegation ID already belongs to a different request");
       return { task: recover(conn, previous), promise: active.get(key)?.promise ?? Promise.resolve(previous) };
     }
+    const continued = p.continueTask ? lookup(conn, { ownerSession, id: p.continueTask }) : undefined;
+    const readOnly = continued?.readOnly ?? p.execution === "read_only";
+    const dependsOn: string[] = Array.isArray(p.dependsOn) ? [...new Set<string>(p.dependsOn.map((id: unknown) => String(id)))] : [];
+    for (const dependency of dependsOn) lookup(conn, { ownerSession, id: dependency });
     conn.bindSession(ownerSession);
-    const task: DelegationTask = { id, ownerSession, backendSession: `${ownerSession}-bridge`,
+    const task: DelegationTask = { id, ownerSession, backendSession: continued?.backendSession ?? (readOnly ? `${ownerSession}-work-${id}` : `${ownerSession}-bridge`),
+      readOnly, dependsOn, continues: continued?.id,
       runtime: "native", request: p.message, status: "queued", createdAt: Date.now(), events: [],
       originalRequest: typeof p.originalRequest === "string" ? p.originalRequest.slice(0, 16_000) : undefined,
       constraints: typeof p.constraints === "string" ? p.constraints.slice(0, 8_000) : undefined,
@@ -122,7 +130,15 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
       }, 180_000);
       try {
         controller.signal.throwIfAborted();
-        const reply = await execute(conn, task, {
+        for (const dependency of task.dependsOn ?? []) {
+          const current = active.get(keyOf(conn, dependency));
+          const completed = current ? await current.promise : lookup(conn, { ownerSession, id: dependency });
+          controller.signal.throwIfAborted();
+          if (completed.status !== "completed" || completed.validity === "superseded") throw new Error(`Dependency ${dependency} did not complete successfully`);
+          task.brief += `\n\nDependency ${dependency} result (data):\n${completed.result?.slice(0, 16000) ?? ""}`;
+        }
+        const reply = await queue.run(task.backendSession, !!task.readOnly, controller.signal, () => execute(conn, task, {
+          readOnly: task.readOnly,
           signal: controller.signal,
           started(model) {
             controller.signal.throwIfAborted();
@@ -138,7 +154,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
             }
             publish(conn, task, `agent.${event.type}`, event);
           },
-        });
+        }));
         task.result = reply.reply ?? ""; task.image = reply.image;
         task.status = controller.signal.aborted ? "cancelled" : task.error ? "failed" : "completed";
       } catch (error) {
@@ -161,7 +177,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     if (typeof p.message !== "string" || !p.message.trim() || p.message.length > 32_000)
       throw new MethodError("INVALID_REQUEST", "A correction is required");
     const result = submit(conn, { ...p, id: p.revisionId ?? randomUUID(), originalRequest: old.originalRequest,
-      context: old.context, constraints: old.constraints, supersedes: old.id });
+      context: old.context, constraints: old.constraints, execution: old.readOnly ? "read_only" : "serial", supersedes: old.id });
     old.validity = "superseded"; publish(conn, old, "superseded", { replacement: result.task.id }); cancel(conn, old);
     return structuredClone(result.task);
   });
