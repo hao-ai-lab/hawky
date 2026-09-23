@@ -228,7 +228,8 @@ export function formatBootstrapSection(
     return null;
   }
 
-  const files = ws.loadBootstrapFiles({ mainSession: mainSession ?? true });
+  // Installation establishes identity; onboarding is not a conversational task.
+  const files = ws.loadBootstrapFiles({ mainSession: mainSession ?? true }).filter(file => file.filename !== "BOOTSTRAP.md");
   if (files.length === 0) return null;
 
   const lines: string[] = [];
@@ -239,15 +240,7 @@ export function formatBootstrapSection(
   lines.push("IMPORTANT: When editing these files, always use their FULL ABSOLUTE PATH (e.g., " +
     `${ws.getWorkspacePath()}/SOUL.md). Do NOT write to the working directory.`);
 
-  // BOOTSTRAP.md — first-run onboarding takes highest priority
-  if (files.some((f) => f.filename === "BOOTSTRAP.md")) {
-    lines.push(
-      "BOOTSTRAP.md is present — this is a first-run session. " +
-      "Follow the instructions in BOOTSTRAP.md as your HIGHEST PRIORITY. " +
-      "Initiate the onboarding conversation before doing anything else. " +
-      "Do not respond as a generic assistant — start the identity discovery flow.",
-    );
-  }
+  lines.push("Identity and installation setup are already complete. Use IDENTITY.md and SOUL.md as configured; do not start a bootstrap or identity-discovery interview.");
 
   // SOUL.md guidance (a proven design pattern)
   if (files.some((f) => f.filename === "SOUL.md")) {
