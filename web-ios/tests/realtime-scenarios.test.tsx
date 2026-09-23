@@ -101,3 +101,28 @@ it("an uneventful connection requests no unsolicited reply; Stay Silent release 
   expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
   expect(s.channel.sent.some(e => e.item?.content?.[0]?.text?.includes("tomorrow's meeting"))).toBe(true);
 });
+
+it("delegation acknowledges once, survives an interruption, and injects only current results", async () => {
+  const task = { id: "", ownerSession: "web:scenario", backendSession: "web:scenario-bridge", runtime: "native",
+    request: "Read the full file", status: "queued", validity: "current", createdAt: Date.now(), events: [] as any[] };
+  const original = rpc.getMockImplementation()!;
+  rpc.mockImplementation(async (method: string, params: any) => {
+    if (method === "delegation.submit") { task.id = params.id; return structuredClone(task); }
+    return original(method, params);
+  });
+  const s = await session();
+  await act(async () => { s.channel.receive(call("session_send_message", { message: task.request })); });
+  expect(output(s.channel)[0]).toMatchObject({ accepted: true, status: "queued" });
+  await act(async () => { s.channel.receive(call("session_send_message", { message: task.request })); });
+  expect(rpc.mock.calls.filter(c => c[0] === "delegation.submit")).toHaveLength(1);
+  await act(async () => {
+    s.channel.receive({ type: "input_audio_buffer.speech_started" });
+    const finished = { ...task, status: "completed", result: "Actual file contents", events: [{ seq: 2, at: Date.now(), type: "completed" }] };
+    for (const listener of useSocketStore.getState().eventListeners) listener({ type: "event", event: "delegation.updated", payload: { task: finished } });
+    await vi.advanceTimersByTimeAsync(500);
+  });
+  expect(s.channel.sent.filter(e => e.item?.role === "system")).toHaveLength(1);
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(0);
+  await act(async () => { s.channel.receive({ type: "input_audio_buffer.speech_stopped" }); await vi.advanceTimersByTimeAsync(500); });
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
+});

@@ -1,5 +1,5 @@
 /** Shared, serializable delegation state. Execution and delivery are independent. */
-export type DelegationState = "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled" | "interrupted";
+export type DelegationState = "queued" | "cancelling" | "running" | "needs_input" | "completed" | "failed" | "cancelled" | "interrupted";
 export type DelegationRuntime = "native" | "codex" | "claude";
 export interface DelegationEvent {
   seq: number;
@@ -15,6 +15,15 @@ export interface DelegationTask {
   model?: string;
   request: string;
   originalRequest?: string;
+  constraints?: string;
+  context?: Array<{ role: "user" | "assistant"; text: string }>;
+  brief?: string;
+  supersedes?: string;
+  validity?: "current" | "superseded";
+  delivery?: "pending" | "generated" | "played" | "displayed" | "interrupted";
+  deliveryResponseId?: string;
+  input?: { id: string; kind: "permission" | "question"; prompt: string; detail?: unknown };
+  cancelRequestedAt?: number;
   status: DelegationState;
   createdAt: number;
   startedAt?: number;

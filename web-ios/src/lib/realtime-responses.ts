@@ -24,6 +24,12 @@ export class RealtimeResponses {
     this.schedule();
   }
   setSilent(value: boolean) { this.silent = value; this.schedule(); }
+  invalidateTask(id: string) {
+    this.pending = this.pending.filter(i => i.reply.metadata?.task_id !== id);
+    // If already generating, let the user turn/normal barge-in own interruption.
+    // Never retry a superseded task after a busy rejection.
+    if (this.requested) this.requested.intents = this.requested.intents.filter(i => i.reply.metadata?.task_id !== id);
+  }
   private schedule() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => { this.timer = undefined; this.flush(); }, Math.max(80, this.retryUntil - Date.now()));

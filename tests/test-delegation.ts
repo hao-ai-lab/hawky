@@ -46,7 +46,7 @@ test("provider errors remain failed even if the RPC returns", async () => {
 test("does not deduplicate a different request or expose another session's task", async () => {
   const g = gateway(async () => ({ reply: "ok" }));
   await g.call("delegation.run", request);
-  await expect(g.call("delegation.run", { ...request, message: "Different work" })).rejects.toThrow("different request");
+  expect(() => g.call("delegation.run", { ...request, message: "Different work" })).toThrow("different request");
   expect(() => g.call("delegation.get", { ...request, ownerSession: "web:other" })).toThrow("not found");
   expect(() => g.call("delegation.get", request, { deviceTokenId: "owner-b", bindSession() {} })).toThrow("not found");
 });
@@ -54,7 +54,46 @@ test("retries during execution share one operation", async () => {
   let finish!: () => void, runs = 0;
   const g = gateway(async () => { runs++; await new Promise<void>(r => finish = r); return { reply: "once" }; });
   const one = g.call("delegation.run", request), two = g.call("delegation.run", request);
+  await Promise.resolve();
   finish();
   expect((await one).result).toBe((await two).result);
   expect(runs).toBe(1);
+});
+
+test("submit acknowledges immediately; a correction supersedes old results and preserves source words", async () => {
+  let finish!: () => void;
+  const g = gateway(async (_c, t, observer) => {
+    observer.started("fixture");
+    if (t.id === request.id) await new Promise<void>(r => finish = r);
+    return { reply: t.request };
+  });
+  const accepted = g.call("delegation.submit", { ...request, originalRequest: "Read the whole file", constraints: "No summary" });
+  expect(accepted.status).toBe("queued");
+  await Promise.resolve();
+  const next = g.call("delegation.revise", { ...request, revisionId: "corrected", message: "Read tomorrow.txt in full" });
+  expect(next.originalRequest).toBe("Read the whole file");
+  expect(next.brief).toContain("No summary");
+  expect(g.call("delegation.get", request).validity).toBe("superseded");
+  finish(); await new Promise(r => setTimeout(r, 0));
+  expect(g.call("delegation.get", request).status).toBe("cancelled");
+  expect(g.call("delegation.get", { ...request, id: "corrected" }).status).toBe("completed");
+});
+
+test("cancelled queued work never starts, while reconnect reads the same active task", async () => {
+  let runs = 0;
+  const g = gateway(async () => { runs++; return { reply: "done" }; });
+  g.call("delegation.submit", request);
+  g.call("delegation.cancel", request);
+  await new Promise(r => setTimeout(r, 0));
+  expect(runs).toBe(0);
+  expect(g.call("delegation.get", request).status).toBe("cancelled");
+});
+
+test("a gateway restart marks unfinished work interrupted without repeating side effects", async () => {
+  let finish!: () => void;
+  const g = gateway(async () => { await new Promise<void>(r => finish = r); return { reply: "done" }; });
+  g.call("delegation.submit", request); await Promise.resolve();
+  const reopened = gateway(async () => { throw new Error("must not run"); });
+  expect(reopened.call("delegation.get", request).status).toBe("interrupted");
+  finish(); await new Promise(r => setTimeout(r, 0));
 });

@@ -23,7 +23,7 @@ import { registerDelegationMethods, type DelegationObserver } from "./delegation
 import { resolveWsPermission, getPendingPermissionForSession } from "./ws-permission.js";
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { resolveAskUser, getPendingAskUserForSession } from "../tools/ask_user.js";
+import { rejectAskUser, resolveAskUser, getPendingAskUserForSession } from "../tools/ask_user.js";
 import type { PermissionDecision } from "../agent/tool_executor.js";
 import type { HawkyConfig } from "../agent/types.js";
 import { runMemoryFlush, resetFlushState, resolveFlushConfig, shouldTriggerFlush, hasAlreadyFlushed } from "./memory-flush.js";
@@ -769,6 +769,7 @@ export function registerAgentMethods(
     let lastToolImage: { base64: string; media_type: string } | null = null;
 
     await executeInSession(sessionKey, CommandLane.Main, async () => {
+      observer?.signal.throwIfAborted();
       const session = sessions.getOrCreate(sessionKey, conn.workingDirectory || undefined);
 
       observer?.started(session.runtimeKind === "native" ? config?.model : undefined);
@@ -1117,7 +1118,27 @@ export function registerAgentMethods(
   }
   server.registerMethod("chat.send", (conn, params, srv) => sendChat(conn, params, srv));
   registerDelegationMethods(server, (conn, task, observer) =>
-    sendChat(conn, { sessionKey: task.backendSession, message: task.request }, server, observer));
+    sendChat(conn, { sessionKey: task.backendSession, message: task.brief ?? task.request }, server, observer), {
+      cancel: task => {
+        const session = sessions.get(task.backendSession);
+        session?.loop.cancel(); session?.externalRuntime?.cancel(); cancelPendingPermissions(task.backendSession);
+        const question = getPendingAskUserForSession(task.backendSession);
+        if (question) rejectAskUser(question.requestId, "Task cancelled");
+      },
+      input: task => {
+        const permission = getPendingPermissionForSession(task.backendSession);
+        if (permission) return { id: permission.requestId, kind: "permission", prompt: `Allow ${permission.dialog.toolName}?`, detail: permission.dialog };
+        const question = getPendingAskUserForSession(task.backendSession);
+        if (question) return { id: question.requestId, kind: "question", prompt: question.question, detail: question.options };
+      },
+      respond: (task, p) => {
+        if (task.input?.kind === "permission") {
+          if (!["allow_once", "deny"].includes(p.decision)) throw new MethodError("INVALID_REQUEST", "Choose allow_once or deny");
+          resolveWsPermission(task.input.id, p.decision);
+        } else if (task.input?.kind === "question" && typeof p.answer === "string") resolveAskUser(task.input.id, [p.answer]);
+        else throw new MethodError("INVALID_REQUEST", "An answer is required");
+      },
+    });
 
   // -------------------------------------------------------------------------
   // chat.cancel — cancel the current agent turn for a session
