@@ -218,7 +218,7 @@ export function registerAgentMethods(
     if (!content) {
       throw new MethodError("INVALID_REQUEST", "content is required");
     }
-    if (!observer) conn.bindSession(sessionKey);
+    conn.bindSession(sessionKey);
     const created = await intentionLoop.handleCreateIntention(
       { content, when: p?.when, where: p?.where },
       sessionKey,
@@ -747,7 +747,7 @@ export function registerAgentMethods(
     }
 
     // Bind connection to this session
-    conn.bindSession(sessionKey);
+    if (!observer) conn.bindSession(sessionKey);
 
     // Note: obvious timed intentions are no longer intercepted here. They flow
     // through the structured `intention.create` RPC (the create_intention tool),
