@@ -1,0 +1,3 @@
+Hawk delegation fixture B
+beta-value=29
+Last line: keep the green notebook.

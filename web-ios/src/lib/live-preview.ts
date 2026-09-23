@@ -13,10 +13,10 @@
 
 import type { LivePhase, TranscriptEntry } from "./useRealtime";
 
-export type PreviewMode = "live-connected" | "live-charts" | "live-idle";
+export type PreviewMode = "live-connected" | "live-charts" | "live-idle" | "live-delegation";
 
 export function isPreviewMode(v: string | null): v is PreviewMode {
-  return v === "live-connected" || v === "live-charts" || v === "live-idle";
+  return v === "live-connected" || v === "live-charts" || v === "live-idle" || v === "live-delegation";
 }
 
 /** Read the `?preview=` flag, honored only in DEV. */
@@ -118,6 +118,17 @@ export function previewOverrides(mode: PreviewMode): {
 } {
   if (mode === "live-idle") {
     return base("idle", []);
+  }
+  if (mode === "live-delegation") {
+    return base("idle", [entry({ id: "fixture-delegation", kind: "tool", text: "Fixture backend task",
+      delegation: { id: "fixture-delegation", ownerSession: "fixture", backendSession: "fixture-bridge", runtime: "native", model: "fixture-model",
+        request: "Read the entire workspace file and return every line, including the last paragraph. Keep the original headings and tell me which file you read.",
+        originalRequest: "Read the workspace file and return it to me.",
+        brief: "Fixture only. Read the requested file in full; preserve its content and report what actually happened.",
+        status: "completed", validity: "current", delivery: "interrupted", createdAt: 1000, startedAt: 1100, completedAt: 4900,
+        result: "Fixture file contents\n\nYour name is Hawk. Be attentive, candid, and helpful.\n\nThis is the final paragraph, preserved in full.",
+        events: [{ seq: 1, at: 1100, type: "started", data: { model: "fixture-model" } }, { seq: 2, at: 1800, type: "agent.tool_use_start", data: { name: "read_file", input: { path: "fixture/SOUL.md" } } }, { seq: 3, at: 4900, type: "completed" }] }
+    })]);
   }
   if (mode === "live-charts") {
     return { ...base("connected", [...BASE, ...CHARTS_EXTRA]), cameraOn: true, speaking: true };

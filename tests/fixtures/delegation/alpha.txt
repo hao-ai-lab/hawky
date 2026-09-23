@@ -1,0 +1,3 @@
+Hawk delegation fixture A
+alpha-value=73
+Last line: keep the blue notebook.

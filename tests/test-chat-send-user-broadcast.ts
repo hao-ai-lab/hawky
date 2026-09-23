@@ -222,3 +222,17 @@ describe("chat.send broadcasts user.message", () => {
     expect(bc.excludeClientId).toBe("client-sender-A");
   });
 });
+
+test("native delegation uses a separate history while retaining the live binding and enforcing read-only tools", async () => {
+  const bindings: string[] = [];
+  const conn = { ...mockConn, bindSession: (key: string) => bindings.push(key) };
+  const task = await server.call("delegation.run", conn, { id: "native-fixture", ownerSession: "web:live", message: "Read only", execution: "read_only" });
+  expect(task.status).toBe("completed"); expect(task.model).toBe("test"); expect(task.result).toBe("hi back");
+  expect(bindings).toEqual(["web:live"]);
+  const backend = sessions.get(task.backendSession)!;
+  const names = backend.registry.getAll().map(t => t.name);
+  expect(names).toContain("read_file"); expect(names).not.toContain("write_file"); expect(names).not.toContain("bash");
+  expect(backend.loop.getHistory().some(m => m.role === "user")).toBe(true);
+  expect(broadcasts.some(b => b.event === "delegation.updated" && b.sessionKey === "web:live")).toBe(true);
+  expect(broadcasts.some(b => b.event === "user.message" && b.sessionKey === "web:live")).toBe(false);
+});
