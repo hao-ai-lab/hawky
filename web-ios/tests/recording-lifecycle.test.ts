@@ -7,29 +7,10 @@ import { useLiveSettings } from "../src/lib/live-settings";
 vi.mock("../src/lib/media", () => ({ mediaUnavailableReason: () => null,
   getUserMediaSafe: async () => ({ getAudioTracks: () => [], getVideoTracks: () => [{ enabled: true }], getTracks: () => [] }) }));
 
-class Channel extends EventTarget {
-  readyState = "connecting";
-  sent: any[] = [];
-  send(value: string) { this.sent.push(JSON.parse(value)); }
-  close() { this.readyState = "closed"; this.dispatchEvent(new Event("close")); }
-  open() { this.readyState = "open"; this.dispatchEvent(new Event("open")); }
-}
-class Peer extends EventTarget {
-  static all: Peer[] = [];
-  connectionState = "new";
-  channel = new Channel();
-  ontrack = null;
-  constructor() { super(); Peer.all.push(this); }
-  createDataChannel() { return this.channel; }
-  async createOffer() { return { sdp: "offer" }; }
-  async setLocalDescription() {}
-  async setRemoteDescription() {}
-  addTrack() {}
-  close() { this.connectionState = "closed"; }
-}
+import { TestPeer as Peer } from "./helpers/realtime-peer";
 let rpc: ReturnType<typeof vi.fn>;
 beforeEach(() => {
-  vi.useFakeTimers(); localStorage.clear(); Peer.all = [];
+  vi.useFakeTimers(); localStorage.clear(); Peer.all = []; Peer.autoAcknowledge = true;
   vi.stubGlobal("RTCPeerConnection", Peer);
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => "answer" })));
   useLiveSettings.getState().reset(); useLiveSettings.getState().set("visualCadence", "off");

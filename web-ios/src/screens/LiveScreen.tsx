@@ -62,7 +62,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const showPanel = artifacts.length > 0 && panelOpen;
 
   const isConnected = phase === "connected";
-  const showVideo = cameraOn && (phase === "connecting" || isConnected);
+  const showVideo = cameraOn && (phase === "connecting" || phase === "restoring" || isConnected);
 
   // The PiP fullscreen toggle is the only thing that hides the app's nav bar.
   const [pipFull, setPipFull] = useState(false);
@@ -274,7 +274,7 @@ function PrimaryButton({ phase, canStart, resumable, onStart, onStop }: { phase:
   if (phase === "connected" || phase === "paused") {
     return <button onClick={onStop} aria-label="End session" className="pressable grid h-11 w-11 place-items-center rounded-full bg-danger text-white shadow-glass"><Icon name="xmark" className="h-5 w-5" /></button>;
   }
-  if (phase === "connecting") {
+  if (phase === "connecting" || phase === "restoring") {
     return <button onClick={onStop} aria-label="Cancel session" className="grid h-14 w-14 place-items-center rounded-full bg-danger/80 text-white"><span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" /></button>;
   }
   return <button onClick={onStart} disabled={!canStart} aria-label={resumable ? "Resume session" : "Start session"} title={resumable ? "Resume session" : "Start session"} className="pressable grid h-14 w-14 place-items-center rounded-full bg-ok text-white shadow-glass disabled:opacity-40"><Icon name="phone" className="h-6 w-6" filled /></button>;
@@ -305,7 +305,7 @@ function Transcript({ entries, phase, loading }: { entries: TranscriptEntry[]; p
               </p>
             </>
           )}
-          {phase === "connecting" && <p className="text-sm text-white/55">Connecting…</p>}
+          {(phase === "connecting" || phase === "restoring") && <p className="text-sm text-white/55">{phase === "restoring" ? "Restoring conversation…" : "Connecting…"}</p>}
           {phase === "failed" && <p className="text-sm text-white/55">Connection interrupted — tap the call button to resume.</p>}
         </div>
       </div>
@@ -425,7 +425,7 @@ function Time({ at }: { at: string }) {
 }
 
 function PhasePill({ phase }: { phase: LivePhase }) {
-  const color = phase === "connected" ? "bg-ok" : phase === "connecting" ? "bg-warn animate-pulse" : phase === "failed" ? "bg-danger" : "bg-white/40";
+  const color = phase === "connected" ? "bg-ok" : (phase === "connecting" || phase === "restoring") ? "bg-warn animate-pulse" : phase === "failed" ? "bg-danger" : "bg-white/40";
   return <span className={`h-2 w-2 rounded-full ${color}`} />;
 }
 

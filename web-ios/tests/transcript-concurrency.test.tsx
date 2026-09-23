@@ -7,27 +7,11 @@ import { useLiveSettings } from "../src/lib/live-settings";
 
 vi.mock("../src/lib/media", () => ({ mediaUnavailableReason: () => null,
   getUserMediaSafe: async () => ({ getAudioTracks: () => [], getVideoTracks: () => [], getTracks: () => [] }) }));
-class Channel extends EventTarget {
-  readyState = "connecting";
-  send() {}
-  close() { this.readyState = "closed"; }
-  open() { this.readyState = "open"; this.dispatchEvent(new Event("open")); }
-}
-class Peer extends EventTarget {
-  static all: Peer[] = [];
-  channel = new Channel();
-  constructor() { super(); Peer.all.push(this); }
-  createDataChannel() { return this.channel; }
-  async createOffer() { return { sdp: "offer" }; }
-  async setLocalDescription() {}
-  async setRemoteDescription() {}
-  addTrack() {}
-  close() {}
-}
+import { TestPeer as Peer } from "./helpers/realtime-peer";
 let rpc: ReturnType<typeof vi.fn>;
 let history: () => Promise<unknown>;
 beforeEach(() => {
-  vi.useFakeTimers(); localStorage.clear(); Peer.all = [];
+  vi.useFakeTimers(); localStorage.clear(); Peer.all = []; Peer.autoAcknowledge = true;
   vi.stubGlobal("RTCPeerConnection", Peer);
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => "answer" })));
   useLiveSettings.getState().reset();
@@ -144,28 +128,32 @@ it("a late response.done preserves both a cancelled partial and the newer respon
   expect(s.texts()).toEqual(["Interrupted partial", "New response. Still streaming."]);
 });
 
-it.each([false, true])("a pending history response cannot erase live text (StrictMode=%s)", async strict => {
+it.each([false, true])("Start waits for pending history before live text (StrictMode=%s)", async strict => {
   let resolveHistory!: (value: unknown) => void;
-  const pendingHistory = new Promise(resolve => { resolveHistory = resolve; });
-  history = () => pendingHistory;
-  const s = await session(strict);
-  await s.send(start(), delta("Visible live reply."));
-  expect(s.texts()).toEqual(["Visible live reply."]);
-  await act(async () => { resolveHistory({ messages: [] }); });
+  history = () => new Promise(resolve => { resolveHistory = resolve; });
+  const s = renderHook(() => useRealtime({ sessionKey: "web:slow" }), strict ? { wrapper: StrictMode } : {});
+  let starting!: Promise<void>;
+  await act(async () => { starting = s.result.current.start(); });
+  expect(Peer.all).toHaveLength(0);
+  expect(s.result.current.canStart).toBe(false);
+  await act(async () => { resolveHistory({ messages: [{ role: "user", content: "Earlier fact." }] }); await starting; Peer.all[0].channel.open(); });
   expect(s.result.current.phase).toBe("connected");
-  expect(s.result.current.historyLoading).toBe(false);
-  expect(s.texts()).toEqual(["Visible live reply."]);
+  expect(Peer.all[0].channel.sent.some(e => e.item?.content?.[0]?.text === "Earlier fact.")).toBe(true);
+  await act(async () => { Peer.all[0].channel.receive(start()); Peer.all[0].channel.receive(delta("Visible live reply.")); });
+  expect(s.result.current.transcript.some(e => e.text === "Visible live reply.")).toBe(true);
 });
 
-it.each([false, true])("a rejected stale history request cannot clear live text (StrictMode=%s)", async strict => {
-  let rejectHistory!: (reason: Error) => void;
-  const pendingHistory = new Promise((_, reject) => { rejectHistory = reject; });
-  history = () => pendingHistory;
-  const s = await session(strict);
-  await s.send(start(), delta("Keep this reply."));
-  await act(async () => { rejectHistory(new Error("history request timed out")); });
-  expect(s.texts()).toEqual(["Keep this reply."]);
-  expect(s.result.current.historyLoading).toBe(false);
+it.each([false, true])("a stale chat history failure cannot clear the selected chat (StrictMode=%s)", async strict => {
+  const rejects: Array<(reason: Error) => void> = [];
+  history = () => new Promise((_, reject) => { rejects.push(reject); });
+  const s = renderHook(({ key }) => useRealtime({ sessionKey: key }), { initialProps: { key: "web:old" }, ...(strict ? { wrapper: StrictMode } : {}) });
+  history = async () => ({ messages: [{ role: "user", content: "Current chat fact." }] });
+  s.rerender({ key: "web:new" });
+  await act(async () => { await s.result.current.start(); Peer.all[0].channel.open(); });
+  await act(async () => { rejects.forEach(reject => reject(new Error("stale history failed"))); });
+  expect(s.result.current.phase).toBe("connected");
+  expect(s.result.current.error).toBeNull();
+  expect(s.result.current.transcript.some(e => e.text === "Current chat fact.")).toBe(true);
 });
 
 it("loads history while idle, but does not reload it on Stop", async () => {

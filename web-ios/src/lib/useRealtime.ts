@@ -6,7 +6,7 @@
 // secret (live.openaiClientSecret) → WebRTC peer connection to OpenAI Realtime
 // → mic/voice + camera frame loop → transcript of user/assistant/system/tool
 // entries. Exposes iOS-style phases so the Live screen can render the FaceTime
-// stage states (idle / connecting / connected / paused / failed).
+// stage states (idle / connecting / restoring / connected / paused / failed).
 //
 // Kept as a hook so the screen component stays presentational.
 // =============================================================================
@@ -19,6 +19,7 @@ import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
 import { CameraArchive } from "./camera-archive";
 import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-recording";
+import { RealtimeStartup } from "./realtime-startup";
 import { buildRealtimePrompt } from "./realtime-prompt";
 import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
 import {
@@ -26,7 +27,7 @@ import {
   type PersonModelToolName,
 } from "../../../src/identity/person/tool-contract";
 
-export type LivePhase = "idle" | "connecting" | "connected" | "paused" | "failed";
+export type LivePhase = "idle" | "connecting" | "restoring" | "connected" | "paused" | "failed";
 
 export type TranscriptKind = "user" | "assistant" | "system" | "tool" | "warning";
 
@@ -337,7 +338,11 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // The instructions sent at connect — Cocktail Party appends to these live.
   const instructionsRef = useRef("");
   const [historyLoading, setHistoryLoading] = useState(false);
-  const historyGenerationRef = useRef(0);
+  const [historyKey, setHistoryKey] = useState<string | null>(null);
+  const historyRequestRef = useRef<{ key: string; promise: Promise<void>; failed: boolean } | null>(null);
+  const transcriptSessionRef = useRef<string | null>(null);
+  const startupRef = useRef<RealtimeStartup | null>(null);
+  const readyRef = useRef(false);
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [staySilent, setStaySilent] = useState(false);
@@ -372,7 +377,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const frameTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const canStart = !closing && gatewayStatus === "connected" && (phase === "idle" || phase === "failed");
+  const canStart = !closing && !historyLoading && historyKey === sessionKey && gatewayStatus === "connected" && (phase === "idle" || phase === "failed");
 
   function push(kind: TranscriptKind, text: string) {
     const t = text.trim();
@@ -473,7 +478,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     });
   }
 
-  const sendRealtime = useCallback((event: unknown) => {
+  const sendRealtime = useCallback((event: unknown, duringStartup = false) => {
+    if (!readyRef.current && !duringStartup) return false;
     const dc = dcRef.current;
     if (!dc || dc.readyState !== "open") return false;
     dc.send(JSON.stringify(event));
@@ -483,6 +489,10 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }, []);
 
   const teardown = useCallback(() => {
+    readyRef.current = false;
+    startupRef.current?.cancel();
+    startupRef.current = null;
+    startingRef.current = false;
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
     if (frameTimerRef.current) { clearInterval(frameTimerRef.current); frameTimerRef.current = null; }
     if (safetyTimerRef.current) { clearInterval(safetyTimerRef.current); safetyTimerRef.current = null; }
@@ -503,70 +513,89 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Tear down on unmount.
   useEffect(() => () => {
     attemptRef.current++;
+    historyRequestRef.current = null;
     cameraArchiveRef.current?.record("connection.interrupted", { reason: "page_unmounted" });
     teardown();
   }, [teardown]);
 
-  // Load the selected session's chat history into the transcript when the
-  // session changes (e.g. picking one from the Hawk History menu). Skipped
-  // while a live session is connecting/connected so we don't clobber it.
+  // A chat picked during startup cancels that attempt before it can replay the
+  // previous chat behind the newly selected title. The next idle effect loads it.
   useEffect(() => {
-    if (gatewayStatus !== "connected") return;
-    if (phase === "connecting" || phase === "connected" || phase === "paused") return;
-    let active = true;
-    const generation = ++historyGenerationRef.current;
-    const isCurrent = () => active && generation === historyGenerationRef.current;
+    if (!startingRef.current || liveSessionKeyRef.current === sessionKey) return;
+    attemptRef.current++;
+    historyRequestRef.current = null;
+    cameraArchiveRef.current?.record("connection.interrupted", { reason: "conversation_changed" });
+    teardown();
+    setPhase("idle");
+  }, [sessionKey, teardown]);
+
+  // History belongs to a conversation key, not to the currently rendered screen.
+  // Share a pending request with Start, and preserve in-page turns after Stop.
+  const loadHistory = useCallback((key: string): Promise<void> => {
+    const current = historyRequestRef.current;
+    if (current?.key === key && !current.failed) return current.promise;
+    const request = { key, promise: Promise.resolve(), failed: false };
+    historyRequestRef.current = request;
+    setHistoryKey(key);
     setHistoryLoading(true);
-    void (async () => {
+    if (transcriptSessionRef.current !== key) {
+      transcriptRef.current = [];
+      setTranscript([]);
+    }
+    request.promise = (async () => {
       try {
-        const res = (await rpc("session.history", { sessionKey, limit: 100 })) as {
+        const res = await rpc("session.history", { sessionKey: key, limit: 100 }) as {
           messages?: Array<{ role: string; content: unknown; timestamp?: string }>;
         };
-        if (!isCurrent()) return;
-        // Artifacts are derived from the transcript, so loading history restores
-        // the full chronological chart list automatically.
-        setTranscript(mapHistoryToTranscript(res.messages ?? []));
-      } catch {
-        if (isCurrent()) setTranscript([]);
+        if (historyRequestRef.current !== request) return;
+        const entries = mapHistoryToTranscript(res.messages ?? []);
+        transcriptSessionRef.current = key;
+        transcriptRef.current = entries;
+        setTranscript(entries);
+        setError(null);
+      } catch (error) {
+        request.failed = true;
+        if (historyRequestRef.current === request) {
+          setError("Could not load this conversation. Tap Start to retry.");
+          setPhase("failed");
+        }
+        throw new Error("Could not load this conversation. Tap Start to retry.", { cause: error });
       } finally {
-        if (isCurrent()) setHistoryLoading(false);
+        if (historyRequestRef.current === request) setHistoryLoading(false);
       }
     })();
-    return () => { active = false; };
-    // Only re-run when the session key (or connection) changes — NOT on phase
-    // ticks, which would reload on every start/stop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, gatewayStatus]);
+    return request.promise;
+  }, [rpc]);
+
+  useEffect(() => {
+    if (gatewayStatus !== "connected" || (phase !== "idle" && phase !== "failed")) return;
+    if (historyRequestRef.current?.key !== sessionKey) void loadHistory(sessionKey).catch(() => {});
+  }, [sessionKey, gatewayStatus, phase, loadHistory]);
 
   const start = useCallback(async () => {
     if (startingRef.current || closing) return;
     const blocked = mediaUnavailableReason();
     if (blocked) { setError(blocked); setPhase("failed"); push("warning", blocked); return; }
 
-    startingRef.current = true;
-    // A history fetch started while idle can return after live text arrives.
-    // Invalidate it synchronously, including its error/finally paths. Phase is
-    // deliberately not an effect dependency: Stop must not reload old history.
-    historyGenerationRef.current++;
-    setHistoryLoading(false);
     const attempt = ++attemptRef.current;
     teardown();
+    startingRef.current = true;
     setPhase("connecting");
     setError(null);
     setBridgeOffline(false);
     assistantTextRef.current.reset();
     activeResponseRef.current = false;
-    // Pin the session key for the entire life of THIS session so every async
-    // path (bridge tool, transcript persistence, boot context) uses the same one.
+    // Pin the conversation for the entire startup and subsequent live connection.
     liveSessionKeyRef.current = sessionKey;
-    // KEEP the loaded history visible and capture it to replay into the realtime
-    // model, so resuming an old session continues the prior conversation.
-    let priorTurns = transcriptRef.current
-      .filter((e) => (e.kind === "user" || e.kind === "assistant") && e.text.trim())
-      .map((e) => ({ role: e.kind as "user" | "assistant", text: e.text.trim() }))
-      .slice(-30); // cap replay so the realtime session prompt stays bounded
 
     try {
+      await loadHistory(sessionKey);
+      if (attempt !== attemptRef.current) return;
+      if (transcriptSessionRef.current !== sessionKey) throw new Error("Selected conversation changed while loading. Tap Start to retry.");
+      let priorTurns = transcriptRef.current
+        .filter((e) => (e.kind === "user" || e.kind === "assistant") && e.text.trim())
+        .map((e) => ({ role: e.kind as "user" | "assistant", text: e.text.trim() }))
+        .slice(-30);
       const recording = await openLiveRecording(rpc, sessionKey);
       if (attempt !== attemptRef.current) {
         clearLiveRecording(sessionKey, recording.liveSessionId);
@@ -574,7 +603,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         return;
       }
       const continuingInThisPage = cameraArchiveRef.current?.liveSessionId === recording.liveSessionId;
-      if (recording.resumed && !continuingInThisPage && recording.messages) priorTurns = recording.messages;
+      if (recording.resumed && !continuingInThisPage && recording.messages?.length) priorTurns = recording.messages;
       if (!continuingInThisPage) connectionArchivesRef.current = [];
       const archive = new CameraArchive(rpc, sessionKey, crypto.randomUUID(),
         message => push("warning", message), recording.liveSessionId);
@@ -659,7 +688,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
           void audioElRef.current.play().catch(() => {});
         }
       };
-      media.getAudioTracks().forEach((t) => pc.addTrack(t, media));
+      media.getAudioTracks().forEach((t) => { t.enabled = false; pc.addTrack(t, media); });
 
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
@@ -704,27 +733,34 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
           },
         };
         if (settings.maxTokensMode === "custom") session.max_response_output_tokens = settings.maxTokens;
-        sendRealtime({ type: "session.update", session });
-
-        // Replay prior turns into the realtime conversation so it continues the
-        // last session (without triggering a response — these are silent
-        // conversation items, like iOS's history replay).
-        archive.record("context.restored", { messages: priorTurns });
-        for (const turn of priorTurns) {
-          sendRealtime({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: turn.role,
-              content: [{ type: turn.role === "user" ? "input_text" : "output_text", text: turn.text }],
-            },
-          });
-        }
-
-        setPhase("connected");
-        if (priorTurns.length > 0) push("system", `Resumed with ${priorTurns.length} prior turn${priorTurns.length === 1 ? "" : "s"} of context.`);
-        push("system", `Connected to ${broker.model ?? settings.model}.`);
-        if (cameraOn && cadenceFps(settings) > 0) startFrameLoop(cadenceFps(settings));
+        setPhase("restoring");
+        push("system", "Restoring conversation…");
+        const startup = new RealtimeStartup({
+          session,
+          turnDetection: buildTurnDetection(settings, staySilent, interrupt),
+          messages: priorTurns,
+          send: event => sendRealtime(event, true),
+          record: (type, data) => archive.record(type, data),
+          onReady: () => {
+            if (pcRef.current !== pc) return;
+            readyRef.current = true;
+            startingRef.current = false;
+            media.getAudioTracks().forEach(t => { t.enabled = micOn; });
+            setPhase("connected");
+            if (priorTurns.length > 0) push("system", `Resumed with ${priorTurns.length} prior messages of context.`);
+            push("system", `Connected to ${broker.model ?? settings.model}.`);
+            if (cameraOn && cadenceFps(settings) > 0) startFrameLoop(cadenceFps(settings));
+          },
+          onFailure: message => {
+            if (pcRef.current !== pc) return;
+            setError(message);
+            setPhase("failed");
+            push("warning", message);
+            teardown();
+          },
+        });
+        startupRef.current = startup;
+        startup.start();
       });
       const cameraArchive = cameraArchiveRef.current;
       dc.addEventListener("message", (e) => { if (pcRef.current === pc) void handleMessage(String(e.data), cameraArchive); });
@@ -752,11 +788,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         reconnectCountRef.current++;
         reconnectTimerRef.current = setTimeout(() => { reconnectTimerRef.current = null; void startRef.current(); }, 2000);
       }
-    } finally {
-      startingRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rpc, sessionKey, micOn, cameraOn, staySilent, settings, sendRealtime, teardown, closing]);
+  }, [rpc, sessionKey, micOn, cameraOn, staySilent, settings, sendRealtime, teardown, closing, loadHistory]);
   startRef.current = start;
 
   const stop = useCallback(async () => {
@@ -820,7 +854,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // insulated from LiveScreen re-renders — keeps the camera from re-rendering.
   const sendText = useCallback((text: string) => {
     const t = text.trim();
-    if (!t) return;
+    if (!t || !readyRef.current) return;
     sendRealtime({
       type: "conversation.item.create",
       item: { type: "message", role: "user", content: [{ type: "input_text", text: t }] },
@@ -835,6 +869,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const ev = safeJSON(raw);
     if (!ev) return;
     archive?.observe(ev);
+    const startup = startupRef.current;
+    startup?.observe(ev);
+    if (startup && !readyRef.current) return;
     const type = ev.type as string;
 
     // New response starting → reset the per-response guards.
@@ -1069,7 +1106,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const toggleMic = useCallback(() => {
     setMicOn((on) => {
       const next = !on;
-      mediaRef.current?.getAudioTracks().forEach((t) => (t.enabled = next));
+      mediaRef.current?.getAudioTracks().forEach((t) => (t.enabled = readyRef.current && next));
       return next;
     });
   }, []);
