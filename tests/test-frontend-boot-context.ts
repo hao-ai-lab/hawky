@@ -242,7 +242,7 @@ describe("frontend.boot_context", () => {
     expect(result.context).toContain("Backend session: realtime:abc");
   });
 
-  test("marks first contact when BOOTSTRAP.md is present", () => {
+  test("excludes installation bootstrap from realtime context even on a fresh workspace", () => {
     writeFileSync(
       join(workspaceDir, "BOOTSTRAP.md"),
       "# BOOTSTRAP.md\n\nYou just woke up. Time to figure out who you are.\n",
@@ -254,13 +254,22 @@ describe("frontend.boot_context", () => {
     );
 
     expect(result.first_contact).toEqual({
-      active: true,
-      reason: "bootstrap_present",
-      marker_file: "BOOTSTRAP.md",
+      active: false,
+      reason: "initialized",
     });
-    expect(result.sources).toContain("BOOTSTRAP.md");
-    expect(result.context).toContain("## First Contact");
-    expect(result.context).toContain("You just woke up");
+    expect(result.sources).not.toContain("BOOTSTRAP.md");
+    expect(result.context).not.toContain("BOOTSTRAP.md");
+    expect(result.context).not.toContain("## First Contact");
+    expect(result.context).not.toContain("You just woke up");
+    expect(result.sources).toContain("IDENTITY.md");
+    expect(result.context).toContain("Hawky is the backend agent.");
+    expect(new WorkspaceManager(workspaceDir).readFile("BOOTSTRAP.md")).toContain("You just woke up");
+
+    const server = makeMockServer();
+    registerFrontendBootContextMethods(server as any);
+    const response = server.call("frontend.boot_context", { session_key: "realtime:first-contact" }) as any;
+    expect(response.first_contact.active).toBe(false);
+    expect(response.context).not.toContain("BOOTSTRAP.md");
   });
 
   test("returns untrimmed context by default and only truncates when requested", () => {

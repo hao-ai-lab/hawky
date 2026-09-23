@@ -36,6 +36,7 @@ export interface FrontendBootContextResult {
   sources: string[];
   warnings: string[];
   toolbox: FrontendToolboxManifest;
+  /** Compatibility field for installed clients; realtime never bootstraps. */
   first_contact: FrontendFirstContactState;
 }
 
@@ -73,12 +74,12 @@ export interface FrontendToolboxManifest {
 }
 
 export interface FrontendFirstContactState {
-  active: boolean;
-  reason: "bootstrap_present" | "initialized";
-  marker_file?: string;
+  active: false;
+  reason: "initialized";
 }
 
-const BOOTSTRAP_FILES = ["BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"];
+// Installation/setup owns BOOTSTRAP.md. Live sessions use established context.
+const CONTEXT_FILES = ["SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"];
 
 export const FRONTEND_BOOT_CONTEXT_TOOL: FrontendToolDefinition = {
   type: "function",
@@ -294,27 +295,16 @@ export function buildFrontendBootContext(
     }
   }
 
-  const bootstrapFiles = loadUntrimmedBootstrapFiles(workspace);
-  const firstContact = buildFirstContactState(bootstrapFiles);
+  const contextFiles = loadContextFiles(workspace);
 
-  if (firstContact.active) {
-    sections.push(
-      "",
-      "## First Contact",
-      "BOOTSTRAP.md is present in the Hawky workspace. This is a first-contact onboarding state.",
-      "Do not use a canned greeting. Follow BOOTSTRAP.md naturally: the agent has just come online and should figure out who it is and who the user is through conversation.",
-      "The frontend realtime agent may speak first only to begin that identity-discovery conversation.",
-    );
-  }
-
-  if (bootstrapFiles.length > 0) {
+  if (contextFiles.length > 0) {
     sections.push("", "## Relevant Memory");
-    for (const file of bootstrapFiles) {
+    for (const file of contextFiles) {
       sources.push(file.filename);
-      sections.push(formatBootstrapFile(file));
+      sections.push(formatContextFile(file));
     }
   } else {
-    warnings.push("No bootstrap memory files were found in the Hawky workspace.");
+    warnings.push("No identity, soul, user, or memory files were found in the Hawky workspace.");
   }
 
   const dailyLogs = workspace.listDailyLogs().slice(-2).reverse();
@@ -352,7 +342,7 @@ export function buildFrontendBootContext(
     sources,
     warnings,
     toolbox,
-    first_contact: firstContact,
+    first_contact: { active: false, reason: "initialized" },
   };
 }
 
@@ -413,33 +403,18 @@ function cleanFrontendToolDefinition(value: unknown): FrontendToolDefinition | u
   return tool;
 }
 
-function formatBootstrapFile(file: BootstrapFile): string {
+function formatContextFile(file: BootstrapFile): string {
   return `### ${file.filename}\n${file.content.trim()}`;
 }
 
-function loadUntrimmedBootstrapFiles(workspace: WorkspaceManager): BootstrapFile[] {
+function loadContextFiles(workspace: WorkspaceManager): BootstrapFile[] {
   const files: BootstrapFile[] = [];
-  for (const filename of BOOTSTRAP_FILES) {
+  for (const filename of CONTEXT_FILES) {
     const content = workspace.readFile(filename);
     if (!content?.trim()) continue;
     files.push({ filename, content, truncated: false });
   }
   return files;
-}
-
-function buildFirstContactState(files: BootstrapFile[]): FrontendFirstContactState {
-  const hasBootstrap = files.some((file) => file.filename === "BOOTSTRAP.md");
-  if (hasBootstrap) {
-    return {
-      active: true,
-      reason: "bootstrap_present",
-      marker_file: "BOOTSTRAP.md",
-    };
-  }
-  return {
-    active: false,
-    reason: "initialized",
-  };
 }
 
 function cleanString(value: unknown): string {
