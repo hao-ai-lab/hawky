@@ -20,6 +20,7 @@ import { useSessionStore } from "./session-store";
 import { CameraArchive } from "./camera-archive";
 import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-recording";
 import type { DelegationTask } from "../../../src/gateway/delegation-types";
+import { RealtimeResponses } from "./realtime-responses";
 import { RealtimeStartup } from "./realtime-startup";
 import { buildRealtimePrompt } from "./realtime-prompt";
 import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
@@ -462,6 +463,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // something to cancel — otherwise the Realtime API errors with
   // "Cancellation failed: no active response found".
   const activeResponseRef = useRef(false);
+  const handledCallsRef = useRef(new Set<string>());
   // Stay Silent capture window (#671): while silent, the model listens but does
   // not reply, so we record the user's transcribed speech + how many camera
   // frames went by. On release we hand this window back to the model and force
@@ -481,7 +483,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     });
   }
 
-  const sendRealtime = useCallback((event: unknown, duringStartup = false) => {
+  const transmitRealtime = useCallback((event: unknown, duringStartup = false) => {
     if (!readyRef.current && !duringStartup) return false;
     const dc = dcRef.current;
     if (!dc || dc.readyState !== "open") return false;
@@ -491,7 +493,22 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     return true;
   }, []);
 
+  const responsesRef = useRef<RealtimeResponses | null>(null);
+  if (!responsesRef.current) responsesRef.current = new RealtimeResponses(
+    event => transmitRealtime(event), (type, data) => cameraArchiveRef.current?.record(type, data as Record<string, unknown>),
+  );
+  const sendRealtime = useCallback((event: unknown, duringStartup = false) => {
+    const e = event as { type?: string; response?: any };
+    if (e.type === "response.create") {
+      responsesRef.current!.request(e.response ?? {});
+      return true;
+    }
+    return transmitRealtime(event, duringStartup);
+  }, [transmitRealtime]);
+
   const teardown = useCallback(() => {
+    responsesRef.current?.reset();
+    handledCallsRef.current.clear();
     readyRef.current = false;
     startupRef.current?.cancel();
     startupRef.current = null;
@@ -875,6 +892,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const startup = startupRef.current;
     startup?.observe(ev);
     if (startup && !readyRef.current) return;
+    if (responsesRef.current?.observe(ev)) return;
     const type = ev.type as string;
 
     // New response starting → reset the per-response guards.
@@ -987,6 +1005,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const archive = cameraArchiveRef.current;
     const connection = dcRef.current;
     const callId = String(ev.call_id ?? "");
+    if (!callId || handledCallsRef.current.has(callId)) return;
+    handledCallsRef.current.add(callId);
     const name = String(ev.name ?? "");
     const args = safeJSON(String(ev.arguments ?? "{}")) ?? {};
     archive?.record("tool.requested", { callId, name, arguments: args });
@@ -1102,7 +1122,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       type: "conversation.item.create",
       item: { type: "function_call_output", call_id: callId, output: JSON.stringify(output) },
     });
-    sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"] } });
+    sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"],
+      ...(delegation ? { metadata: { task_id: delegation.id }, instructions: "Use the completed backend result to answer the user. Do not repeat results already conveyed. Do not describe a finished task as still running." } : {}) } });
   }
 
   // --- Live toggles that take effect mid-session ---
@@ -1166,6 +1187,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       const next = !prev;
       const interrupt = settings.bargeIn !== "let_finish";
       staySilentRef.current = next;
+      responsesRef.current?.setSilent(next);
       sendRealtime({
         type: "session.update",
         session: { type: "realtime", audio: { input: { turn_detection: buildTurnDetection(settings, next, interrupt) } } },
