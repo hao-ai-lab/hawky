@@ -1,3 +1,4 @@
+import { liveCapabilities } from "../../../src/live/contracts";
 import { useEffect, useState } from "react";
 import { useSocketStore } from "../lib/socket-store";
 import { useLiveSettings, REALTIME_MODELS, VOICES, TRANSCRIBE_MODELS, SEMANTIC_EAGERNESS, REASONING_EFFORT, TOOL_CHOICE } from "../lib/live-settings";
@@ -6,24 +7,29 @@ import { Section, Row, Select, Slider, Button, Toggle } from "./Form";
 // Shared by Settings and the Live popup so both edit the same saved options.
 export function LiveSettingsPanel() {
   const s = useLiveSettings();
+  const gpt = liveCapabilities(s.model).provider === "gpt-live";
   const sel = <T extends string>(k: keyof typeof s, opts: readonly T[] | { value: string; label: string }[]) =>
     <Select value={String(s[k])} onChange={(v) => s.set(k as never, v as never)} options={opts} />;
 
   return (
     <>
-      <Section title="Live · Provider" footer="The realtime provider/model for the Live voice + camera session. Applied the next time you start Live.">
+      <Section title="Live · Provider" footer="Changing the model opens a new connection in this conversation. Saved memory, recent messages, and backend tasks stay with the conversation.">
         <Row label="Realtime model">{sel("model", REALTIME_MODELS)}</Row>
       </Section>
 
+      {gpt && <p className="mb-5 text-sm text-white/60">GPT-Live supports audio with continuous interruption and automatic context management. Camera, manual compaction, and Stay silent are unavailable. Typed messages go to your selected backend. Task interpretation uses gpt-5.4-mini with the same OpenAI key.</p>}
       <Section title="Live · Response">
-        <Row label="Response modality">{sel("responseModality", [{ value: "audio", label: "Audio + text" }, { value: "text", label: "Text only" }])}</Row>
-        <Row label="Voice">{sel("voice", VOICES)}</Row>
+        <Row label={gpt ? "Speaker" : "Response modality"}>{sel("responseModality", [{ value: "audio", label: "Audio + text" }, { value: "text", label: gpt ? "Muted (captions continue)" : "Text only" }])}</Row>
+        <Row label="Voice">{sel("voice", gpt ? ["marin", "cedar"] : VOICES)}</Row>
+        {!gpt && <>
         <Row label="Noise reduction">{sel("noiseReduction", [{ value: "none", label: "None" }, { value: "near_field", label: "Near field" }, { value: "far_field", label: "Far field" }] as const)}</Row>
         <Row label="User transcript" detail="Transcribe your speech"><Toggle checked={s.userTranscript} onChange={(v) => s.set("userTranscript", v)} /></Row>
         <Row label="Assistant transcript"><Toggle checked={s.assistantTranscript} onChange={(v) => s.set("assistantTranscript", v)} /></Row>
         <Row label="Transcription model">{sel("transcribeModel", TRANSCRIBE_MODELS)}</Row>
+        </>}
       </Section>
 
+      {!gpt && <>
       <Section title="Live · Model configuration">
         <Row label="Max tokens">{sel("maxTokensMode", [{ value: "unlimited", label: "Unlimited" }, { value: "custom", label: "Custom" }] as const)}</Row>
         {s.maxTokensMode === "custom" && <Row label="Token limit"><Slider value={s.maxTokens} onChange={(v) => s.set("maxTokens", v)} min={256} max={4096} step={256} /></Row>}
@@ -49,8 +55,10 @@ export function LiveSettingsPanel() {
         <Row label="Barge-in">{sel("bargeIn", [{ value: "interrupt", label: "Interrupt assistant" }, { value: "let_finish", label: "Let finish" }, { value: "full_duplex", label: "Full duplex" }] as const)}</Row>
       </Section>
 
-      <Section title="Live · Inputs" footer="Camera cadence + behavioral modes. Visual frames are sent to the model at the chosen rate.">
+      </>}
+      <Section title="Live · Inputs" footer={gpt ? "Audio input only. Camera preferences are retained for other providers." : "Camera cadence + behavioral modes. Visual frames are sent to the model at the chosen rate."}>
         <Row label="Microphone" detail="Capture audio when the session starts"><Toggle checked={s.microphoneEnabled} onChange={v => s.set("microphoneEnabled", v)} /></Row>
+        {!gpt && <>
         <Row label="Camera input" detail="Capture video when the session starts"><Toggle checked={s.cameraEnabled} onChange={v => s.set("cameraEnabled", v)} /></Row>
         <Row label="Start quietly" detail="Listen without replying until Stay silent is turned off"><Toggle checked={s.staySilent} onChange={v => s.set("staySilent", v)} /></Row>
         <Row label="Visual cadence">{sel("visualCadence", [{ value: "off", label: "Off" }, { value: "0.2", label: "0.2 fps" }, { value: "0.5", label: "0.5 fps" }, { value: "1", label: "1 fps" }, { value: "custom", label: "Custom" }] as const)}</Row>
@@ -60,6 +68,7 @@ export function LiveSettingsPanel() {
         <Row label="Respond only when spoken to"><Toggle checked={s.speakOnlyWhenSpokenTo} onChange={(v) => s.set("speakOnlyWhenSpokenTo", v)} /></Row>
         <Row label="Cocktail Party" detail="Recognize faces & recall people"><Toggle checked={s.cocktailParty} onChange={(v) => s.set("cocktailParty", v)} /></Row>
         <Row label="Safety Check" detail="Needs camera input and the gateway hazard service"><Toggle checked={s.safetyCheck} onChange={v => s.set("safetyCheck", v)} /></Row>
+        </>}
       </Section>
 
       <Section title="Live · Conversation">

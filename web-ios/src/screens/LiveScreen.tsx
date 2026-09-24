@@ -1,3 +1,4 @@
+import { useLiveSettings } from "../lib/live-settings";
 // =============================================================================
 // Live Screen — transcript-first realtime (web-ios)
 //
@@ -40,6 +41,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   // The Live agent bridges to the active session (chosen via the Hawk pill).
   const activeKey = useSessionStore((s) => s.activeKey);
   const sessions = useSessionStore((s) => s.sessions);
+  const selectedModel = useLiveSettings(s => s.model);
   const realRt = useRealtime({ sessionKey: activeKey });
   // DEV-only presentation preview (?preview=live-connected|live-charts|live-idle):
   // overlay seeded transcript/phase so connected-state layouts can be reviewed
@@ -47,7 +49,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const previewMode = previewModeFromLocation();
   const rt = previewMode ? { ...realRt, ...previewOverrides(previewMode) } : realRt;
   const {
-    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
+    capabilities, activeModel, reconnect, phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
     canStart, resumable, videoElRef, audioElRef, start, stop, sendText, compaction, compactNow, sessionMemory, updateSessionMemory,
     toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
   } = rt;
@@ -103,9 +105,11 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           <Icon name="chevronDown" className="h-3.5 w-3.5 text-white/40" />
         </button>
         <div className="flex flex-wrap items-center gap-2">
+          {isConnected && activeModel !== selectedModel && <button onClick={() => void reconnect()}
+            className="rounded-lg border border-accent/40 px-3 py-2 text-xs text-accent">Switch to {selectedModel}</button>}
           <button onClick={() => { setCompactionOpen(true); compactNow(); }}
-            disabled={!isConnected || compactionBusy(compaction)}
-            title={isConnected ? "Summarize older messages and images in this connection" : "Start Live to compact its active context"}
+            disabled={!capabilities.manualCompaction || !isConnected || compactionBusy(compaction)}
+            title={!capabilities.manualCompaction ? "This provider manages live context automatically" : isConnected ? "Summarize older messages and images in this connection" : "Start Live to compact its active context"}
             className="pressable rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
             {compactionBusy(compaction) ? "Compacting…" : "Compact live context"}
           </button>
@@ -208,6 +212,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           {/* Keep the same controls available before and during a session. */}
           <div className="overflow-hidden border-white/10 max-md:rounded-glass max-md:border max-md:bg-[var(--glass-bg)] max-md:shadow-glass max-md:backdrop-blur-xl md:border-t md:bg-paper/40">
             <ControlBar
+              audioOnly={capabilities.provider === "gpt-live"}
               phase={phase} canStart={canStart} isConnected={isConnected} resumable={resumable}
               micOn={micOn} cameraOn={cameraOn} speakerOn={speakerOn} staySilent={staySilent} cocktailParty={cocktailParty} safetyOn={safetyOn} speaking={speaking}
               onStart={() => void start()} onStop={stop}
@@ -260,6 +265,7 @@ const Composer = memo(function Composer({ onSend }: { onSend: (text: string) => 
 // Control bar (web style: a centered row of round controls)
 // -----------------------------------------------------------------------------
 function ControlBar(p: {
+  audioOnly: boolean;
   phase: LivePhase; canStart: boolean; isConnected: boolean; resumable: boolean;
   micOn: boolean; cameraOn: boolean; speakerOn: boolean; staySilent: boolean; cocktailParty: boolean; safetyOn: boolean; speaking: boolean;
   onStart: () => void; onStop: () => void;
@@ -269,15 +275,15 @@ function ControlBar(p: {
   return (
     <div className="py-2.5">
       {!p.isConnected && <p className="mb-2 px-3 text-center text-xs text-white/60" aria-live="polite">
-        Mic {p.micOn ? "on" : "off"} · Camera {p.cameraOn ? "on" : "off"} · {p.speakerOn ? "Spoken replies" : "Text replies"}{p.staySilent ? " · Stay silent" : ""}
+        Mic {p.micOn ? "on" : "off"} · Camera {p.cameraOn ? "on" : "off"} · {p.speakerOn ? "Spoken replies" : p.audioOnly ? "Speaker muted" : "Text replies"}{p.staySilent ? " · Stay silent" : ""}
       </p>}
       <div className="flex flex-wrap items-center justify-center gap-1 px-1 sm:gap-2">
           <Ctrl disabled={busy} on={p.micOn} onIcon="mic" offIcon="micOff" label="Mic" onClick={p.onToggleMic} />
-          <Ctrl disabled={busy} on={p.cameraOn} onIcon="video" offIcon="videoOff" label="Camera" onClick={p.onToggleCamera} />
+          <Ctrl disabled={busy || p.audioOnly} on={p.cameraOn} onIcon="video" offIcon="videoOff" label="Camera" onClick={p.onToggleCamera} />
           <Ctrl disabled={busy} on={p.speakerOn} onIcon="speaker" offIcon="speakerOff" label="Spoken replies" onClick={p.onToggleSpeaker} pulse={p.speaking} />
-          <Ctrl disabled={busy} on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
-          <Ctrl disabled={busy} on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
-          <Ctrl disabled={busy} on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
+          <Ctrl disabled={busy || p.audioOnly} on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
+          <Ctrl disabled={busy || p.audioOnly} on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
+          <Ctrl disabled={busy || p.audioOnly} on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
       <PrimaryButton phase={p.phase} canStart={p.canStart} resumable={p.resumable} onStart={p.onStart} onStop={p.onStop} />
       </div>
     </div>

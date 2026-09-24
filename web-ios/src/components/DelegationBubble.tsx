@@ -37,7 +37,7 @@ export function DelegationBubble({ task, image, onImageClick }: { task: Delegati
       {task.originalRequest && <div><strong>Your words</strong><p className="whitespace-pre-wrap">{task.originalRequest}</p></div>}
       {task.brief && <details><summary className="cursor-pointer">Exact backend brief</summary><pre className="whitespace-pre-wrap">{task.brief}</pre></details>}
       <p className="text-white/50">Task: {task.id}<br />Session: {task.backendSession}</p>
-      <p>Result: {task.validity ?? "current"} · Delivery: {task.delivery ?? "pending"}</p>
+      <p>Result: {task.validity ?? "current"} · Delivery: {task.delivery === "injected" ? "available to voice model (playback unconfirmed)" : task.delivery ?? "pending"}</p>
       {task.input && <div className="rounded border border-amber-400/40 p-3">
         <strong>{task.input.prompt}</strong>
         <pre className="whitespace-pre-wrap">{JSON.stringify(task.input.detail, null, 2)}</pre>
