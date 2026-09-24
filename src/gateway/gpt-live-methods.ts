@@ -61,13 +61,14 @@ export function registerGptLiveMethods(server: GatewayServer, tasks: DelegationS
     };
     const error = (message: string) => server.broadcastToSession(p.ownerSession, "live.gpt.error", { id, message });
     const coordinator = new GptLiveCoordinator({ id, history: p.history, runtime: p.runtime, bridge: p.bridge !== false, send, error,
+      trace: (type, data) => tasks.trace(conn, p.ownerSession, id, type, data),
       persist: turn => persist(p.ownerSession, turn),
       route: (snapshot, signal) => routeLiveDelegation(selection.apiKey, snapshot, AbortSignal.any([signal, AbortSignal.timeout(20000)])),
       tasks: {
         list: () => tasks.list(conn, p.ownerSession),
         submit: params => tasks.submit(conn, { ...params, ownerSession: p.ownerSession }).task,
         cancel: taskId => tasks.cancel(conn, { id: taskId, ownerSession: p.ownerSession }),
-        revise: (taskId, message, revisionId) => tasks.revise(conn, { id: taskId, message, revisionId, ownerSession: p.ownerSession }),
+        revise: (taskId, message, revisionId, execution) => tasks.revise(conn, { id: taskId, message, revisionId, execution, ownerSession: p.ownerSession }),
         injected: (taskId, eventId) => tasks.delivery(conn, { id: taskId, ownerSession: p.ownerSession, state: "injected", responseId: eventId }),
       },
     });

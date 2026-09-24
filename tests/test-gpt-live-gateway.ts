@@ -20,7 +20,7 @@ function fixture() {
     return new Response(JSON.stringify({ session: { id: `live_${requests.length}` }, transport: { sdp: "answer" } }));
   }) as any;
   registerGptLiveMethods({ registerMethod: (n: string, fn: Function) => methods.set(n, fn), broadcastToSession: (...args: any[]) => events.push(args) } as any,
-    { subscribe() {}, list: () => [] } as any, (_key, turn) => saved.push(turn));
+    { subscribe() {}, list: () => [], trace: () => {} } as any, (_key, turn) => saved.push(turn));
   const conn = { deviceTokenId: "owner-a", clientId: "test", bindSession() {} };
   return { requests, saved, events, call: (n: string, p: any, c = conn) => methods.get(n)!(c, p) };
 }

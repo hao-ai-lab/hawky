@@ -234,6 +234,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
   server.registerMethod("delegation.revise", revise);
   return {
     submit, lookup, revise, delivery,
+    trace: (conn: GatewayConnection, session: string, connection: string, type: string, data: unknown) => db().trace(owner(conn), session, connection, type, data),
     cancel: (conn: GatewayConnection, p: any) => cancel(conn, lookup(conn, p)),
     list: (conn: GatewayConnection, ownerSession: string) => db().list(owner(conn), ownerSession)
       .map(t => recover(conn, active.get(keyOf(conn, t.id))?.task ?? t)),

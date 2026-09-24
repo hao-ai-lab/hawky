@@ -38,4 +38,9 @@ export class DelegationStore {
     task.events = [...task.events.slice(-99), event];
     this.save(owner, task);
   }
+  trace(owner: string, session: string, connection: string, type: string, data: unknown) {
+    const name = createHash("sha256").update(session).digest("hex").slice(0, 32);
+    appendFileSync(join(this.directory(owner), `routing-${name}.jsonl`),
+      JSON.stringify({ at: Date.now(), session, connection, type, data }) + "\n", { mode: 0o600 });
+  }
 }

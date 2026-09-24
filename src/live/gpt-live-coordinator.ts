@@ -8,7 +8,7 @@ export interface LiveTaskPort {
   list(): DelegationTask[];
   submit(params: Record<string, unknown>): DelegationTask;
   cancel(id: string): DelegationTask;
-  revise(id: string, message: string, revisionId: string): DelegationTask;
+  revise(id: string, message: string, revisionId: string, execution?: "read_only" | "serial"): DelegationTask;
   injected(id: string, eventId: string): void;
 }
 const finished = (t: DelegationTask) => ["completed", "failed", "cancelled", "interrupted"].includes(t.status);
@@ -44,6 +44,7 @@ export class GptLiveCoordinator {
     route: (snapshot: RoutingSnapshot, signal: AbortSignal) => Promise<LiveRoute>;
     persist: (caption: LiveCaption) => void;
     error: (message: string) => void;
+    trace?: (type: string, data: unknown) => void;
   }) {
     this.transcript = new GptLiveTranscript(options.id, () => {}, options.persist);
   }
@@ -60,6 +61,7 @@ export class GptLiveCoordinator {
       }
     }
     if (e.type === "session.delegation.created" && e.delegation?.id && !this.seen.has(e.delegation.id)) {
+      this.options.trace?.("delegation.received", { delegationId: e.delegation.id, offsetMs: e.offset_ms });
       this.seen.add(e.delegation.id);
       this.requests.push({ id: e.delegation.id, at: Date.now() }); this.schedule();
     }
@@ -95,6 +97,7 @@ export class GptLiveCoordinator {
     this.transcript.accept({ type: "session.input_transcript.delta", event_id: randomUUID(), delta: text, start_ms: Date.now() - this.startedAt, end_ms: Date.now() - this.startedAt });
     this.transcript.flush();
     this.requests.push({ id: "", at: Date.now() });
+    this.options.trace?.("typed.received", { text });
     await this.routeNext();
   }
   close() {
@@ -120,7 +123,12 @@ export class GptLiveCoordinator {
         const revision = this.transcript.userRevision;
         context = [...this.options.history, ...this.transcript.snapshot()].slice(-20);
         if (!context.some(t => t.role === "user" && t.text.trim())) throw new Error("No user transcript available for this task. Please repeat the request.");
-        route = await this.options.route({ conversation: context, tasks: this.options.tasks.list() }, this.abort.signal);
+        const tasks = this.options.tasks.list(), started = Date.now();
+        this.options.trace?.("routing.started", { delegationId: request.id, revision, attempt, conversation: context,
+          tasks: tasks.map(t => ({ id: t.id, request: t.request, status: t.status, validity: t.validity })) });
+        route = await this.options.route({ conversation: context, tasks }, this.abort.signal);
+        this.options.trace?.("routing.decided", { delegationId: request.id, revision, route, durationMs: Date.now() - started,
+          stale: revision !== this.transcript.userRevision });
         if (this.closed) return;
         if (revision === this.transcript.userRevision) break;
         route = undefined; // A correction arrived while interpreting; never execute the stale plan.
@@ -134,18 +142,21 @@ export class GptLiveCoordinator {
         if (["submit", "revise"].includes(action.action) && (!action.request.trim() || action.request.length > 32000)) throw new Error("The task request is incomplete");
       }
       if (route.clarification) { this.append("commentary", route.clarification, request.id); return; }
+      if (!route.actions.length) this.append("thinking", "No new backend task was started for this request. Do not say you are checking or working on it.", request.id);
       for (const action of route.actions) {
         const fingerprint = `${this.transcript.userRevision}:${JSON.stringify(action)}`;
         if (this.submitted.has(fingerprint)) continue;
         this.submitted.add(fingerprint);
         let task: DelegationTask;
         if (action.action === "cancel") task = this.options.tasks.cancel(action.taskId);
-        else if (action.action === "revise") task = this.options.tasks.revise(action.taskId, action.request, randomUUID());
+        else if (action.action === "revise") task = this.options.tasks.revise(action.taskId, action.request, randomUUID(), action.readOnly ? "read_only" : "serial");
         else if (action.action === "status") task = current.get(action.taskId)!;
         else task = this.options.tasks.submit({ id: randomUUID(), message: action.request, runtime: this.options.runtime,
           originalRequest: context.filter(t => t.role === "user").slice(-3).map(t => t.text).join("\n"), context,
           execution: action.readOnly ? "read_only" : "serial", continueTask: action.taskId || undefined });
         actionsApplied++;
+        this.options.trace?.("routing.applied", { delegationId: request.id, action: action.action, taskId: task.id,
+          continues: task.continues, backendSession: task.backendSession, status: task.status });
         if (request.id) this.bindings.set(task.id, request.id);
         if (action.action === "status") this.deliver(task, true, true);
         else this.append("thinking", `Task ${task.id}: ${task.status}. ${liveSnippet(task.request, 220)}. Completion will arrive automatically; do not poll.`, request.id);
@@ -153,6 +164,7 @@ export class GptLiveCoordinator {
     } catch (error) {
       if (!this.closed) {
         const message = error instanceof Error ? error.message : String(error);
+        this.options.trace?.("routing.failed", { delegationId: request.id, actionsApplied, message });
         this.options.error(message); this.append("commentary", `${actionsApplied ? "Some task actions succeeded, but the next action failed" : "No new task was started"}: ${liveSnippet(message, 300)}`, request.id);
       }
     } finally { this.routing = false; this.schedule(); }

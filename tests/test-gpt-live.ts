@@ -3,10 +3,10 @@ import { GptLiveCoordinator, liveSnippet, type LiveTaskPort } from "../src/live/
 import { GptLiveTranscript } from "../src/live/gpt-live-transcript.js";
 import { gptLiveConfig } from "../src/gateway/gpt-live-methods.js";
 import type { DelegationTask } from "../src/gateway/delegation-types.js";
-import type { LiveRoute, RoutingSnapshot } from "../src/live/gpt-live-router.js";
+import { liveRoutingInput, type LiveRoute, type RoutingSnapshot } from "../src/live/gpt-live-router.js";
 const task = (id: string, status: DelegationTask["status"] = "running"): DelegationTask => ({ id, ownerSession: "web:test", backendSession: `work:${id}`, request: `Read ${id}`, runtime: "native", status, createdAt: 1, events: [], validity: "current", delivery: "pending" });
 function fixture(route: (snapshot: RoutingSnapshot) => Promise<LiveRoute>, existing: DelegationTask[] = []) {
-  const sent: any[] = [], persisted: any[] = [], errors: string[] = [], injected: string[] = [], submitted: any[] = [];
+  const sent: any[] = [], persisted: any[] = [], errors: string[] = [], injected: string[] = [], submitted: any[] = [], traces: any[] = [];
   const all = new Map(existing.map(t => [t.id, t]));
   const port: LiveTaskPort = {
     list: () => [...all.values()],
@@ -16,8 +16,8 @@ function fixture(route: (snapshot: RoutingSnapshot) => Promise<LiveRoute>, exist
     injected: (id) => injected.push(id),
   };
   const coordinator = new GptLiveCoordinator({ id: "live_fixture", runtime: "codex", history: [{ role: "user", text: "Use folder A" }], bridge: true,
-    tasks: port, send: e => sent.push(e), persist: c => persisted.push(c), error: e => errors.push(e), route });
-  return { coordinator, sent, persisted, errors, injected, submitted, all };
+    tasks: port, send: e => sent.push(e), persist: c => persisted.push(c), error: e => errors.push(e), trace: (type, data) => traces.push({ type, data }), route });
+  return { coordinator, sent, persisted, errors, injected, submitted, all, traces };
 }
 const submit = (request: string) => ({ action: "submit" as const, request, taskId: "", readOnly: true });
 
@@ -103,4 +103,23 @@ test("validate every target before mutating anything; errors are visible", async
 
 test("spoken context respects the protocol budget even for Unicode and large backend output", () => {
   expect(new TextEncoder().encode(liveSnippet("记忆🙂".repeat(2000), 480)).length).toBeLessThan(500);
+});
+
+test("routing sees bounded results to resolve follow-ups and journals no-op decisions", async () => {
+  const completed = { ...task("papers", "completed"), result: "Paper 1: A. Paper 2: B." + "x".repeat(2000) };
+  expect(liveRoutingInput({ conversation: [], tasks: [completed] }).tasks[0].result).toHaveLength(1800);
+  const f = fixture(async () => ({ actions: [], clarification: "" }));
+  await f.coordinator.typed("Stop talking");
+  expect(f.traces.map(t => t.type)).toEqual(["typed.received", "routing.started", "routing.decided"]);
+  expect(f.traces.at(-1).data.route.actions).toEqual([]);
+  expect(f.sent.at(-1).content).toContain("No new backend task was started");
+  f.coordinator.close();
+});
+
+test("follow-up dispatch preserves target and tracing records the actual accepted task", async () => {
+  const f = fixture(async () => ({ actions: [{ ...submit("Explain paper B"), taskId: "papers" }], clarification: "" }), [task("papers", "completed")]);
+  await f.coordinator.typed("Explain the second paper");
+  expect(f.submitted[0].continueTask).toBe("papers");
+  expect(f.traces.at(-1)).toMatchObject({ type: "routing.applied", data: { action: "submit", taskId: f.submitted[0].id } });
+  f.coordinator.close();
 });

@@ -49,10 +49,35 @@ state. Saved session memory plus recent text are restored; task IDs remain stabl
    announcement. Explicit status questions can retrieve completed results.
 
 The task interpreter waits briefly for late speech fragments and discards a plan
-if a correction arrives during interpretation. Independent native read-only tasks
-can run concurrently; CLI tasks and mutations retain the existing serialization
-and permission policy. A gateway restart marks interrupted work for explicit
-recovery rather than replaying side effects.
+if a correction arrives during interpretation. Each independent task owns a backend
+conversation. Native and Codex read-only tasks can use the two workers concurrently;
+follow-ups explicitly reference a task and resume its conversation. A queued
+follow-up does not block an unrelated reader. Workspace mutations, Claude tasks,
+and turns targeting the same conversation run serially. The task card explains
+whether it is waiting for a conversation, workspace access, a dependency, or a
+worker. A gateway restart marks interrupted work for explicit recovery rather
+than replaying side effects.
+
+Codex read-only turns use a read-only shell sandbox, disable configured MCP
+servers, apps, plugins and hooks, and disallow escalation. Model/provider/login
+configuration is retained. Effective MCP configuration is inspected in the task's
+working directory; if it cannot be restricted, execution fails closed. Write turns
+keep the existing CLI permission settings and take exclusive workspace access.
+A Codex follow-up can change execution mode; a native read-only conversation has
+a fixed tool allowlist and needs a separate task for subsequent writes.
+
+The router distinguishes additional work (new task), follow-ups (existing task),
+and explicit corrections (supersede and continue the targeted task). It receives
+bounded results to resolve references such as "the second paper." Ambiguous targets
+need clarification. This is model behavior, so it is evaluated separately from
+the deterministic scheduler. Saying "I can check" is not a dispatch acknowledgement.
+
+Routing diagnostics are local files under
+`~/.hawky/sessions/delegations/<owner-hash>/routing-<session-hash>.jsonl`.
+They record the delegation ID, recent transcript, candidate tasks, proposed
+actions, stale decisions, applied task IDs and errors. They contain conversation
+data, are created with mode 0600, and contain no raw audio or API keys. Each task's
+existing JSONL journal retains queue transitions, tool events and results.
 
 ## Verification and manual checks
 
@@ -77,12 +102,28 @@ bun scripts/probes/gpt-live.ts
 This requires a configured OpenAI key and checks real audio, client delegation,
 spoken task result and seeded-history recall. It closes its session at the end.
 
+Two additional opt-in probes separate routing quality from CLI execution:
+
+```sh
+bun scripts/probe-live-task-routing.ts
+HAWKY_CODEX_BIN=/path/to/codex bun scripts/probe-delegation-workers.ts
+```
+
+The first makes eight `gpt-5.4-mini` calls with synthetic scenarios and never runs
+the proposed actions. The second uses the installed Codex login, creates temporary
+fixtures and real CLI conversations, and checks overlapping workers, distinct
+conversation IDs, follow-up recall and read-only execution. Fixture files are
+cleaned up; Codex retains the probe conversations in its normal history.
+
 Manual checks, about 10–15 minutes:
 
 1. Select GPT-Live, start and wait: no opening speech. Say “My test color is
    turquoise.” Stop/start and ask the color: continuity without an opening recap.
-2. Ask for two separate read-only directory listings. Expect two task IDs and
-   accurate results. Speak while they run; no Realtime active-response error.
+2. Select Codex. Ask it to sleep 20 seconds then report its directory. While it
+   runs, ask "In a separate task, list the workspace files." Expect two task IDs,
+   two runtime conversation IDs and overlapping execution. The listing should
+   arrive before the sleep completes. Ask a follow-up about the listing: expect
+   a new task ID using the listing's original runtime conversation.
 3. Ask the backend to wait, correct the request, then cancel. Old results must
    stay superseded/cancelled, and interrupting speech alone must not cancel work.
 4. Start backend work, select Realtime, press **Switch to …**. Keep the same URL,

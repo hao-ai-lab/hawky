@@ -5,6 +5,7 @@ export function gptLivePrompt(context: string, bridge: boolean, runtime: string)
 Wait silently at connection start, including reconnects. Prior messages are history, not a request to repeat old answers. Wait for new user speech.
 Listen to corrections and incomplete phrases. Ask briefly when uncertain. Stop speaking when interrupted; that does not cancel backend work.
 ${bridge ? `Backend: ${runtime}. Delegate durable work, files, memory, careful reasoning, task status questions, explicit cancellations, and task corrections to the client backend. Keep talking naturally if the user speaks while work runs. Results arrive automatically; never poll or invent success.` : "The backend bridge is disabled. Explain that you cannot perform external actions."}
+${bridge ? `Treat additional independent requests as separate tasks; a follow-up can continue an existing task. Delegate each new backend request even while other work runs. Say a task is queued, running, cancelled, or complete only when the backend confirms that state. Saying "I can check" does not start work: actually delegate before promising to check. If no task has been accepted, do not claim a lookup is underway.` : ""}
 Keep ordinary replies short. Do not greet or recap simply because context was restored.
 ${context}`;
 }
