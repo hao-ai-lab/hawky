@@ -49,9 +49,11 @@ class StubProvider implements LLMProvider {
 
   async *stream(request: LLMStreamRequest): AsyncIterable<LLMStreamEvent> {
     this.calls.push(request);
-    for (const text of this.chunks) {
-      yield { type: "text_delta", text };
-    }
+    const text = this.chunks.join("");
+    yield { type: "text_delta", text: text && String(request.system).includes('"session_memory"')
+      ? JSON.stringify({ type: "session_memory", summary: text, daily_memory: text }) : text };
+    yield { type: "message_delta", stop_reason: "end_turn", usage: { output_tokens: 20 } };
+    yield { type: "message_stop" };
   }
 
   async countTokens(): Promise<{ input_tokens: number }> {
@@ -262,6 +264,14 @@ describe("distill model resolution", () => {
   test("honors config.memory.distill_model", () => {
     const cfg = { memory: { distill_model: "claude-sonnet-4-6" } } as HawkyConfig;
     expect(resolveDistillModel(cfg)).toBe("claude-sonnet-4-6");
+  });
+
+  test("supports OpenAI-only credentials without overriding an explicit memory model", () => {
+    const cfg = { provider: "anthropic", api_keys: { openai: "test-key" } } as HawkyConfig;
+    expect(resolveDistillModel(cfg)).toBe("gpt-5.4-mini");
+    expect(resolveDistillModel({ ...cfg, memory: { distill_model: "claude-haiku-4-5" } })).toBe("claude-haiku-4-5");
+    expect(resolveDistillModel({ ...cfg, provider: "openai_compatible", model: "local-model" })).toBe("local-model");
+    expect(resolveDistillModel({ ...cfg, provider: "vertex", model: "vertex-model" })).toBe("vertex-model");
   });
 
   test("uses the resolved model in the LLM call even when default provider is OpenAI", async () => {

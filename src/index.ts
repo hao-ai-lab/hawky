@@ -27,6 +27,7 @@ import { registerPersonMethods } from "./gateway/person-methods.js";
 import { registerToolMethods } from "./gateway/tool-methods.js";
 import { registerMemoryMethods } from "./gateway/memory-methods.js";
 import { MemoryScheduler } from "./memory/scheduler.js";
+import { SessionMemoryScheduler } from "./memory/session-memory-scheduler.js";
 import { registerFrontendBootContextMethods } from "./gateway/frontend-boot-context.js";
 import { MethodError } from "./gateway/methods.js";
 import { setCronServiceRef } from "./tools/cron.js";
@@ -1043,10 +1044,12 @@ async function main() {
 
       // Memory feature (#653): consolidate daily → global every 6h, but only if
       // a daily log changed since the last run. Replaces the (now-disabled)
-      // heartbeat consolidation. Session→daily distillation is triggered by iOS
-      // on session end, not here.
+      // heartbeat consolidation. Rolling extraction and iOS session-end calls
+      // share the same per-session checkpoints in memory.distill.
       const memoryScheduler = new MemoryScheduler({ getConfig: () => gwConfig });
       memoryScheduler.start();
+      const sessionMemoryScheduler = new SessionMemoryScheduler({ getConfig: () => gwConfig });
+      sessionMemoryScheduler.start();
 
       // Slice 1 live-chunk firehose logger. Stub consumer: logs every
       // `media.live.chunk` event. Real consumers (streaming providers,
@@ -1217,6 +1220,7 @@ async function main() {
         onBeforeShutdown: async () => {
           // Stop the memory consolidation timer (#653).
           memoryScheduler.stop();
+          sessionMemoryScheduler.stop();
           // Flush channel shutdown hooks BEFORE stopping adapters — drains any
           // buffered inbound messages (debouncers) so they get processed rather
           // than silently dropped. Adapter.stop() after this closes the socket.

@@ -15,9 +15,9 @@
 //     -> daily summary (memory/YYYY-MM-DD.md)               [scope: "daily"]
 //     -> consolidation into MEMORY.md (global)              [scope: "global"]
 //
-// Consolidation == distillation == ONE LLM call to Haiku via the existing
-// provider factory. This is intentionally NOT super fault-tolerant — robustness
-// (retries, partial-failure recovery) is a follow-up.
+// Daily extraction updates a rolling per-session checkpoint and projects it
+// into the daily log. Retries and scheduled/session-end calls share progress.
+// Each invocation processes one bounded chunk using the configured memory model.
 //
 // A `mock` mode skips the LLM entirely and writes deterministic placeholder
 // content, so the iOS testing tab and CI can exercise the file-writing path
@@ -32,8 +32,9 @@ import { createProvider } from "../agent/provider-factory.js";
 import { AnthropicProvider } from "../agent/anthropic_provider.js";
 import { LLMError } from "../agent/provider.js";
 import { WorkspaceManager } from "../storage/workspace.js";
-import { listSessions } from "../storage/session.js";
+import { listSessions, type SessionInfo } from "../storage/session.js";
 import { extractSessionText } from "./session-extract.js";
+import { updateSessionMemory } from "./session-memory.js";
 import { getPrompt } from "../prompts/index.js";
 import { createSubsystemLogger } from "../logging/index.js";
 
@@ -43,25 +44,31 @@ export const DISTILL_SCOPES = ["daily", "global"] as const;
 export type DistillScope = (typeof DISTILL_SCOPES)[number];
 
 /**
- * Default distillation model. Haiku, per the design ("1 LLM call to Haiku").
- * Overridable via config.memory.distill_model.
+ * Default Anthropic and OpenAI memory models, selected from available keys.
+ * Both are overridable via config.memory.distill_model.
  */
 export const DEFAULT_DISTILL_MODEL = "claude-haiku-4-5";
+export const OPENAI_DISTILL_MODEL = "gpt-5.4-mini";
 
-/** Resolve the distillation model from config (default Haiku). Exported for tests. */
+/** Resolve the memory model without requiring a second provider's API key. */
 export function resolveDistillModel(config: HawkyConfig): string {
   const configured = config.memory?.distill_model?.trim();
-  return configured && configured.length > 0 ? configured : DEFAULT_DISTILL_MODEL;
+  if (configured) return configured;
+  // Respect nonstandard endpoints and Vertex instead of moving their transcripts
+  // to a different provider just because another key happens to be installed.
+  if (config.provider === "openai_compatible" || config.provider === "vertex") return config.model;
+  if (config.api_keys?.anthropic?.trim()) return DEFAULT_DISTILL_MODEL;
+  if (config.api_keys?.openai?.trim()) return OPENAI_DISTILL_MODEL;
+  return DEFAULT_DISTILL_MODEL; // provider construction gives the missing-key error
 }
 
 /**
- * Build the provider for the distillation model. Distillation targets Haiku by
- * default, which is an Anthropic model — so when the model is a Claude model we
- * build an Anthropic provider directly from the Anthropic key, independent of
- * the user's default chat provider (which may be OpenAI/Vertex). For non-Claude
- * distill models we fall back to the configured provider via createProvider.
+ * Route Claude/OpenAI models to their provider keys. Keep explicitly configured
+ * compatible endpoints and Vertex on that endpoint instead of changing providers.
  */
 function buildDistillProvider(config: HawkyConfig, model: string): LLMProvider {
+  if (config.provider === "openai_compatible" || config.provider === "vertex") return createProvider(config);
+  if (/^(?:gpt-|o[1-9])/.test(model)) return createProvider({ ...config, provider: "openai" });
   const isClaude = /claude/i.test(model);
   if (isClaude) {
     const apiKey = config.api_keys?.anthropic;
@@ -86,7 +93,7 @@ function buildDistillProvider(config: HawkyConfig, model: string): LLMProvider {
 const MAX_TRANSCRIPT_CHARS = 24_000;
 /** Cap how much existing global memory we feed back in for consolidation. */
 const MAX_GLOBAL_CHARS = 16_000;
-const MAX_DAILY_OUTPUT_TOKENS = 1024;
+const MAX_DAILY_OUTPUT_TOKENS = 4096;
 const MAX_GLOBAL_OUTPUT_TOKENS = 2048;
 
 export interface DistillRequest {
@@ -95,6 +102,8 @@ export interface DistillRequest {
   scope: DistillScope;
   /** Skip the LLM and write deterministic placeholder content (offline/CI). */
   mock?: boolean;
+  /** Internal scheduler request: respect idle/message-count/cooldown gates. */
+  automatic?: boolean;
 }
 
 export interface DistillResult {
@@ -108,6 +117,10 @@ export interface DistillResult {
   mocked: boolean;
   /** Human-readable note (e.g. "no transcript found"). */
   note?: string;
+  skipped?: boolean;
+  has_more?: boolean;
+  revision?: number;
+  session_memory?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -119,21 +132,26 @@ export interface DistillResult {
  * target that persisted session exactly; otherwise fall back to the newest
  * realtime session for legacy/manual callers.
  */
-async function assembleTranscript(sessionKey?: string): Promise<{ text: string; sourceId: string | null }> {
+export function findMemorySession(sessionKey?: string): SessionInfo | undefined {
   const sessions = listSessions(500);
   let chosen = sessions;
   if (sessionKey && sessionKey.trim()) {
     const key = sessionKey.trim();
     chosen = sessions.filter((s) => s.id === key || sessionIdAliases(s.id).includes(key));
-    if (chosen.length === 0) return { text: "", sourceId: null };
+    if (chosen.length === 0) return undefined;
   } else {
     chosen = sessions.filter((s) => s.id.startsWith("realtime:") || s.id.startsWith("realtime/"));
-    if (chosen.length === 0) return { text: "", sourceId: null };
+    if (chosen.length === 0) return undefined;
     chosen.sort((a, b) => b.lastModified - a.lastModified);
     chosen = [chosen[0]];
   }
 
-  const session = chosen[0];
+  return chosen[0];
+}
+
+async function assembleTranscript(sessionKey?: string): Promise<{ text: string; sourceId: string | null }> {
+  const session = findMemorySession(sessionKey);
+  if (!session) return { text: "", sourceId: null };
   try {
     const res = await extractSessionText(session.filePath);
     const text = res.text.trim().slice(0, MAX_TRANSCRIPT_CHARS);
@@ -148,7 +166,7 @@ async function assembleTranscript(sessionKey?: string): Promise<{ text: string; 
 }
 
 // -----------------------------------------------------------------------------
-// LLM call (one streaming Haiku call, collected to text)
+// LLM call (one bounded streaming request, collected to text)
 // -----------------------------------------------------------------------------
 
 async function distillWithLLM(
@@ -157,9 +175,12 @@ async function distillWithLLM(
   systemPrompt: string,
   userContent: string,
   maxTokens: number,
+  requireCompletion = false,
 ): Promise<string> {
-  const abort = new AbortController();
+  const signal = AbortSignal.timeout(30_000);
   let out = "";
+  let completed = false;
+  let stopReason: string | null = null;
   for await (const event of provider.stream(
     {
       model,
@@ -167,10 +188,16 @@ async function distillWithLLM(
       messages: [{ role: "user", content: userContent }],
       system: systemPrompt,
     } as any,
-    abort.signal,
+    signal,
   )) {
+    signal.throwIfAborted();
     if (event.type === "text_delta") out += event.text;
+    if (event.type === "message_delta") stopReason = event.stop_reason;
+    if (event.type === "message_stop") completed = true;
+    if (requireCompletion && event.type === "tool_use_start") throw new Error("Memory extraction must not call tools.");
   }
+  if (requireCompletion && out.trim() && (!completed || stopReason !== "end_turn"))
+    throw new Error(`Incomplete memory extraction (${stopReason ?? "missing completion"}); checkpoint unchanged.`);
   return out.trim();
 }
 
@@ -189,12 +216,13 @@ async function distillDaily(
   workspace: WorkspaceManager,
   req: DistillRequest,
   now: Date,
+  config: HawkyConfig,
+  sourceSession?: SessionInfo,
 ): Promise<DistillResult> {
   const dateStr = formatDate(now);
   const file = `memory/${dateStr}.md`;
-  const { text, sourceId } = await assembleTranscript(req.session_key);
-
-  if (!text) {
+  const session = sourceSession ?? findMemorySession(req.session_key);
+  if (!session) {
     return {
       ok: false,
       scope: "daily",
@@ -205,38 +233,25 @@ async function distillDaily(
     };
   }
 
-  let summary: string;
-  if (req.mock) {
-    summary =
-      `(mock) Distilled ${text.length} chars from ${sourceId ?? "unknown session"}. ` +
-      `First line: ${text.split("\n")[0]?.slice(0, 120) ?? ""}`;
-  } else {
-    summary = await distillWithLLM(
-      engine.getProvider(),
-      engine.model,
-      getPrompt("memory.distill.daily.system"),
-      `Summarize this realtime session into a daily-log entry.\n\n` +
-        `----- TRANSCRIPT -----\n${text}`,
-      MAX_DAILY_OUTPUT_TOKENS,
-    );
-    if (!summary) {
-      return {
-        ok: false,
-        scope: "daily",
-        file,
-        preview: "",
-        mocked: false,
-        note: "Distillation LLM call returned an empty summary.",
-      };
-    }
+  try {
+    const result = await updateSessionMemory({ workspace, session, now, model: engine.model,
+      mock: req.mock, automatic: req.automatic,
+      minMessages: config.memory?.session_min_messages,
+      minIntervalMs: (config.memory?.session_interval_seconds ?? 120) * 1000,
+      idleMs: (config.memory?.session_idle_seconds ?? 60) * 1000,
+      summarize: prompt => distillWithLLM(engine.getProvider(), engine.model,
+        getPrompt("memory.distill.daily.system"), prompt, MAX_DAILY_OUTPUT_TOKENS, true),
+    });
+    const target = result.state ? `memory/${result.state.daily.date}.md` : file;
+    if (!result.skipped) log.info("session memory updated", { session: session.id,
+      revision: result.state?.revision, reset: result.reset, model: engine.model, file: target, hasMore: result.hasMore });
+    return { ok: true, scope: "daily", file: target, preview: preview(result.state?.daily.text ?? ""),
+      mocked: Boolean(req.mock), skipped: result.skipped, has_more: result.hasMore,
+      revision: result.state?.revision, session_memory: result.state?.summary, note: result.note };
+  } catch (error) {
+    return { ok: false, scope: "daily", file, preview: "", mocked: Boolean(req.mock),
+      note: error instanceof Error ? error.message : String(error) };
   }
-
-  // Append as a timestamped daily-log entry (creates the file with a header).
-  workspace.appendToDaily(summary, now);
-  const written = workspace.readFile(file) ?? summary;
-
-  log.info("daily distillation complete", { file, source: sourceId, mocked: Boolean(req.mock), chars: summary.length });
-  return { ok: true, scope: "daily", file, preview: preview(written), mocked: Boolean(req.mock) };
 }
 
 // -----------------------------------------------------------------------------
@@ -316,16 +331,15 @@ async function distillGlobal(
 export async function distillMemory(
   config: HawkyConfig,
   req: DistillRequest,
-  options?: { workspace?: WorkspaceManager; now?: Date; provider?: LLMProvider },
+  options?: { workspace?: WorkspaceManager; now?: Date; provider?: LLMProvider; session?: SessionInfo },
 ): Promise<DistillResult> {
-  const workspace = options?.workspace ?? new WorkspaceManager();
+  const workspace = options?.workspace ?? new WorkspaceManager(config.workspace_dir);
   const now = options?.now ?? new Date();
   workspace.init();
 
   // Lazy provider: in mock mode the provider is never built, so distillation
   // works offline / without an API key. Tests can inject a stub provider.
-  // Distillation targets Haiku (Anthropic) by default, independent of the user's
-  // default chat provider — see buildDistillProvider.
+  // Select a small memory model for the available provider/key.
   const model = resolveDistillModel(config);
   let cachedProvider: LLMProvider | undefined = options?.provider;
   const engine: DistillEngine = {
@@ -339,7 +353,7 @@ export async function distillMemory(
   if (req.scope === "global") {
     return distillGlobal(engine, workspace, req);
   }
-  return distillDaily(engine, workspace, req, now);
+  return distillDaily(engine, workspace, req, now, config, options?.session);
 }
 
 // -----------------------------------------------------------------------------
@@ -374,7 +388,7 @@ export interface SweepResult {
 /**
  * Distill every SUBSTANTIVE realtime session into the daily logs, then (by
  * default) consolidate into MEMORY.md. "Substantive" = enough messages and
- * transcript length to be worth a Haiku call; short bootstrap stubs are skipped.
+ * transcript length to be worth a model call; short bootstrap stubs are skipped.
  *
  * This is the manual "catch up my memory from history" sweep — the opposite of
  * the one-session-at-a-time RPC. Cost-guarded by maxSessions.
@@ -383,7 +397,7 @@ export async function distillAllSessions(
   config: HawkyConfig,
   options?: SweepOptions,
 ): Promise<SweepResult> {
-  const workspace = options?.workspace ?? new WorkspaceManager();
+  const workspace = options?.workspace ?? new WorkspaceManager(config.workspace_dir);
   const now = options?.now ?? new Date();
   workspace.init();
 

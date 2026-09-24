@@ -2,10 +2,10 @@
 // Memory consolidation scheduler (#653)
 //
 // Periodically consolidates daily memory → global memory (MEMORY.md) via a
-// single Haiku call — but ONLY when daily memory actually changed since the last
+// single model call — but ONLY when daily memory actually changed since the last
 // successful consolidation. This is the "every 6 hours if anything changed"
-// half of the memory automation (the other half is session-end distillation,
-// triggered from iOS).
+// half of memory automation (the other half is incremental session extraction,
+// driven by SessionMemoryScheduler and iOS session-end requests).
 //
 // Change detection: compares the newest mtime across memory/*.md against the
 // mtime persisted after the last successful run (memory/.consolidation-state.json).
@@ -56,7 +56,7 @@ export class MemoryScheduler {
   constructor(opts: MemorySchedulerOptions) {
     this.getConfig = opts.getConfig;
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-    this.workspace = opts.workspace ?? new WorkspaceManager();
+    this.workspace = opts.workspace ?? new WorkspaceManager(opts.getConfig().workspace_dir);
     this.now = opts.now ?? (() => Date.now());
   }
 

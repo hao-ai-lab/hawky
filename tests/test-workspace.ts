@@ -45,6 +45,18 @@ afterEach(() => {
 // init()
 // =============================================================================
 
+test("atomic writes replace a checkpoint and reject paths outside the workspace", () => {
+  const ws = new WorkspaceManager(join(tempDir, "workspace"));
+  ws.init();
+  ws.writeFileAtomic("memory/.sessions/state.json", '{"revision":1}');
+  ws.writeFileAtomic("memory/.sessions/state.json", '{"revision":2}');
+  expect(JSON.parse(ws.readFile("memory/.sessions/state.json")!).revision).toBe(2);
+  expect(() => ws.writeFileAtomic("../outside.json", "bad")).toThrow();
+  const outside = join(tempDir, "outside"); mkdirSync(outside);
+  symlinkSync(outside, join(ws.getWorkspacePath(), "escape"));
+  expect(() => ws.writeFileAtomic("escape/state.json", "bad")).toThrow();
+});
+
 describe("WorkspaceManager.init()", () => {
   test("creates workspace directory if not exists", () => {
     const wsDir = join(tempDir, "workspace");

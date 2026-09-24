@@ -25,7 +25,10 @@ class StubProvider implements LLMProvider {
   constructor(private readonly text: string) {}
   async *stream(request: LLMStreamRequest): AsyncIterable<LLMStreamEvent> {
     this.calls.push(request);
-    yield { type: "text_delta", text: this.text };
+    yield { type: "text_delta", text: this.text && String(request.system).includes('"session_memory"')
+      ? JSON.stringify({ type: "session_memory", summary: this.text, daily_memory: this.text }) : this.text };
+    yield { type: "message_delta", stop_reason: "end_turn", usage: { output_tokens: 20 } };
+    yield { type: "message_stop" };
   }
   async countTokens(): Promise<{ input_tokens: number }> {
     return { input_tokens: 0 };

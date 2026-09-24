@@ -64,8 +64,8 @@ function buildDefaultConfig(configDir: string): HawkyConfig {
         timezone: "local",
       },
       // Memory feature (#653) now owns session→daily distillation and
-      // daily→global consolidation via single Haiku calls (session-end trigger +
-      // 6h scheduler). The heartbeat's agent-loop distillation/consolidation are
+      // daily→global consolidation via single model calls (rolling/session-end
+      // extraction + 6h consolidation). Heartbeat's agent-loop phases are
       // disabled to avoid double-distilling sessions and racing on MEMORY.md.
       consolidation_enabled: false,
       consolidation_frequency_hours: 12,
