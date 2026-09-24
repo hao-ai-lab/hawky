@@ -65,11 +65,14 @@ test("Venus handshake, quiet history, typed prefill, audio and stop follow Servi
   }) as typeof fetch;
   const adapter = new VenusAdapter({ id: "test-venus", model: "realtime-venus-omni", instructions: "You are Hawk.", history: [{ role: "user", text: "Previously turquoise" }], bridge: true, emit: e => events.push(e), tool: async () => ({}) }, { url: "http://fixture" }, http);
   await adapter.start(); expect(requests.some(r => r.url.endsWith("/prefill"))).toBe(false);
+  expect(events.filter(e => e.type === "warning" || e.type === "error")).toEqual([]);
+  expect(events.find(e => e.type === "info")?.message).toContain("type your first message");
   adapter.input({ type: "text", text: "What color?" });
   await new Promise(r => setTimeout(r, 20));
   expect(requests.find(r => r.url.endsWith("/prefill")).body.text_list[0]).toContain("Previously turquoise");
   expect(events.some(e => e.type === "audio")).toBe(true);
   const caption = events.find(e => e.role === "assistant" && e.final); expect(caption.text).toBe("Blue");
+  expect(adapter.diagnostics()).toMatchObject({ provider: "venus", outputSteps: 1, audioChunks: 1, awaitingUser: false });
   await adapter.close(); expect(requests.some(r => r.method === "DELETE")).toBe(true);
 });
 test("first Venus microphone utterance keeps its native answer without a competing backend prefill", async () => {

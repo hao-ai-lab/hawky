@@ -28,6 +28,14 @@ export class VenusAdapter implements StreamAdapter {
   private contextInstalled = false;
   private lastImageInput = 0;
   private consumedInput = 0;
+  private audioPackets = 0;
+  private imagePackets = 0;
+  private outputSteps = 0;
+  private listenSteps = 0;
+  private audioChunks = 0;
+  private delegationRequests = 0;
+  private lastOutputAt?: number;
+  private inputDbfs: number | null = null;
   private prefill?: { id: string; count: number; text: string; fence: number };
   constructor(private o: StreamOptions, private config: VenusConfig, private http = fetch) {}
   private async request(path: string, body?: unknown, method = "POST", closing = false) {
@@ -51,7 +59,7 @@ export class VenusAdapter implements StreamAdapter {
     // ServingPort cannot install quiet context: prefill always resumes a
     // backend turn. Pair it with a typed question, never a voice-start signal
     // (which can otherwise hide the native answer or leave a listening turn).
-    this.o.emit({ type: "warning", message: "Venus voice uses the model host's prompt. Saved Hawk text context is restored with your first typed message; microphone-only reconnects start fresh." });
+    this.o.emit({ type: "info", message: "Venus voice starts with fresh context. To use saved conversation context, type your first message. Venus does not provide a microphone transcript." });
     this.silence = setInterval(() => { if (!this.mic && !this.stopped) { try { this.acceptAudio(Buffer.alloc(3200)); } catch (e) { this.o.emit({ type: "error", message: String(e) }); } } }, 100);
     void this.output().catch(e => { if (!this.stopped) this.o.emit({ type: "error", message: e.message }); });
   }
@@ -69,7 +77,7 @@ export class VenusAdapter implements StreamAdapter {
     const start = Math.max(this.audioTime, Date.now() - duration); const end = this.audioTime = start + duration;
     this.enqueue(async () => { const r = await this.request(`/sessions/${this.o.id}/audio`, { ...this.scope(), event_seq: ++this.seq,
       start_ms: start, end_ms: end, data: all.toString("base64"), format: "pcm_s16le", sample_rate_hz: 16000, channels: 1, sample_width_bytes: 2 });
-      if (r.retry) throw new Error("Venus rejected media input"); });
+      if (r.retry) throw new Error("Venus rejected media input"); this.audioPackets++; });
   }
   input(i: StreamInput) {
     if (this.stopped) return;
@@ -80,6 +88,7 @@ export class VenusAdapter implements StreamAdapter {
       // it is not archived as speech or used to infer a task.
       let energy = 0; for (let n = 0; n < bytes.length; n += 2) energy += (bytes.readInt16LE(n) / 32768) ** 2;
       const voiced = Math.sqrt(energy / (bytes.length / 2)) > 0.02;
+      this.inputDbfs = Math.round(20 * Math.log10(Math.max(1e-8, Math.sqrt(energy / (bytes.length / 2)))));
       if (voiced && !this.interacted) { this.interacted = true; this.contextInstalled = true; }
       this.acceptAudio(bytes);
     }
@@ -87,6 +96,7 @@ export class VenusAdapter implements StreamAdapter {
       const r = await this.request(`/sessions/${this.o.id}/video_frame`, { ...this.scope(), event_seq: ++this.seq, captured_at_ms: i.at, data: i.data, mime_type: "image/jpeg" });
       if (r.retry) throw new Error("Venus rejected image input");
       this.lastImageInput = r.input_seq;
+      this.imagePackets++;
     });
     if (i.type === "text") {
       this.interacted = true;
@@ -131,6 +141,8 @@ export class VenusAdapter implements StreamAdapter {
       }
       const s = await this.request(`/sessions/${this.o.id}/output?incarnation=${this.incarnation}&timeout_s=1`);
       if (s.retry) continue;
+      this.outputSteps++; this.lastOutputAt = Date.now();
+      if (s.text_delta?.includes("<|listen|>")) this.listenSteps++;
       this.consumedInput = Math.max(this.consumedInput, s.input_seq_cutoff ?? 0);
       if (s.generation_id !== this.generation) {
         this.generation = s.generation_id; this.parser = new VenusText(); this.text = "";
@@ -141,6 +153,7 @@ export class VenusAdapter implements StreamAdapter {
       const parsed = this.parser.feed(s.text_delta); this.finished = s.turn_finished === true;
       if (parsed.visible && this.contextInstalled) { this.text += parsed.visible; this.o.emit({ type: "caption", id: this.generation, role: "assistant", text: this.text, final: false }); }
       if (parsed.request && this.o.bridge && this.contextInstalled) {
+        this.delegationRequests++;
         // Natural-language Venus delegation has no execution-mode guarantee.
         // Use the safe serial worker; UI controls still cancel/revise the task.
         void this.o.tool(this.generation, "session_send_message", { message: parsed.request, execution: "serial" })
@@ -148,6 +161,7 @@ export class VenusAdapter implements StreamAdapter {
           .catch(e => this.context(`Delegation failed: ${String(e)}`, true));
       }
       if (s.audio && !parsed.mute && this.contextInstalled) {
+        this.audioChunks++;
         const id = `${this.generation}:${s.audio_chunk_seq}`;
         this.playback.set(id, { generation: this.generation, seq: s.audio_chunk_seq });
         this.o.emit({ type: "audio", id, data: s.audio.data, rate: s.audio.sample_rate_hz });
@@ -163,6 +177,13 @@ export class VenusAdapter implements StreamAdapter {
   }
   private async closeRemote() {
     if (this.incarnation !== undefined) await this.request(`/sessions/${this.o.id}?incarnation=${this.incarnation}&reason=hawk_close`, undefined, "DELETE", true).catch(() => {});
+  }
+  diagnostics() {
+    return { provider: "venus", audioPackets: this.audioPackets, imagePackets: this.imagePackets,
+      outputSteps: this.outputSteps, listenSteps: this.listenSteps, audioChunks: this.audioChunks,
+      delegationRequests: this.delegationRequests, inputDbfs: this.inputDbfs, queuedInputs: this.queued,
+      consumedInput: this.consumedInput, outputGapMs: this.lastOutputAt ? Date.now() - this.lastOutputAt : null,
+      awaitingUser: !this.interacted, playbackPending: this.playback.size, pendingContext: this.pending.length };
   }
   async close() {
     if (this.stopped) return;

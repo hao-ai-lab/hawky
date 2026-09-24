@@ -31,7 +31,7 @@ export class GatewayStreamProvider {
     subscribe: (listener: (event: any) => void) => () => void;
     caption: (event: Extract<StreamEvent, { type: "caption" }>) => void;
     record: (type: string, data: Record<string, unknown>) => void;
-    onError: (message: string) => void; warning: (message: string) => void;
+    onError: (message: string) => void; warning: (message: string) => void; info?: (message: string) => void;
   }) {
     this.media = new PcmMedia({ audio: data => this.input({ type: "audio", data }),
       played: (id, played) => this.input({ type: "playback", id, played }), error: message => this.fail(message) });
@@ -42,6 +42,7 @@ export class GatewayStreamProvider {
       if (e.type === "audio") this.media.play(e.id, e.data, e.rate);
       if (e.type === "interrupt") this.media.interrupt();
       if (e.type === "diagnostic") o.record("provider.diagnostic", e.detail);
+      if (e.type === "info") { o.record("provider.info", { message: e.message }); o.info?.(e.message); }
       if (e.type === "warning") { o.record("provider.warning", { message: e.message }); o.warning(e.message); }
       if (e.type === "error") this.fail(e.message);
     });

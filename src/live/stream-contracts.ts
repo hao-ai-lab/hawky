@@ -12,6 +12,7 @@ export type StreamEvent =
   | { type: "audio"; id: string; data: string; rate: number }
   | { type: "interrupt" }
   | { type: "diagnostic"; detail: Record<string, unknown> }
+  | { type: "info"; message: string }
   | { type: "warning"; message: string }
   | { type: "error"; message: string };
 export interface StreamOptions {

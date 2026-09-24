@@ -494,7 +494,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
             if (caption.role === "assistant") flashSpeaking();
             if (caption.role === "user" && caption.final) void useSessionStore.getState().maybeAutoTitle(sessionKey, caption.text);
           },
-          record: (type, data) => archive.record(type, data), warning: message => push("warning", message),
+          record: (type, data) => archive.record(type, data), warning: message => push("warning", message), info: message => push("system", message),
           onError: message => {
             if (attempt !== attemptRef.current || streamRef.current !== provider) return;
             setError(message); push("warning", message); setPhase("failed"); teardown();

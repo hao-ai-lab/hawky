@@ -31,15 +31,25 @@ let connection: GatewayStreamProvider | undefined;
 afterEach(async () => { await connection?.close(); connection = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); });
 async function fixture(model = "gemini-3.8-live") {
   vi.useFakeTimers(); vi.stubGlobal("AudioContext", Context); vi.stubGlobal("AudioWorkletNode", Capture);
-  const record = vi.fn(), warning = vi.fn(), onError = vi.fn(); let listener!: (event: any) => void;
+  const record = vi.fn(), warning = vi.fn(), onError = vi.fn(), info = vi.fn(); let listener!: (event: any) => void;
   const rpc = vi.fn(async (method: string, _params?: any) => method === "live.stream.heartbeat" ? { diagnostics: { provider: "gemini", input: { audioPackets: 1 } } } : {});
-  connection = new GatewayStreamProvider({ ownerSession: "web:test", rpc, record, warning, onError,
+  connection = new GatewayStreamProvider({ ownerSession: "web:test", rpc, record, warning, onError, info,
     caption() {}, subscribe: fn => { listener = fn; return () => {}; } });
   const track = { enabled: true, muted: false, readyState: "live" };
   await connection.connect({ getAudioTracks: () => [track] } as unknown as MediaStream,
     { model, instructions: "", history: [], runtime: "native", bridge: false }, true, true);
-  return { record, warning, onError, rpc, track, emit: (e: any) => listener({ event: "live.stream.event", payload: { ...e, connectionId: connection!.id } }) };
+  return { record, warning, onError, info, rpc, track, emit: (e: any) => listener({ event: "live.stream.event", payload: { ...e, connectionId: connection!.id } }) };
 }
+it("shows provider limitations as information without reporting a failed connection", async () => {
+  const f = await fixture("realtime-venus-omni");
+  const message = "Venus voice starts with fresh context.";
+  f.emit({ type: "info", message });
+  expect(f.info).toHaveBeenCalledWith(message);
+  expect(f.record).toHaveBeenCalledWith("provider.info", { message });
+  expect(f.warning).not.toHaveBeenCalled(); expect(f.onError).not.toHaveBeenCalled();
+  connection!.text("Hello");
+  expect(f.rpc).toHaveBeenCalledWith("live.stream.input", expect.objectContaining({ input: { type: "text", text: "Hello" } }));
+});
 it("distinguishes silent but flowing audio from a stalled capture, then records recovery", async () => {
   const f = await fixture();
   await vi.advanceTimersByTimeAsync(4900);

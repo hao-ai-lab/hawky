@@ -263,8 +263,8 @@ Saved history and instructions are installed with the first **typed** request.
 The current ServingPort has no quiet context installation: a prefill always starts
 a backend generation. Doing that on the first voice utterance can replace its
 native answer or leave a listening backend turn running. Microphone-only sessions
-therefore use the model host's prompt and start with fresh context; the UI warns
-about this limitation. Do not claim voice-only restoration parity with Gemini.
+therefore use the model host's prompt and start with fresh context; the UI explains
+this limitation. Do not claim voice-only restoration parity with Gemini.
 Backend completions wait for a model turn
 boundary and playback drain. Only a contiguous prefix of actually played audio
 is acknowledged. Stop and gateway disconnect close only this connection's model
@@ -276,6 +276,38 @@ no immediate external barge-in operation, server-selected voice, and no manual
 context deletion. Typed messages and assistant captions are archived; microphone
 speech history cannot be restored unless a separate ASR is added. Model-hosted
 memory is not transferred on reconnect. Native iOS is unchanged.
+
+The context-restoration notice is informational, not a failed connection.
+Session archives include `provider.health` every five seconds: accepted audio/image
+packet counts, output/listen step counts, reply audio chunks, delegation requests,
+input level, output age, pending context and playback. Flowing input plus increasing
+listen steps means the model is choosing to listen; no output steps means a
+different transport/inference failure. These diagnostics contain no raw media.
+
+### Harness alignment still required
+
+The shared gateway and durable task service remain the right boundary. The current
+Venus adapter is a partial ServingPort integration, not the complete native harness.
+Comparison with [paper sections 4.3–5.4](https://arxiv.org/html/2609.13814) and
+the upstream `harness/bridge/host.py` identifies these remaining changes:
+
+- Maintain foreground listen/speak/turn state independently from background work
+  and playback. A unit boundary is not a semantic turn boundary; the server can
+  also end an idle ServingPort generation while retaining the model's context.
+- Freeze a bounded evidence snapshot when `<delegate>` opens. Commit it once the
+  request closes. Hawk currently obtains recent text at dispatch time and has no
+  corresponding frozen audio/video evidence or played-speech cutoff.
+- Prepare task results for speech and admit each eligible reply privately at a
+  model boundary. Current feedback is JSON task state; typed history installation
+  also uses this channel and is not equivalent to native session restoration.
+- Associate work, feedback, generation and audio chunk identities. Only generation
+  completion plus actual playback acknowledgements establishes delivery. Current
+  acknowledgements have no originating work ID.
+
+Acceptance must cover split requests, later input arriving before request closure,
+duplicate/stale results, continuous perception during work, interruption during
+delivery, and reconnect. Fixture protocol checks alone do not establish these
+behaviors or prove that the checkpoint will choose to answer a short greeting.
 
 Fixtures: `bun test ./tests/test-venus-live.ts` and
 `services/venus/.venv/bin/python -m unittest discover -s services/venus -v`.
