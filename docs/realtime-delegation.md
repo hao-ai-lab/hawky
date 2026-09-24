@@ -1,5 +1,7 @@
 # Realtime delegation: implementation and test checklist
 
+For remaining work and the order after this batch, see [the realtime roadmap](realtime-roadmap.md).
+
 Use the web-ios Live client. Start with Backend runtime = Hawk provider. The gateway and browser must both be running this branch. Allow about 15 minutes for the voice checks, plus 5 minutes per optional CLI runtime. Replace `<repo>` below with the absolute checkout path on the gateway host.
 
 ## Manual acceptance: five passes

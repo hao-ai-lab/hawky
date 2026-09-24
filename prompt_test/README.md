@@ -3,6 +3,11 @@
 Keep repeatable prompts and expected behavior here. Start with this small set;
 memory rewriting, compression, and mid-conversation memory refresh are deferred.
 
+See [the realtime roadmap](../docs/realtime-roadmap.md) for the ordered batches.
+Basic prompt correctness is the next testing focus. New proactive behavior,
+meeting-reminder policy, and the reminder/tracking list belong to the last app
+batch; their documented scenarios are not yet working-feature claims.
+
 ## Automated checks
 
 Run from the repository root:
