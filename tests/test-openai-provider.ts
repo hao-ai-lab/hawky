@@ -44,6 +44,21 @@ async function* fakeStream(chunks: any[]): AsyncGenerator<any> {
   }
 }
 
+test("uses the supported output-token parameter for GPT-5 models and preserves compatible endpoints", async () => {
+  const provider = new OpenAIProvider("test-key");
+  const spy = spyOn((provider as any).client.chat.completions, "create")
+    .mockImplementation(async () => fakeStream([]));
+  try {
+    for (const model of ["gpt-5.4-mini", "o3", "gpt-4.1", "local-model"]) {
+      for await (const _ of provider.stream(makeRequest({ model }))) { /* drain */ }
+      const params = spy.mock.calls.at(-1)![0] as any;
+      const modern = model === "gpt-5.4-mini" || model === "o3";
+      expect(params[modern ? "max_completion_tokens" : "max_tokens"]).toBe(1024);
+      expect(params[modern ? "max_tokens" : "max_completion_tokens"]).toBeUndefined();
+    }
+  } finally { spy.mockRestore(); }
+});
+
 // =============================================================================
 // _classifyError
 // =============================================================================
