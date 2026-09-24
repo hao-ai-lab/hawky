@@ -504,7 +504,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         setPhase("restoring");
         await provider.connect(media, { model: settings.model, instructions, history: priorTurns,
           voice: settings.geminiVoice, runtime: settings.backendRuntime, bridge: settings.backendBridge,
-          ...(loadGeminiKey() ? { gemini_api_key: loadGeminiKey() } : {}),
+          ...(settings.model.startsWith("gemini-") && loadGeminiKey() ? { gemini_api_key: loadGeminiKey() } : {}),
         }, micOn, speakerOn);
         if (attempt !== attemptRef.current || streamRef.current !== provider) return;
         readyRef.current = true; startingRef.current = false;

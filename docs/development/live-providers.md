@@ -1,7 +1,7 @@
 # Live providers: first integration batch
 
 Hawk keeps one application conversation across different voice connections. Select
-`gpt-live-1` or an OpenAI Realtime model in Live settings. While connected, use
+an OpenAI Realtime, GPT-Live, Gemini Live, Venus or JoyAI model in Live settings. While connected, use
 **Switch to …** to close the old connection and start the selected model in the
 same conversation. Switching is a brief reconnect, not transfer of hidden model
 state. Saved session memory plus recent text are restored; task IDs remain stable.
@@ -216,3 +216,79 @@ memory is not transferred on reconnect. Native iOS is unchanged.
 Fixtures: `bun test ./tests/test-venus-live.ts` and
 `services/venus/.venv/bin/python -m unittest discover -s services/venus -v`.
 Source protocol: https://github.com/inclusionAI/Realtime-Venus/tree/main/demos/model
+
+## Self-hosted JoyAI-VL-Interaction
+
+Select `joyai-vl-interaction`. This is the upstream **stateful webinfer adapter**,
+not a direct vLLM port: JPEGs and text go to `/v1/chat/completions`, with a unique
+`x-streaming-session` per connection. Requests are regular JSON, not SSE. The
+gateway serializes inference, coalesces pending images to the newest frame and
+limits cadence to one request per second. A fresh user cue is required before
+camera frames trigger any inference. Stop resets only that upstream connection.
+
+Private gateway `config.json` example (merge into the existing config):
+
+```json
+{
+  "live_providers": {
+    "joyai": {
+      "url": "http://127.0.0.1:8070",
+      "model": "jdopensource/JoyAI-VL-Interaction",
+      "asr_url": "http://127.0.0.1:8993/v1/audio/transcriptions",
+      "asr_model": "Qwen/Qwen3-ASR-1.7B",
+      "tts_url": "ws://127.0.0.1:8992/ws/tts",
+      "tts_voice": "vivian"
+    }
+  }
+}
+```
+
+Use the model name served by your deployment (some name it
+`JoyAI-VL-Interaction`). `HAWKY_JOYAI_URL`, `HAWKY_JOYAI_ASR_URL` and
+`HAWKY_JOYAI_TTS_URL` override these endpoints. `api_key` and `asr_api_key` are
+optional, independent bearer keys. Remote services should be reached through an
+authenticated tunnel or TLS. The optional TTS endpoint is the upstream Joy
+adapter protocol, not a generic OpenAI speech endpoint.
+
+JoyAI itself accepts **no audio**. With ASR configured, a small RMS endpointer
+collects 16 kHz PCM, ends a cue after 600 ms silence (maximum 12 seconds), sends a
+WAV to ASR and injects recognized words alongside the current image. Without ASR,
+use typed cues; the UI reports that microphone audio is unused. This is utterance
+cueing, not token-by-token streaming recognition. Without TTS, captions continue
+and the UI explicitly reports text-only replies. No implicit paid OpenAI fallback.
+
+The adapter parses `</silence>`, `</response>` and both upstream delegation marker
+variants. It dispatches through Hawk's existing task service with serial execution;
+natural-language markers do not carry native parallel/follow-up fields. Repeated
+frame responses cannot repeat an identical delegation for the same user turn.
+Fresh speech interrupts TTS and prevents an older inference from speaking or
+starting a stale task. Backend notifications wait for inference and playback to
+drain. Task completion and audio playback remain distinct.
+
+Joy's own visual summaries remain inside its model-hosted connection. Diagnostic
+events retain timing and summary counts, not the full private visual descriptions.
+Hawk restores its saved text/session memory on reconnect; transferring Joy visual
+memory into Hawk's durable archive is deferred. Local RMS endpointing and optional
+ASR/TTS add latency and need microphone testing before claiming voice quality.
+
+Fixtures: `bun test ./tests/test-joyai-live.ts`. Shared browser fixtures:
+`NODE_OPTIONS=--no-experimental-webstorage bun run --cwd web-ios test -- tests/gateway-stream.test.tsx`.
+Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interaction/tree/main/services/webinfer),
+[ASR](https://github.com/jd-opensource/JoyAI-VL-Interaction/tree/main/services/asr),
+[TTS](https://github.com/jd-opensource/JoyAI-VL-Interaction/tree/main/services/tts).
+
+## Checks for the new providers (about 10 minutes per running provider)
+
+1. Select the model, start with Mic off and type a short question. Check captions
+   and speaker mute; reconnect should stay silent until fresh input.
+2. Enable Camera and ask about an object, then change the scene. Gemini/Venus use
+   native media; Joy uses sampled images and the active text cue. Camera-off must
+   not be described as a current view.
+3. Ask for a backend directory listing. Expect an actual task card before any
+   claim of completion. Inspect the backend runtime and result, then cancel a
+   longer task explicitly.
+4. Interrupt a spoken answer and change the request. Gemini and Joy should stop
+   old playback; Venus currently relies on the model's native listening behavior.
+5. Switch between providers within the same conversation. Recent text, session
+   memory and task IDs survive; provider-specific hidden state and raw images do
+   not. Stop must release microphone/camera and the upstream connection.

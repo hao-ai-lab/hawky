@@ -21,12 +21,13 @@ beforeEach(() => {
   useSocketStore.setState({ status: "connected", rpc, eventListeners: new Set() });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-it("connects Gemini without an OpenAI secret or RTC connection and restores history", async () => {
+it.each(["gemini-3.8-live", "realtime-venus-omni", "joyai-vl-interaction"])("connects %s without an OpenAI secret or RTC and restores history", async model => {
+  useLiveSettings.setState({ model });
   const h = renderHook(() => useRealtime({ sessionKey: "web:gemini" }));
   await act(async () => { await h.result.current.start(); });
   expect(h.result.current.phase).toBe("connected");
   const p = rpc.mock.calls.find(c => c[0] === "live.stream.create")![1] as any;
-  expect(p.model).toBe("gemini-3.8-live"); expect(p.history[0].text).toContain("turquoise");
+  expect(p.model).toBe(model); expect(p.history[0].text).toContain("turquoise");
   expect(rpc.mock.calls.some(c => c[0] === "live.openaiClientSecret")).toBe(false);
   await act(async () => { h.result.current.sendText("Hello"); });
   expect(rpc).toHaveBeenCalledWith("live.stream.input", { id: p.id, ownerSession: "web:gemini", input: { type: "text", text: "Hello" } });
@@ -37,6 +38,14 @@ it("connects Gemini without an OpenAI secret or RTC connection and restores hist
   expect(rpc.mock.calls.some(c => c[0] === "session.appendMessages")).toBe(false);
   await act(async () => { await h.result.current.stop(); });
   expect(rpc).toHaveBeenCalledWith("live.stream.close", { id: p.id, ownerSession: "web:gemini" });
+});
+it.each(["realtime-venus-omni", "joyai-vl-interaction"])("%s keeps camera and typed input without exposing unrelated API settings", async model => {
+  useLiveSettings.setState({ model });
+  await act(async () => { render(<LiveSettingsPanel />); });
+  expect(screen.queryByLabelText("Gemini API key")).toBeNull();
+  expect(screen.queryByLabelText("Voice")).toBeNull();
+  expect(screen.getByLabelText("Camera input")).toBeInTheDocument();
+  expect(screen.queryByLabelText("VAD threshold")).toBeNull();
 });
 it("late startup after Stop closes the provider and cannot reactivate media", async () => {
   let resolve!: (value: any) => void;

@@ -10,6 +10,7 @@ export interface LiveCapabilities {
   turnDetection: "configurable" | "continuous";
 }
 export function liveCapabilities(model: string): LiveCapabilities {
+  if (model === "joyai-vl-interaction") return { provider: "joyai", camera: true, behaviorModes: false, manualCompaction: false, textInput: "native", turnDetection: "continuous" };
   if (model === "realtime-venus-omni") return { provider: "venus", camera: true, behaviorModes: false, manualCompaction: false, textInput: "native", turnDetection: "continuous" };
   if (model.startsWith("gemini-")) return { provider: "gemini-live", camera: true, behaviorModes: false, manualCompaction: false, textInput: "native", turnDetection: "continuous" };
   return model === "gpt-live-1"
