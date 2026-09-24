@@ -1,10 +1,13 @@
 # Hawk realtime scenarios
 
-Keep repeatable prompts and expected behavior here. Start with this small set;
-memory rewriting, compression, and mid-conversation memory refresh are deferred.
+Keep repeatable prompts and expected behavior here. The checks below describe
+the existing implementation; realtime summarization/compaction is now prioritized
+in the roadmap but not yet implemented by these scenarios. Global/daily memory
+rewriting and mid-conversation durable-memory refresh remain deferred.
 
 See [the realtime roadmap](../docs/realtime-roadmap.md) for the ordered batches.
-Basic prompt correctness is the next testing focus. New proactive behavior,
+Compaction, context recovery, and title generation precede the broader prompt
+test expansion; capture a small baseline first. New proactive behavior,
 meeting-reminder policy, and the reminder/tracking list belong to the last app
 batch; their documented scenarios are not yet working-feature claims.
 
