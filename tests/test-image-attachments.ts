@@ -24,6 +24,7 @@ import { MAX_SINGLE_IMAGE_BASE64 } from "../src/agent/image-sanitize.js";
 function makeMockServer() {
   const methods: Record<string, Function> = {};
   return {
+    registerConnectionCleanup() {},
     registerMethod(name: string, handler: Function) {
       methods[name] = handler;
     },

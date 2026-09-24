@@ -23,6 +23,7 @@ type BroadcastCall = { sessionKey: string; event: string; payload: any; excludeC
 function makeMockServer(broadcasts: BroadcastCall[]) {
   const methods: Record<string, Function> = {};
   const srv: any = {
+    registerConnectionCleanup() {},
     registerMethod(name: string, handler: Function) {
       methods[name] = handler;
     },

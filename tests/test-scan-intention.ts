@@ -763,6 +763,7 @@ describe("intention.scan RPC handler", () => {
   function makeRpcServer(store: InMemoryIntentionStore, svc: LatentService) {
     const methods: Record<string, Function> = {};
     const srv: any = {
+      registerConnectionCleanup() {},
       registerMethod(name: string, handler: Function) { methods[name] = handler; },
       call(name: string, conn: any, params?: any) { return methods[name](conn, params, srv); },
       broadcast() {},

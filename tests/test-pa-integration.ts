@@ -113,7 +113,7 @@ describe("System prompt with workspace", () => {
     expect(prompt).toContain(`Workspace: ${wsDir}`);
   });
 
-  test("includes all bootstrap files in Project Context", () => {
+  test("includes persona and memory files without installation instructions", () => {
     const wsDir = join(tempDir, "workspace");
     const ws = new WorkspaceManager(wsDir);
     ws.init();
@@ -129,10 +129,10 @@ describe("System prompt with workspace", () => {
     expect(prompt).toContain("## USER.md");
     expect(prompt).toContain("## IDENTITY.md");
     expect(prompt).toContain("## MEMORY.md");
-    expect(prompt).toContain("## BOOTSTRAP.md");
+    expect(prompt).not.toContain("## BOOTSTRAP.md");
   });
 
-  test("BOOTSTRAP.md content appears in prompt on first run", () => {
+  test("BOOTSTRAP.md stays on disk but is excluded from the first conversation", () => {
     const wsDir = join(tempDir, "workspace");
     const ws = new WorkspaceManager(wsDir);
     ws.init();
@@ -142,8 +142,9 @@ describe("System prompt with workspace", () => {
       model: "test",
       workspace_dir: wsDir,
     });
-    expect(prompt).toContain("Hello, World");
-    expect(prompt).toContain("Who am I");
+    expect(ws.exists("BOOTSTRAP.md")).toBe(true);
+    expect(prompt).not.toContain("Hello, World");
+    expect(prompt).not.toContain("Who am I");
   });
 
   test("BOOTSTRAP.md absent from prompt after deletion", () => {
@@ -218,7 +219,7 @@ describe("Memory tools with workspace", () => {
 
     const result = await memoryGet({ path: "SOUL.md" });
     const parsed = JSON.parse(result.content);
-    expect(parsed.text).toContain("genuinely helpful");
+    expect(parsed.text).toBe(ws.readFile("SOUL.md"));
   });
 
   test("memory_get reads daily log after agent writes it", async () => {
@@ -279,7 +280,7 @@ describe("Memory tools with workspace", () => {
 // =============================================================================
 
 describe("Onboarding flow simulation", () => {
-  test("BOOTSTRAP.md triggers → agent updates files → deletes BOOTSTRAP", () => {
+  test("persona updates persist independently of the unused installation file", () => {
     const wsDir = join(tempDir, "workspace");
     const ws = new WorkspaceManager(wsDir);
     ws.init();
@@ -288,7 +289,7 @@ describe("Onboarding flow simulation", () => {
     // 1. Verify BOOTSTRAP.md is present
     expect(ws.exists("BOOTSTRAP.md")).toBe(true);
     const prompt1 = buildSystemPrompt({ working_directory: tempDir, model: "test", workspace_dir: wsDir });
-    expect(prompt1).toContain("Hello, World");
+    expect(prompt1).not.toContain("Hello, World");
 
     // 2. Simulate agent updating IDENTITY.md (as it would via edit_file)
     ws.writeFile("IDENTITY.md", [
