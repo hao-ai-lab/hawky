@@ -55,11 +55,11 @@ async function serialize<T>(key: string, action: () => Promise<T>): Promise<T> {
   finally { if (locks.get(key) === next) locks.delete(key); }
 }
 
-function matchesSource(state: SessionMemory, source: Buffer): boolean {
+export function matchesSource(state: SessionMemory, source: Buffer): boolean {
   return state.coveredBytes <= source.length && hash(source.subarray(0, state.coveredBytes)) === state.sourceHash;
 }
 
-function messageText(entry: any): string {
+export function messageText(entry: any): string {
   const m = entry?.message;
   if (entry?.type !== "message" || !["user", "assistant"].includes(m?.role) || !Array.isArray(m.content)) return "";
   return m.content.filter((b: any) => b?.type === "text" && !b.internal_only && typeof b.text === "string")
@@ -81,6 +81,7 @@ export function readMemoryChunk(source: Buffer, cursor = { byte: 0, text: 0 }, n
   let byte = cursor.byte, textOffset = cursor.text, coveredBytes = byte, count = 0, chars = 0;
   let date = "";
   const parts: string[] = [];
+  const messages: Array<{ role: "user" | "assistant"; text: string }> = [];
   while (byte < source.length) {
     const end = source.indexOf(10, byte);
     if (end < 0) break;
@@ -103,11 +104,12 @@ export function readMemoryChunk(source: Buffer, cursor = { byte: 0, text: 0 }, n
     if (length <= 0) break;
     // Use the same calendar/zone as the daily filename; UTC can be the next day.
     parts.push(`[${entry.message.role}${textOffset ? " (continued)" : ""} at ${localTimestamp(timestamp)}] ${text.slice(textOffset, textOffset + length)}`);
+    messages.push({ role: entry.message.role, text: text.slice(textOffset, textOffset + length) });
     chars += length; count++; coveredBytes = end + 1;
     if (textOffset + length < text.length) { textOffset += length; break; }
     byte = end + 1; textOffset = 0;
   }
-  return { text: parts.join("\n"), count, date: date || formatDate(now),
+  return { text: parts.join("\n"), messages, count, date: date || formatDate(now),
     cursor: { byte, text: textOffset }, coveredBytes,
     hasMore: textOffset > 0 || source.indexOf(10, byte) >= 0 };
 }

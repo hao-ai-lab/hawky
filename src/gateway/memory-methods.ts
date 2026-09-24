@@ -14,6 +14,7 @@
 //
 // `memory.distill` makes at most one model call per bounded transcript chunk.
 // `memory.session` reads the current rolling checkpoint without a model call.
+// `memory.resume` validates its source and returns summary plus uncovered turns.
 // Failures are returned as { ok: false, note }; extraction retries keep progress.
 // =============================================================================
 
@@ -29,6 +30,7 @@ import {
   findMemorySession,
 } from "../memory/distill.js";
 import { readSessionMemory } from "../memory/session-memory.js";
+import { sessionResumeContext } from "../memory/session-resume.js";
 import { WorkspaceManager } from "../storage/workspace.js";
 import { createSubsystemLogger } from "../logging/index.js";
 
@@ -44,7 +46,7 @@ export interface MemoryMethodsOptions {
 }
 
 /**
- * Register memory.snapshot, memory.session, and memory.distill.
+ * Register memory.snapshot, memory.session, memory.resume, and memory.distill.
  *
  * @param getConfig - Lazily resolves the current gateway config so distillation
  *   uses the live provider/key (config can be re-set after /setup).
@@ -54,6 +56,14 @@ export function registerMemoryMethods(
   getConfig: () => HawkyConfig,
   options?: MemoryMethodsOptions,
 ): void {
+  server.registerMethod("memory.resume", async (_conn, params) => {
+    const p = params as { session_key?: unknown } | undefined;
+    if (typeof p?.session_key !== "string" || !p.session_key.trim())
+      throw new MethodError("INVALID_REQUEST", "session_key is required");
+    const session = findMemorySession(p.session_key);
+    if (!session) return { mode: "history", reason: "missing" };
+    return sessionResumeContext(new WorkspaceManager(getConfig().workspace_dir), session);
+  });
   server.registerMethod("memory.session", (_conn, params) => {
     const p = params as { session_key?: unknown } | undefined;
     if (typeof p?.session_key !== "string" || !p.session_key.trim())

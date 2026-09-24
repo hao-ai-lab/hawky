@@ -3,7 +3,8 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager } from "../src/storage/workspace.js";
-import { resetSessionsDir, setSessionsDir } from "../src/storage/session.js";
+import { listSessions, resetSessionsDir, setSessionsDir } from "../src/storage/session.js";
+import { sessionResumeContext } from "../src/memory/session-resume.js";
 import { distillMemory } from "../src/memory/distill.js";
 import { readMemoryChunk, readSessionMemory, sessionMemoryPath } from "../src/memory/session-memory.js";
 import { SessionMemoryScheduler } from "../src/memory/session-memory-scheduler.js";
@@ -210,4 +211,40 @@ test("scheduler waits for active small batches, observes disable switch, and bou
   const idle = new SessionMemoryScheduler({ getConfig: () => config, workspace, provider: p, now: () => Date.now() + 120_000 });
   expect((await idle.tick()).updated).toBe(2); expect(p.calls).toHaveLength(2);
   expect((await idle.tick()).updated).toBe(2); // no starvation behind unchanged first sessions
+});
+
+test("resume joins a validated summary to every uncovered turn, including the next day", async () => {
+  const path = seed(); const p = new Provider(); await run(p);
+  appendFileSync(path, line("Actually four.") + line("Bring the spreadsheet.", new Date(2026, 8, 24, 9)));
+  const packet = await sessionResumeContext(workspace, listSessions()[0]!);
+  expect(packet.mode).toBe("summary");
+  expect(packet.summary).toContain("Meeting at 3");
+  expect(packet.messages).toEqual([{ role: "user", text: "Actually four." }, { role: "user", text: "Bring the spreadsheet." }]);
+  expect(p.calls).toHaveLength(1); // no model call or checkpoint advance on reconnect
+  expect(readSessionMemory(workspace, "web/meeting")!.revision).toBe(1);
+});
+
+test("resume uses a committed checkpoint while the next summary is still generating", async () => {
+  const path = seed(); const p = new Provider(); await run(p);
+  appendFileSync(path, line("Actually four."));
+  let release!: (value: string) => void;
+  let started!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  p.output = () => new Promise(resolve => { release = resolve; started(); });
+  const updating = run(p); await waiting;
+  const before = await sessionResumeContext(workspace, listSessions()[0]!);
+  expect(before.revision).toBe(1); expect(before.messages?.[0]?.text).toBe("Actually four.");
+  release(record("- Meeting at four.")); await updating;
+  const after = await sessionResumeContext(workspace, listSessions()[0]!);
+  expect(after.revision).toBe(2); expect(after.messages).toEqual([]);
+});
+
+test("resume rejects stale checkpoints, incomplete writes and oversized tails without silently slicing", async () => {
+  const path = seed(); const p = new Provider(); await run(p);
+  appendFileSync(path, line("x".repeat(25_000)));
+  expect((await sessionResumeContext(workspace, listSessions()[0]!)).mode).toBe("needs_update");
+  writeFileSync(path, line("Rewritten conversation."));
+  expect((await sessionResumeContext(workspace, listSessions()[0]!)).mode).toBe("history");
+  await run(p); appendFileSync(path, '{"type":"message"');
+  expect((await sessionResumeContext(workspace, listSessions()[0]!)).mode).toBe("retry");
 });

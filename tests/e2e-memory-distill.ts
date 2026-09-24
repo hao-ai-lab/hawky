@@ -246,6 +246,11 @@ describe("memory-distill-pipeline", () => {
       expect(memory.ok).toBe(true);
       expect((memory.payload as any).memory.summary).toContain("coffee black");
       expect((memory.payload as any).memory.revision).toBe(1);
+      const resume = await sendRequest(ws, "memory.resume", { session_key: "realtime:live-real" });
+      expect(resume.ok).toBe(true);
+      expect((resume.payload as any).mode).toBe("summary");
+      expect((resume.payload as any).summary).toContain("coffee black");
+      expect((resume.payload as any).messages).toEqual([]);
       const repeat = (await sendRequest(ws, "memory.distill", { scope: "daily", session_key: "realtime/live-real" })).payload as any;
       expect(repeat.skipped).toBe(true);
       expect(stubProvider.calls).toHaveLength(1);
