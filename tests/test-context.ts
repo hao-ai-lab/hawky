@@ -15,7 +15,7 @@ import {
 } from "../src/agent/context.js";
 import { WorkspaceManager } from "../src/storage/workspace.js";
 import type { ChatMessage } from "../src/agent/types.js";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -255,12 +255,12 @@ describe("buildSystemPrompt — bootstrap injection", () => {
       model: "test",
       workspace_dir: wsDir,
     });
-    // SOUL.md template content
-    expect(prompt).toContain("genuinely helpful");
+    // Compare with the installed character files, not stale template wording.
+    expect(prompt).toContain(readFileSync(join(wsDir, "SOUL.md"), "utf8").trim());
     // AGENTS.md template content
     expect(prompt).toContain("Session Startup");
     // IDENTITY.md template content
-    expect(prompt).toContain("Creature:");
+    expect(prompt).toContain(readFileSync(join(wsDir, "IDENTITY.md"), "utf8").trim());
   });
 
   test("no Project Context when workspace not initialized", () => {
@@ -422,6 +422,21 @@ describe("buildSystemPrompt — structure", () => {
 // =============================================================================
 
 describe("formatBootstrapSection", () => {
+  test("does not inject first-run onboarding into backend work", () => {
+    const wsDir = makeWorkspace();
+    const ws = new WorkspaceManager(wsDir);
+    ws.writeFile("BOOTSTRAP.md", "UNIQUE_ONBOARDING_INTERVIEW");
+    const section = formatBootstrapSection(wsDir)!;
+    expect(section).not.toContain("UNIQUE_ONBOARDING_INTERVIEW");
+    expect(section).not.toContain("HIGHEST PRIORITY");
+    expect(section).toContain("## SOUL.md");
+    expect(ws.exists("BOOTSTRAP.md")).toBe(true);
+    ws.writeFile("AGENTS.md", "## First Run\n\nIf `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it (use its full workspace path). You won't need it again.\n\n## Custom behavior\nRetain this user instruction.");
+    const legacy = formatBootstrapSection(wsDir)!;
+    expect(legacy).not.toContain("birth certificate");
+    expect(legacy).toContain("Retain this user instruction.");
+  });
+
   test("returns null when workspace not initialized", () => {
     const wsDir = join(tempDir, "no-workspace");
     expect(formatBootstrapSection(wsDir)).toBeNull();
@@ -440,7 +455,7 @@ describe("formatBootstrapSection", () => {
     const section = formatBootstrapSection(wsDir)!;
     // SOUL.md content should follow ## SOUL.md header
     const soulHeader = section.indexOf("## SOUL.md");
-    const soulContent = section.indexOf("genuinely helpful");
+    const soulContent = section.indexOf(readFileSync(join(wsDir, "SOUL.md"), "utf8").trim());
     expect(soulHeader).toBeLessThan(soulContent);
   });
 

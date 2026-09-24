@@ -87,7 +87,7 @@ describe("Live transcript — assistant audio transcript (no duplicates)", () =>
     ]);
   });
 
-  it("persists an assistant turn only ONCE even when text.done AND audio_transcript.done both fire", () => {
+  it("persists an assistant turn only ONCE even when text.done AND audio_transcript.done both fire", async () => {
     // Capture session.appendMessages payloads.
     const appended: any[] = [];
     useSocketStore.setState({
@@ -112,7 +112,7 @@ describe("Live transcript — assistant audio transcript (no duplicates)", () =>
       { type: "response.output_text.done", text: "Hi there." },
       { type: "response.done", response: { output: [{ content: [{ transcript: "Hi there." }] }] } },
     ]);
-    act(() => { vi.runAllTimers(); }); // flush the debounced persist
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); }); // flush persistence without exhausting the recurring task poll
 
     const assistantPersists = appended.filter((m) => m.role === "assistant");
     expect(assistantPersists).toHaveLength(1);

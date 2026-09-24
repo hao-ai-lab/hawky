@@ -29,6 +29,7 @@ import { setCronServiceRef } from "../src/tools/cron.js";
 function makeMockServer() {
   const methods: Record<string, Function> = {};
   return {
+    registerConnectionCleanup() {},
     registerMethod(name: string, handler: Function) {
       methods[name] = handler;
     },

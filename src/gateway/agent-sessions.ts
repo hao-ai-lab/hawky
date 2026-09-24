@@ -376,7 +376,7 @@ export class AgentSessionManager {
       });
     } else {
       // New session — initialize the JSONL file
-      sessionManager.initSession(this.config.model, cwd);
+      sessionManager.initSession(resolvedRuntime === "native" ? this.config.model : `${resolvedRuntime}: CLI default`, cwd);
       log.info("session created", { sessionKey, runtimeKind: resolvedRuntime });
     }
 

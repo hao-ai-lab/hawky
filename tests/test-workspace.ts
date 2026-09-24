@@ -45,6 +45,18 @@ afterEach(() => {
 // init()
 // =============================================================================
 
+test("atomic writes replace a checkpoint and reject paths outside the workspace", () => {
+  const ws = new WorkspaceManager(join(tempDir, "workspace"));
+  ws.init();
+  ws.writeFileAtomic("memory/.sessions/state.json", '{"revision":1}');
+  ws.writeFileAtomic("memory/.sessions/state.json", '{"revision":2}');
+  expect(JSON.parse(ws.readFile("memory/.sessions/state.json")!).revision).toBe(2);
+  expect(() => ws.writeFileAtomic("../outside.json", "bad")).toThrow();
+  const outside = join(tempDir, "outside"); mkdirSync(outside);
+  symlinkSync(outside, join(ws.getWorkspacePath(), "escape"));
+  expect(() => ws.writeFileAtomic("escape/state.json", "bad")).toThrow();
+});
+
 describe("WorkspaceManager.init()", () => {
   test("creates workspace directory if not exists", () => {
     const wsDir = join(tempDir, "workspace");
@@ -576,9 +588,9 @@ describe("Template content", () => {
     ws.init();
 
     const content = ws.readFile("SOUL.md")!;
-    expect(content).toContain("genuinely helpful");
-    expect(content).toContain("Have opinions");
-    expect(content).toContain("Boundaries");
+    expect(content).toContain("Have your own judgment");
+    expect(content).toContain("Silence is comfortable");
+    expect(content).not.toContain("wake up fresh");
   });
 
   test("USER.md contains profile fields", () => {
@@ -592,16 +604,15 @@ describe("Template content", () => {
     expect(content).toContain("Context");
   });
 
-  test("IDENTITY.md contains identity fields", () => {
+  test("IDENTITY.md establishes Hawk without first-contact setup", () => {
     const wsDir = join(tempDir, "workspace");
     const ws = new WorkspaceManager(wsDir);
     ws.init();
 
     const content = ws.readFile("IDENTITY.md")!;
-    expect(content).toContain("Name:");
-    expect(content).toContain("Creature:");
-    expect(content).toContain("Vibe:");
-    expect(content).toContain("Emoji:");
+    expect(content).toContain("Your name is Hawk");
+    expect(content).toContain("Your character is established");
+    expect(content).not.toContain("Fill this in");
   });
 
   test("AGENTS.md contains session startup instructions", () => {

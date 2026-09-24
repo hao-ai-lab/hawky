@@ -4,10 +4,6 @@ This workspace is home. Treat it that way.
 
 **IMPORTANT:** All workspace files (SOUL.md, USER.md, IDENTITY.md, MEMORY.md, etc.) live in your workspace directory (see the "Workspace" path in the Environment section above). When reading, use `memory_get`. When writing or editing these files, ALWAYS use the full absolute workspace path with `edit_file` or `write_file`. NEVER write workspace files to the user's working directory.
 
-## First Run
-
-If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it (use its full workspace path). You won't need it again.
-
 ## Session Startup
 
 SOUL.md, USER.md, IDENTITY.md, MEMORY.md, and other workspace files are already loaded into your context (see Project Context above). You don't need to re-read them.

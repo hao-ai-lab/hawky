@@ -10,6 +10,11 @@
 import { create } from "zustand";
 
 export const REALTIME_MODELS = [
+  "gpt-live-1",
+  "gemini-3.8-live",
+  "realtime-venus-omni",
+  "joyai-vl-interaction",
+  "gemini-3.1-flash-live-preview",
   "gpt-realtime-2",
   "gpt-realtime-mini-2025-12-15",
   "gpt-realtime-mini-2025-10-06",
@@ -40,6 +45,7 @@ export interface LiveSettings {
   // Response
   responseModality: "audio" | "text";
   voice: string;
+  geminiVoice: string;
   noiseReduction: (typeof NOISE_REDUCTION)[number];
   userTranscript: boolean;        // input transcription on
   assistantTranscript: boolean;   // output transcription on
@@ -61,15 +67,18 @@ export interface LiveSettings {
   // Behavioral modes (input section)
   speakOnlyWhenSpokenTo: boolean;
   cocktailParty: boolean;
-  safetyCheck: boolean;           // iPhone-only pipeline (shown, noted)
+  safetyCheck: boolean;           // gateway hazard checks while camera is enabled
   visualDedup: boolean;
-  systemPrompt: string;
   // Inputs
+  microphoneEnabled: boolean;
+  cameraEnabled: boolean;
+  staySilent: boolean;
   visualCadence: (typeof VISUAL_CADENCE)[number];
   customFps: number;              // when cadence=custom
   cameraPosition: (typeof CAMERA_POSITION)[number];
   // Hawk bridge
   backendBridge: boolean;
+  backendRuntime: "native" | "codex" | "claude";
   bridgeRequired: boolean;
   bridgeSessionMode: (typeof BRIDGE_SESSION_MODE)[number];
   bridgeFeedMode: (typeof BRIDGE_FEED_MODE)[number];
@@ -80,6 +89,7 @@ export const DEFAULT_LIVE_SETTINGS: LiveSettings = {
   model: "gpt-realtime-2",
   responseModality: "audio",
   voice: "marin",
+  geminiVoice: "Kore",
   noiseReduction: "far_field",
   userTranscript: true,
   assistantTranscript: true,
@@ -100,14 +110,14 @@ export const DEFAULT_LIVE_SETTINGS: LiveSettings = {
   cocktailParty: false,
   safetyCheck: false,
   visualDedup: false,
-  systemPrompt:
-    "You are Hawk, a concise, friendly realtime assistant. Use the camera and " +
-    "microphone context when relevant, answer briefly, and delegate durable or " +
-    "long-running work to the Hawk backend tool.",
+  microphoneEnabled: true,
+  cameraEnabled: true,
+  staySilent: false,
   visualCadence: "0.2",
   customFps: 1,
   cameraPosition: "front",
   backendBridge: true,
+  backendRuntime: "native",
   bridgeRequired: false,
   bridgeSessionMode: "active_chat",
   bridgeFeedMode: "on_demand",
@@ -119,7 +129,8 @@ const KEY = "hawky-ios-live-settings";
 function load(): LiveSettings {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...DEFAULT_LIVE_SETTINGS, ...JSON.parse(raw) };
+    // Keep only supported settings; old browsers may still have a prompt override.
+    if (raw) return extract({ ...DEFAULT_LIVE_SETTINGS, ...JSON.parse(raw) });
   } catch { /* ignore */ }
   return { ...DEFAULT_LIVE_SETTINGS };
 }

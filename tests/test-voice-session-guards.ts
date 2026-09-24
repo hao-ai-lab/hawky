@@ -34,6 +34,7 @@ function makeMockServer() {
   const methods: Record<string, Function> = {};
   const broadcasts: Array<{ event: string; payload: unknown }> = [];
   const srv: any = {
+    registerConnectionCleanup() {},
     registerMethod(name: string, handler: Function) { methods[name] = handler; },
     call(name: string, conn: any, params: any) {
       return methods[name](conn, params, srv);

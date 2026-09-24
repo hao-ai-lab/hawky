@@ -1,3 +1,4 @@
+import { useLiveSettings } from "../lib/live-settings";
 // =============================================================================
 // Live Screen — transcript-first realtime (web-ios)
 //
@@ -18,6 +19,11 @@ import { memo, useEffect, useRef, useState } from "react";
 import { useRealtime, artifactsFromTranscript, type LivePhase, type TranscriptEntry, type Artifact } from "../lib/useRealtime";
 import { useSocketStore } from "../lib/socket-store";
 import { useSessionStore } from "../lib/session-store";
+import { DelegationBubble } from "../components/DelegationBubble";
+import { LiveSettingsDialog } from "../components/LiveSettingsDialog";
+import { CompactionPanel } from "../components/CompactionPanel";
+import { SessionMemoryPanel } from "../components/SessionMemoryPanel";
+import { compactionBusy } from "../lib/realtime-compaction";
 import { Icon, type IconName } from "../components/Icon";
 import { Logo } from "../components/Logo";
 import { SessionMenu } from "../components/SessionMenu";
@@ -35,6 +41,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   // The Live agent bridges to the active session (chosen via the Hawk pill).
   const activeKey = useSessionStore((s) => s.activeKey);
   const sessions = useSessionStore((s) => s.sessions);
+  const selectedModel = useLiveSettings(s => s.model);
   const realRt = useRealtime({ sessionKey: activeKey });
   // DEV-only presentation preview (?preview=live-connected|live-charts|live-idle):
   // overlay seeded transcript/phase so connected-state layouts can be reviewed
@@ -42,9 +49,9 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const previewMode = previewModeFromLocation();
   const rt = previewMode ? { ...realRt, ...previewOverrides(previewMode) } : realRt;
   const {
-    phase, error, transcript, historyLoading, micOn, cameraOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
-    canStart, videoElRef, audioElRef, start, stop, sendText,
-    toggleMic, toggleCamera, toggleStaySilent, toggleCocktailParty, toggleSafety,
+    capabilities, activeModel, reconnect, phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
+    canStart, resumable, videoElRef, audioElRef, start, stop, sendText, compaction, compactNow, sessionMemory, updateSessionMemory,
+    toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
   } = rt;
 
   // Artifacts = every chart generated this session, chronological, derived from
@@ -62,11 +69,26 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const showPanel = artifacts.length > 0 && panelOpen;
 
   const isConnected = phase === "connected";
-  const showVideo = cameraOn && (phase === "connecting" || isConnected);
+  const showVideo = cameraOn && (phase === "connecting" || phase === "restoring" || isConnected);
 
   // The PiP fullscreen toggle is the only thing that hides the app's nav bar.
   const [pipFull, setPipFull] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [compactionOpen, setCompactionOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memoryActionsOpen, setMemoryActionsOpen] = useState(false);
+  const memoryActionsRef = useRef<HTMLDivElement>(null);
+  const memoryButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!memoryActionsOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!memoryActionsRef.current?.contains(event.target as Node)) setMemoryActionsOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [memoryActionsOpen]);
+  useEffect(() => { setMemoryOpen(false); setCompactionOpen(false); setMemoryActionsOpen(false); }, [activeKey]);
   useEffect(() => onFullscreenChange(pipFull), [pipFull, onFullscreenChange]);
   // On mobile Safari the keyboard overlays bottom-anchored chrome; lift the
   // floating controls to sit just above it when it's open.
@@ -85,7 +107,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
       <audio ref={audioElRef} autoPlay />
 
       {/* Header — the Hawk pill opens the session menu (New / History / Status) */}
-      <header className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3 md:px-6">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3 md:px-6">
         <button onClick={() => setMenuOpen(true)}
           className="pressable flex items-center gap-2 rounded-pill px-2 py-1 hover:bg-white/5" aria-label="Session menu">
           <Logo size={22} textClass="text-[15px]" />
@@ -93,7 +115,55 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           <PhasePill phase={phase} />
           <Icon name="chevronDown" className="h-3.5 w-3.5 text-white/40" />
         </button>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {isConnected && activeModel !== selectedModel && <button onClick={() => void reconnect()}
+            className="rounded-lg border border-accent/40 px-3 py-2 text-xs text-accent">Switch to {selectedModel}</button>}
+          <div ref={memoryActionsRef} className="relative"
+            onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setMemoryActionsOpen(false); }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setMemoryActionsOpen(false);
+                memoryButtonRef.current?.focus();
+              }
+            }}>
+            <button ref={memoryButtonRef} onClick={() => setMemoryActionsOpen(open => !open)}
+              aria-expanded={memoryActionsOpen} aria-controls="live-memory-actions"
+              className="pressable flex items-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs text-white/80 hover:bg-white/10">
+              Memory <Icon name="chevronDown" className="h-3.5 w-3.5" />
+            </button>
+            {memoryActionsOpen && <div id="live-memory-actions" aria-label="Memory actions"
+              className="absolute right-0 top-full z-50 mt-2 w-56 max-w-[calc(100vw-2rem)] rounded-xl border border-white/15 bg-paper p-1 shadow-xl">
+              <button onClick={() => {
+                setMemoryActionsOpen(false);
+                memoryButtonRef.current?.focus();
+                if (isConnected && capabilities.manualCompaction) {
+                  setCompactionOpen(true);
+                  compactNow();
+                } else {
+                  setMemoryOpen(true);
+                  void updateSessionMemory();
+                }
+              }}
+                disabled={isConnected && capabilities.manualCompaction ? compactionBusy(compaction)
+                  : gatewayStatus !== "connected" || historyLoading || sessionMemory.phase === "updating" || !transcript.some(e => e.kind === "user" || e.kind === "assistant")}
+                title={isConnected && capabilities.manualCompaction ? "Summarize older messages and images in this connection" : "Update saved session and daily memory"}
+                className="block w-full rounded-lg px-3 py-2 text-left text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
+                {isConnected && capabilities.manualCompaction
+                  ? (compactionBusy(compaction) ? "Compacting…" : "Compact live context")
+                  : (sessionMemory.phase === "updating" ? "Updating memory…" : "Update session memory")}
+              </button>
+              <button onClick={() => {
+                setMemoryActionsOpen(false);
+                memoryButtonRef.current?.focus();
+                setMemoryOpen(true);
+                setCompactionOpen(compaction.phase !== "idle");
+              }} className="block w-full rounded-lg px-3 py-2 text-left text-xs text-white/80 hover:bg-white/10">Memory details</button>
+            </div>}
+          </div>
+          <button onClick={() => setSettingsOpen(true)} aria-label="Live settings" title="Live settings"
+            className="pressable grid h-11 w-11 place-items-center rounded-full text-white/70 hover:bg-white/10 hover:text-white">
+            <Icon name="settings" className="h-5 w-5" />
+          </button>
           {isConnected && <span className="text-xs text-white/40">{speaking ? "speaking…" : "listening"}</span>}
           {/* Artifacts toggle — appears once a chart exists; shows/hides the panel. */}
           {artifacts.length > 0 && (
@@ -116,6 +186,8 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           )}
         </div>
       </header>
+      {compactionOpen && <CompactionPanel state={compaction} onClose={() => setCompactionOpen(false)} />}
+      {memoryOpen && <SessionMemoryPanel state={sessionMemory} onClose={() => setMemoryOpen(false)} />}
 
       {/* Banners */}
       {(bridgeOffline || (phase === "failed" && error) || gatewayStatus !== "connected") && (
@@ -130,7 +202,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
       <div className="flex min-h-0 flex-1">
         <div className="relative min-h-0 flex-1">
           <OpenArtifactContext.Provider value={setLightbox}>
-            <Transcript entries={transcript} phase={phase} loading={historyLoading} />
+            <Transcript key={activeKey} entries={transcript} phase={phase} loading={historyLoading} />
           </OpenArtifactContext.Provider>
 
           {/* Camera PiP — top-right, small */}
@@ -174,19 +246,15 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
         style={{ bottom: keyboardInset > 0 ? keyboardInset + 8 : "var(--live-controls-bottom)" }}
       >
         <div className="mx-auto w-full max-w-3xl px-3 md:max-w-none md:px-0">
-          {/* Connected → a glass control cluster on mobile; idle → the call
-              button floats on its own (no bar) like a native FAB. Desktop keeps
-              the docked bar in both states. */}
-          <div className={`overflow-hidden border-white/10 md:border-t md:bg-paper/40 ${
-            isConnected
-              ? "max-md:rounded-glass max-md:border max-md:bg-[var(--glass-bg)] max-md:shadow-glass max-md:backdrop-blur-xl"
-              : "max-md:flex max-md:justify-center"
-          }`}>
+          {/* Keep the same controls available before and during a session. */}
+          <div className="overflow-hidden border-white/10 max-md:rounded-glass max-md:border max-md:bg-[var(--glass-bg)] max-md:shadow-glass max-md:backdrop-blur-xl md:border-t md:bg-paper/40">
             <ControlBar
-              phase={phase} canStart={canStart} isConnected={isConnected}
-              micOn={micOn} cameraOn={cameraOn} staySilent={staySilent} cocktailParty={cocktailParty} safetyOn={safetyOn} speaking={speaking}
+              audioOnly={!capabilities.camera}
+              behaviorModes={capabilities.behaviorModes}
+              phase={phase} canStart={canStart} isConnected={isConnected} resumable={resumable}
+              micOn={micOn} cameraOn={cameraOn} speakerOn={speakerOn} staySilent={staySilent} cocktailParty={cocktailParty} safetyOn={safetyOn} speaking={speaking}
               onStart={() => void start()} onStop={stop}
-              onToggleMic={toggleMic} onToggleCamera={toggleCamera} onToggleSilent={toggleStaySilent} onToggleCocktail={toggleCocktailParty} onToggleSafety={toggleSafety}
+              onToggleMic={toggleMic} onToggleCamera={toggleCamera} onToggleSpeaker={toggleSpeaker} onToggleSilent={toggleStaySilent} onToggleCocktail={toggleCocktailParty} onToggleSafety={toggleSafety}
             />
             {isConnected && <Composer onSend={sendText} />}
           </div>
@@ -200,6 +268,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
 
       {/* Hawk session menu (New session / History / Status) */}
       {menuOpen && <SessionMenu phase={phase} onClose={() => setMenuOpen(false)} />}
+      {settingsOpen && <LiveSettingsDialog active={phase === "connected" || phase === "connecting" || phase === "restoring"} onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }
@@ -234,58 +303,76 @@ const Composer = memo(function Composer({ onSend }: { onSend: (text: string) => 
 // Control bar (web style: a centered row of round controls)
 // -----------------------------------------------------------------------------
 function ControlBar(p: {
-  phase: LivePhase; canStart: boolean; isConnected: boolean;
-  micOn: boolean; cameraOn: boolean; staySilent: boolean; cocktailParty: boolean; safetyOn: boolean; speaking: boolean;
+  audioOnly: boolean;
+  behaviorModes: boolean;
+  phase: LivePhase; canStart: boolean; isConnected: boolean; resumable: boolean;
+  micOn: boolean; cameraOn: boolean; speakerOn: boolean; staySilent: boolean; cocktailParty: boolean; safetyOn: boolean; speaking: boolean;
   onStart: () => void; onStop: () => void;
-  onToggleMic: () => void; onToggleCamera: () => void; onToggleSilent: () => void; onToggleCocktail: () => void; onToggleSafety: () => void;
+  onToggleMic: () => void; onToggleCamera: () => void; onToggleSpeaker: () => void; onToggleSilent: () => void; onToggleCocktail: () => void; onToggleSafety: () => void;
 }) {
+  const busy = p.phase === "connecting" || p.phase === "restoring";
   return (
-    <div className="flex flex-wrap items-center justify-center gap-2 px-2.5 py-2.5">
-      {p.isConnected && (
-        <>
-          <Ctrl on={p.micOn} onIcon="mic" offIcon="micOff" label="Mic" onClick={p.onToggleMic} pulse={p.speaking} />
-          <Ctrl on={p.cameraOn} onIcon="video" offIcon="videoOff" label="Camera" onClick={p.onToggleCamera} />
-          <Ctrl on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
-          <Ctrl on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
-          <Ctrl on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
-        </>
-      )}
-      <PrimaryButton phase={p.phase} canStart={p.canStart} onStart={p.onStart} onStop={p.onStop} />
+    <div className="py-2.5">
+      {!p.isConnected && <p className="mb-2 px-3 text-center text-xs text-white/60" aria-live="polite">
+        Mic {p.micOn ? "on" : "off"} · Camera {p.cameraOn ? "on" : "off"} · {p.speakerOn ? "Spoken replies" : p.audioOnly ? "Speaker muted" : "Text replies"}{p.staySilent ? " · Stay silent" : ""}
+      </p>}
+      <div className="flex flex-wrap items-center justify-center gap-1 px-1 sm:gap-2">
+          <Ctrl disabled={busy} on={p.micOn} onIcon="mic" offIcon="micOff" label="Mic" onClick={p.onToggleMic} />
+          <Ctrl disabled={busy || p.audioOnly} on={p.cameraOn} onIcon="video" offIcon="videoOff" label="Camera" onClick={p.onToggleCamera} />
+          <Ctrl disabled={busy} on={p.speakerOn} onIcon="speaker" offIcon="speakerOff" label="Spoken replies" onClick={p.onToggleSpeaker} pulse={p.speaking} />
+          <Ctrl disabled={busy || !p.behaviorModes} on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
+          <Ctrl disabled={busy || !p.behaviorModes} on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
+          <Ctrl disabled={busy || !p.behaviorModes} on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
+      <PrimaryButton phase={p.phase} canStart={p.canStart} resumable={p.resumable} onStart={p.onStart} onStop={p.onStop} />
+      </div>
     </div>
   );
 }
 
-function Ctrl({ on, onIcon, offIcon, label, onClick, pulse, danger }: {
-  on: boolean; onIcon: IconName; offIcon: IconName; label: string; onClick: () => void; pulse?: boolean; danger?: boolean;
+function Ctrl({ on, onIcon, offIcon, label, onClick, pulse, danger, disabled }: {
+  on: boolean; onIcon: IconName; offIcon: IconName; label: string; onClick: () => void; pulse?: boolean; danger?: boolean; disabled?: boolean;
 }) {
   const onCls = danger ? "bg-danger text-white" : "bg-white text-black";
   return (
-    <button onClick={onClick} aria-label={label} aria-pressed={on}
-      className={`pressable relative grid h-11 w-11 place-items-center rounded-full ${on ? onCls : "bg-white/10 text-white hover:bg-white/15"}`}>
+    <button disabled={disabled} onClick={onClick} aria-label={label} aria-pressed={on} title={`${label}: ${on ? "on" : "off"}`}
+      className={`pressable relative grid h-11 w-11 place-items-center rounded-full disabled:opacity-40 ${on ? onCls : "bg-white/10 text-white hover:bg-white/15"}`}>
       <Icon name={on ? onIcon : offIcon} className="h-5 w-5" filled={on} />
       {pulse && <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 animate-ping rounded-full bg-accent" />}
     </button>
   );
 }
 
-function PrimaryButton({ phase, canStart, onStart, onStop }: { phase: LivePhase; canStart: boolean; onStart: () => void; onStop: () => void }) {
+function PrimaryButton({ phase, canStart, resumable, onStart, onStop }: { phase: LivePhase; canStart: boolean; resumable: boolean; onStart: () => void; onStop: () => void }) {
   // End button sits inline with the toggle row when connected → keep it the same
   // 44px footprint as the toggles; the idle call button is larger and prominent.
   if (phase === "connected" || phase === "paused") {
     return <button onClick={onStop} aria-label="End session" className="pressable grid h-11 w-11 place-items-center rounded-full bg-danger text-white shadow-glass"><Icon name="xmark" className="h-5 w-5" /></button>;
   }
-  if (phase === "connecting") {
-    return <div className="grid h-14 w-14 place-items-center rounded-full bg-danger/80 text-white"><span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" /></div>;
+  if (phase === "connecting" || phase === "restoring") {
+    return <button onClick={onStop} aria-label="Cancel session" className="grid h-11 w-11 place-items-center rounded-full bg-danger/80 text-white"><span className="h-6 w-6 animate-spin rounded-full border-2 border-white/40 border-t-white" /></button>;
   }
-  return <button onClick={onStart} disabled={!canStart} aria-label="Start session" className="pressable grid h-14 w-14 place-items-center rounded-full bg-ok text-white shadow-glass disabled:opacity-40"><Icon name="phone" className="h-6 w-6" filled /></button>;
+  return <button onClick={onStart} disabled={!canStart} aria-label={resumable ? "Resume session" : "Start session"} title={resumable ? "Resume session" : "Start session"} className="pressable grid h-11 w-11 place-items-center rounded-full bg-ok text-white shadow-glass disabled:opacity-40"><Icon name="phone" className="h-5 w-5" filled /></button>;
 }
 
 // -----------------------------------------------------------------------------
 // Transcript + bubbles (iOS-matched)
 // -----------------------------------------------------------------------------
-function Transcript({ entries, phase, loading }: { entries: TranscriptEntry[]; phase: LivePhase; loading?: boolean }) {
-  const endRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [entries]);
+export function Transcript({ entries, phase, loading }: { entries: TranscriptEntry[]; phase: LivePhase; loading?: boolean }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const following = useRef(true);
+  const [showJump, setShowJump] = useState(false);
+  useEffect(() => {
+    if (following.current && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [entries]);
+  const hasEntries = entries.length > 0;
+  useEffect(() => {
+    const el = scrollRef.current;
+    const pauseForDetails = (e: Event) => {
+      if (e.target instanceof HTMLDetailsElement && e.target.open) { following.current = false; setShowJump(true); }
+    };
+    el?.addEventListener("toggle", pauseForDetails, true);
+    return () => el?.removeEventListener("toggle", pauseForDetails, true);
+  }, [hasEntries]);
 
   if (loading && entries.length === 0) {
     return <div className="grid h-full place-items-center text-sm text-white/45">Loading conversation…</div>;
@@ -301,23 +388,34 @@ function Transcript({ entries, phase, loading }: { entries: TranscriptEntry[]; p
             <>
               <h2 className="text-xl font-semibold text-white">Talk to Hawky</h2>
               <p className="mt-2 text-sm leading-relaxed text-white/55">
-                Tap the call button to start a live session — the conversation appears here and your camera shows in the corner.
+                Choose your mic, camera, and reply mode below, then start a session. Nothing is captured before you start.
               </p>
             </>
           )}
-          {phase === "connecting" && <p className="text-sm text-white/55">Connecting…</p>}
-          {phase === "failed" && <p className="text-sm text-white/55">Session ended — tap the call button to retry.</p>}
+          {(phase === "connecting" || phase === "restoring") && <p className="text-sm text-white/55">{phase === "restoring" ? "Restoring conversation…" : "Connecting…"}</p>}
+          {phase === "failed" && <p className="text-sm text-white/55">Connection interrupted — tap the call button to resume.</p>}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto px-4 pt-4 pb-48 md:px-6 md:pb-6">
+    <div className="relative h-full">
+    <div ref={scrollRef} aria-label="Conversation" role="region"
+      onScroll={e => {
+        const el = e.currentTarget;
+        following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+        setShowJump(!following.current);
+      }}
+      className="h-full overflow-y-auto px-4 pt-4 pb-48 md:px-6 md:pb-6">
       <div className="mx-auto flex max-w-3xl flex-col gap-3">
         {entries.map((e) => <Bubble key={e.id} entry={e} />)}
-        <div ref={endRef} />
       </div>
+    </div>
+    {showJump && <button onClick={() => {
+      following.current = true; setShowJump(false);
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }} className="absolute bottom-44 left-1/2 min-h-11 -translate-x-1/2 rounded-pill border border-white/20 bg-canvas px-4 text-xs shadow-glass md:bottom-4">Jump to latest</button>}
     </div>
   );
 }
@@ -360,6 +458,8 @@ function Bubble({ entry }: { entry: TranscriptEntry }) {
  *  running = purple (spinner), ok = green (check), error = red (warning). */
 function ToolBubble({ entry }: { entry: TranscriptEntry }) {
   const openArtifact = useContext(OpenArtifactContext);
+  if (entry.delegation) return <DelegationBubble task={entry.delegation} image={entry.imageData}
+    onImageClick={() => entry.imageData && openArtifact?.({ id: entry.id, src: entry.imageData, title: entry.imageTitle || entry.text, at: entry.at })} />;
   const m = /^([a-zA-Z0-9_]+)\s*\((.*)\)$/s.exec(entry.text);
   const name = m ? m[1] : entry.text;
   const args = m ? m[2] : "";
@@ -425,7 +525,7 @@ function Time({ at }: { at: string }) {
 }
 
 function PhasePill({ phase }: { phase: LivePhase }) {
-  const color = phase === "connected" ? "bg-ok" : phase === "connecting" ? "bg-warn animate-pulse" : phase === "failed" ? "bg-danger" : "bg-white/40";
+  const color = phase === "connected" ? "bg-ok" : (phase === "connecting" || phase === "restoring") ? "bg-warn animate-pulse" : phase === "failed" ? "bg-danger" : "bg-white/40";
   return <span className={`h-2 w-2 rounded-full ${color}`} />;
 }
 

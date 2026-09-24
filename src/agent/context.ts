@@ -11,7 +11,7 @@
 //   5. Git Safety — destructive operation warnings
 //   6. Silent Replies & Heartbeats — HEARTBEAT_OK guidance
 //   7. # Project Context — bootstrap files (AGENTS, SOUL, USER, IDENTITY,
-//      MEMORY, TOOLS, HEARTBEAT, BOOTSTRAP) with per-file truncation
+//      MEMORY, TOOLS, HEARTBEAT) with per-file truncation
 //   8. # Per-Repo Instructions — HAWKY.md / CLAUDE.md from project dir
 //
 // Per-turn reminders are injected into user messages (not system prompt).
@@ -228,7 +228,8 @@ export function formatBootstrapSection(
     return null;
   }
 
-  const files = ws.loadBootstrapFiles({ mainSession: mainSession ?? true });
+  // Installation establishes identity; onboarding is not a conversational task.
+  const files = ws.loadBootstrapFiles({ mainSession: mainSession ?? true }).filter(file => file.filename !== "BOOTSTRAP.md");
   if (files.length === 0) return null;
 
   const lines: string[] = [];
@@ -239,15 +240,7 @@ export function formatBootstrapSection(
   lines.push("IMPORTANT: When editing these files, always use their FULL ABSOLUTE PATH (e.g., " +
     `${ws.getWorkspacePath()}/SOUL.md). Do NOT write to the working directory.`);
 
-  // BOOTSTRAP.md — first-run onboarding takes highest priority
-  if (files.some((f) => f.filename === "BOOTSTRAP.md")) {
-    lines.push(
-      "BOOTSTRAP.md is present — this is a first-run session. " +
-      "Follow the instructions in BOOTSTRAP.md as your HIGHEST PRIORITY. " +
-      "Initiate the onboarding conversation before doing anything else. " +
-      "Do not respond as a generic assistant — start the identity discovery flow.",
-    );
-  }
+  lines.push("Identity and installation setup are already complete. Use IDENTITY.md and SOUL.md as configured; do not start a bootstrap or identity-discovery interview.");
 
   // SOUL.md guidance (a proven design pattern)
   if (files.some((f) => f.filename === "SOUL.md")) {
@@ -272,7 +265,10 @@ export function formatBootstrapSection(
   for (const file of files) {
     lines.push(`## ${file.filename}`);
     lines.push("");
-    lines.push(file.content);
+    // Older workspaces retain the original installation instruction in AGENTS.md.
+    // Suppress only that known template paragraph; preserve other user content.
+    lines.push(file.filename === "AGENTS.md" ? file.content.replace(
+      "## First Run\n\nIf `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it (use its full workspace path). You won't need it again.\n\n", "") : file.content);
     lines.push("");
   }
 

@@ -12,6 +12,7 @@ import type {
   ExtensionFrontendToolContribution,
   ExtensionManifest,
 } from "../extensions/types.js";
+import { renderFrontendBootPrompt } from "./frontend-boot-prompt.js";
 import { MethodError } from "./methods.js";
 import type { GatewayServer } from "./server.js";
 
@@ -36,6 +37,7 @@ export interface FrontendBootContextResult {
   sources: string[];
   warnings: string[];
   toolbox: FrontendToolboxManifest;
+  /** Compatibility field for installed clients; realtime never bootstraps. */
   first_contact: FrontendFirstContactState;
 }
 
@@ -73,12 +75,12 @@ export interface FrontendToolboxManifest {
 }
 
 export interface FrontendFirstContactState {
-  active: boolean;
-  reason: "bootstrap_present" | "initialized";
-  marker_file?: string;
+  active: false;
+  reason: "initialized";
 }
 
-const BOOTSTRAP_FILES = ["BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"];
+// Installation/setup owns BOOTSTRAP.md. Live sessions use established context.
+const CONTEXT_FILES = ["SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"];
 
 export const FRONTEND_BOOT_CONTEXT_TOOL: FrontendToolDefinition = {
   type: "function",
@@ -273,72 +275,30 @@ export function buildFrontendBootContext(
 
   const warnings: string[] = [];
   const sources: string[] = [];
-  const sections: string[] = [
-    "# Backend Boot Context",
-    "",
-    "You are joining an existing Hawky-backed realtime session. Use this context silently unless the user asks about it.",
-    "",
-    "## Session",
-    `- Channel: ${channelId}`,
-    `- Backend session: ${sessionKey}`,
-    `- Frontend participant: ${participantId}`,
-    `- Mode: ${mode}`,
-    `- Capabilities: ${capabilities.length > 0 ? capabilities.join(", ") : "unspecified"}`,
-  ];
-
-  if (tools.length > 0) {
-    sections.push("", "## Toolbox");
-    sections.push("The frontend realtime agent has these callable tools. Prefer fast local tools for simple facts and delegate durable work to the backend session bridge.");
-    for (const tool of tools) {
-      sections.push(formatToolForPrompt(tool));
-    }
+  const contextFiles = loadContextFiles(workspace);
+  sources.push(...contextFiles.map(file => file.filename));
+  if (contextFiles.length === 0) {
+    warnings.push("No identity, soul, user, or memory files were found in the Hawky workspace.");
   }
 
-  const bootstrapFiles = loadUntrimmedBootstrapFiles(workspace);
-  const firstContact = buildFirstContactState(bootstrapFiles);
-
-  if (firstContact.active) {
-    sections.push(
-      "",
-      "## First Contact",
-      "BOOTSTRAP.md is present in the Hawky workspace. This is a first-contact onboarding state.",
-      "Do not use a canned greeting. Follow BOOTSTRAP.md naturally: the agent has just come online and should figure out who it is and who the user is through conversation.",
-      "The frontend realtime agent may speak first only to begin that identity-discovery conversation.",
-    );
-  }
-
-  if (bootstrapFiles.length > 0) {
-    sections.push("", "## Relevant Memory");
-    for (const file of bootstrapFiles) {
-      sources.push(file.filename);
-      sections.push(formatBootstrapFile(file));
-    }
-  } else {
-    warnings.push("No bootstrap memory files were found in the Hawky workspace.");
-  }
-
-  const dailyLogs = workspace.listDailyLogs().slice(-2).reverse();
-  if (dailyLogs.length > 0) {
-    sections.push("", "## Recent Daily Logs");
-    for (const log of dailyLogs) {
-      const path = `memory/${log}`;
-      const content = workspace.readFile(path);
-      if (!content?.trim()) continue;
-      sources.push(path);
-      sections.push(`### ${path}\n${content.trim()}`);
-    }
-  }
-
-  sections.push(
-    "",
-    "## Behavior Notes",
-    "- Treat this boot context as private context, not as a user message.",
-    "- Do not recite this context at startup.",
-    "- If the user asks for durable work, use the Hawky bridge tools instead of pretending the frontend can do it locally.",
-    "- If memory seems missing or stale, ask the backend agent or search memory through the available tools.",
-  );
-
-  const fullContext = sections.join("\n");
+  // Keep the current memory selection and character budget. Rendering is separate
+  // so changing the character or prompt layout never requires changing file I/O.
+  const dailyLogs = workspace.listDailyLogs().slice(-2).reverse().flatMap(log => {
+    const filename = `memory/${log}`;
+    const content = workspace.readFile(filename);
+    if (!content?.trim()) return [];
+    sources.push(filename);
+    return [{ filename, content }];
+  });
+  const fullContext = renderFrontendBootPrompt({
+    identity: contextFiles.find(file => file.filename === "IDENTITY.md")?.content,
+    soul: contextFiles.find(file => file.filename === "SOUL.md")?.content,
+    memory: contextFiles.filter(file => file.filename !== "IDENTITY.md" && file.filename !== "SOUL.md"),
+    dailyLogs,
+    mode,
+    capabilities,
+    tools,
+  });
   const context = maxChars ? truncateMiddle(fullContext, maxChars) : fullContext;
 
   return {
@@ -352,7 +312,7 @@ export function buildFrontendBootContext(
     sources,
     warnings,
     toolbox,
-    first_contact: firstContact,
+    first_contact: { active: false, reason: "initialized" },
   };
 }
 
@@ -413,33 +373,14 @@ function cleanFrontendToolDefinition(value: unknown): FrontendToolDefinition | u
   return tool;
 }
 
-function formatBootstrapFile(file: BootstrapFile): string {
-  return `### ${file.filename}\n${file.content.trim()}`;
-}
-
-function loadUntrimmedBootstrapFiles(workspace: WorkspaceManager): BootstrapFile[] {
+function loadContextFiles(workspace: WorkspaceManager): BootstrapFile[] {
   const files: BootstrapFile[] = [];
-  for (const filename of BOOTSTRAP_FILES) {
+  for (const filename of CONTEXT_FILES) {
     const content = workspace.readFile(filename);
     if (!content?.trim()) continue;
     files.push({ filename, content, truncated: false });
   }
   return files;
-}
-
-function buildFirstContactState(files: BootstrapFile[]): FrontendFirstContactState {
-  const hasBootstrap = files.some((file) => file.filename === "BOOTSTRAP.md");
-  if (hasBootstrap) {
-    return {
-      active: true,
-      reason: "bootstrap_present",
-      marker_file: "BOOTSTRAP.md",
-    };
-  }
-  return {
-    active: false,
-    reason: "initialized",
-  };
 }
 
 function cleanString(value: unknown): string {
@@ -508,13 +449,6 @@ function isJSONSchemaObject(value: unknown): value is JSONSchemaObject {
     (value as Record<string, unknown>).properties !== null &&
     !Array.isArray((value as Record<string, unknown>).properties),
   );
-}
-
-function formatToolForPrompt(tool: OpenAIFunctionToolDefinition): string {
-  const required = Array.isArray(tool.parameters.required) && tool.parameters.required.length > 0
-    ? ` Required: ${tool.parameters.required.join(", ")}.`
-    : "";
-  return `- ${tool.name}: ${tool.description}${required}`;
 }
 
 function truncateMiddle(text: string, maxChars: number): string {

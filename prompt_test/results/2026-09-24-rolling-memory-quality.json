@@ -1,0 +1,63 @@
+{
+  "model": "gpt-5.4-mini",
+  "passed": 2,
+  "total": 2,
+  "reports": [
+    {
+      "id": "meeting-correction",
+      "passed": true,
+      "durationMs": 3986,
+      "first": {
+        "ok": true,
+        "scope": "daily",
+        "file": "memory/2026-09-23.md",
+        "preview": "- 2026-09-23T23:30:00-07:00: User said: \"I realize I have a mania 3.\" Ambiguous meaning; no diagnosis confirmed.\n- Assistant responded with a general encouragement to contact a clinician.",
+        "mocked": false,
+        "skipped": false,
+        "has_more": false,
+        "revision": 1,
+        "session_memory": "User said on 2026-09-23T23:30:00-07:00: \"I realize I have a mania 3.\" The statement is ambiguous and may be a mistaken or corrected phrasing; no diagnosis should be inferred. Assistant replied with a generic mental-health encouragement, but no verified outcome or follow-up is recorded."
+      },
+      "next": {
+        "ok": true,
+        "scope": "daily",
+        "file": "memory/2026-09-23.md",
+        "preview": "- 2026-09-23T23:30:00-07:00: User clarified the earlier ambiguous phrase was misheard.\n- User said they have a meeting at three, not a medical condition.\n- User specified the meeting is tomorrow at 3 PM (relative to that timestamp).\n- Assistant acknowledged and said no reminder was created.",
+        "mocked": false,
+        "skipped": false,
+        "has_more": false,
+        "revision": 2,
+        "session_memory": "User clarified on 2026-09-23T23:30:00-07:00 that the earlier ambiguous phrase was misheard: they said they have a meeting at three, not anything about a medical condition. They specified the meeting is tomorrow at 3 PM (relative to 2026-09-23T23:30:00-07:00). The prior apparent medical interpretation is superseded and should not be retained as a diagnosis. Assistant acknowledged and said no reminder was created."
+      },
+      "repeatSkipped": true
+    },
+    {
+      "id": "task-cancelled",
+      "passed": true,
+      "durationMs": 2177,
+      "first": {
+        "ok": true,
+        "scope": "daily",
+        "file": "memory/2026-09-23.md",
+        "preview": "- 2026-09-23: User asked to find alpha.txt and read it.\n- 2026-09-23: Assistant said backend search was running and no result yet.\n- Task status: unresolved.",
+        "mocked": false,
+        "skipped": false,
+        "has_more": false,
+        "revision": 1,
+        "session_memory": "User asked to find and read alpha.txt. Assistant replied that backend search is running and no result was found yet. Task remains unresolved."
+      },
+      "next": {
+        "ok": true,
+        "scope": "daily",
+        "file": "memory/2026-09-23.md",
+        "preview": "- 2026-09-23: User cancelled the alpha.txt task and said it is no longer needed.\n- 2026-09-23: User stated a preference for short answers.\n- 2026-09-23: Assistant reported backend confirmation of cancellation; no file contents were retrieved.\n- Task status: cancelled.",
+        "mocked": false,
+        "skipped": false,
+        "has_more": false,
+        "revision": 2,
+        "session_memory": "User previously asked to find and read alpha.txt; the task was unresolved while backend search was running. On 2026-09-23 at 23:30 -07:00, the user cancelled the alpha.txt task and said it was no longer needed, adding a preference for short answers. The assistant reported that the backend confirmed cancellation and that no file contents were retrieved. Current task status: cancelled; no file content was obtained."
+      },
+      "repeatSkipped": true
+    }
+  ]
+}

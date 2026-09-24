@@ -748,6 +748,9 @@ export interface SessionMetaEntry {
   lastSessionTokens?: { input: number; output: number; cacheRead?: number; cacheCreation?: number };
   /** Last agent.done cumulative cost in USD. */
   lastSessionCostUSD?: number;
+  /** CLI-managed conversation identity; never stores authentication tokens. */
+  externalSessionId?: string;
+  externalModel?: string;
   /** Experimental runtime binding. Sticky once a session is created. */
   runtimeKind?: SessionRuntimeKind;
 }

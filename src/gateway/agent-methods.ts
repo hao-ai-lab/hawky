@@ -1,3 +1,5 @@
+import { registerLiveStreamMethods } from "./live-stream-methods.js";
+import { registerGptLiveMethods } from "./gpt-live-methods.js";
 // =============================================================================
 // Agent RPC Method Handlers
 //
@@ -16,13 +18,15 @@ import type { AgentSessionManager } from "./agent-sessions.js";
 import type { StreamEvent } from "../agent/types.js";
 import { getCostTracker } from "../agent/cost-tracker.js";
 import { MAX_SINGLE_IMAGE_BASE64, MAX_TOTAL_IMAGE_BASE64 } from "../agent/image-sanitize.js";
+import { setCommandLaneConcurrency } from "./command-queue.js";
 import { executeInSession } from "./lanes.js";
 import { CommandLane } from "./types.js";
 import { MethodError } from "./methods.js";
+import { registerDelegationMethods, type DelegationObserver } from "./delegation-methods.js";
 import { resolveWsPermission, getPendingPermissionForSession } from "./ws-permission.js";
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { resolveAskUser, getPendingAskUserForSession } from "../tools/ask_user.js";
+import { rejectAskUser, resolveAskUser, getPendingAskUserForSession } from "../tools/ask_user.js";
 import type { PermissionDecision } from "../agent/tool_executor.js";
 import type { HawkyConfig } from "../agent/types.js";
 import { runMemoryFlush, resetFlushState, resolveFlushConfig, shouldTriggerFlush, hasAlreadyFlushed } from "./memory-flush.js";
@@ -49,6 +53,8 @@ import type { PushService, PushSubscriptionJSON } from "./push.js";
 import { WorkspaceManager, WORKSPACE_FILES } from "../storage/workspace.js";
 import { updateSessionMeta, loadSessionMeta, persistLastTurnUsage, sessionKeyToId, getSessionsDir } from "../storage/session.js";
 import { loadConfig } from "../storage/config.js";
+import { archiveCameraFrame, archiveCameraReceipt } from "../storage/camera-archive.js";
+import { beginRealtimeArchive, appendRealtimeEvent, saveRealtimeImage, saveRealtimeReceipt } from "../storage/realtime-archive.js";
 import { peekTaskStore } from "../tools/task_global.js";
 import type { CronStore } from "./cron-store.js";
 import type { HeartbeatService } from "./heartbeat.js";
@@ -175,6 +181,7 @@ export function registerAgentMethods(
   intentionLoop?: IntentionService,
   latentService?: LatentService,
 ): void {
+  setCommandLaneConcurrency(CommandLane.Delegation, 2);
   // Per-session compaction state (circuit breaker tracking)
   const compactionStates = new Map<string, CompactionState>();
   function getCompactionState(sessionKey: string): CompactionState {
@@ -616,7 +623,7 @@ export function registerAgentMethods(
   // -------------------------------------------------------------------------
   // chat.send — route message through command queue → agent loop
   // -------------------------------------------------------------------------
-  server.registerMethod("chat.send", async (conn, params, srv) => {
+  async function sendChat(conn: GatewayConnection, params: unknown, srv: GatewayServer, observer?: DelegationObserver) {
     const p = params as {
       message?: string;
       sessionKey?: string;
@@ -744,7 +751,7 @@ export function registerAgentMethods(
     }
 
     // Bind connection to this session
-    conn.bindSession(sessionKey);
+    if (!observer) conn.bindSession(sessionKey);
 
     // Note: obvious timed intentions are no longer intercepted here. They flow
     // through the structured `intention.create` RPC (the create_intention tool),
@@ -765,11 +772,19 @@ export function registerAgentMethods(
     // bridge caller (web-ios Live) can surface the chart back in its transcript.
     let lastToolImage: { base64: string; media_type: string } | null = null;
 
-    await executeInSession(sessionKey, CommandLane.Main, async () => {
+    await executeInSession(sessionKey, observer ? CommandLane.Delegation : CommandLane.Main, async () => {
+      observer?.signal.throwIfAborted();
       const session = sessions.getOrCreate(sessionKey, conn.workingDirectory || undefined);
+
+      if (observer?.readOnly) {
+        const allowed = new Set(["read_file", "glob", "grep", "memory_get", "memory_search", "web_search", "web_fetch", "ask_user"]);
+        for (const tool of session.registry.getAll()) if (!allowed.has(tool.name)) session.registry.unregister(tool.name);
+      }
+      observer?.started(session.runtimeKind === "native" ? config?.model : undefined);
 
       // Subscribe to agent stream events → broadcast to all clients on this session
       const unsub = session.loop.subscribe((event: StreamEvent) => {
+        observer?.event(event);
         srv.broadcastToSession(sessionKey, `agent.${event.type}`, event);
         // Capture usage/cost for token pressure check and meta persistence.
         // A 0% / $0 done event is a legitimate short-turn signal, not a
@@ -878,7 +893,19 @@ export function registerAgentMethods(
               cwd: session.workingDirectory,
               history: session.loop.getHistory(),
               message: userMessage,
+              persistent: !!observer,
+              readOnly: observer?.readOnly,
+              signal: observer?.signal,
+              runtimeSessionId: observer ? loadSessionMeta()[sessionKey]?.externalSessionId : undefined,
+              onRuntime: observer ? details => {
+                updateSessionMeta(sessionKey, {
+                  ...(details.sessionId ? { externalSessionId: details.sessionId } : {}),
+                  ...(details.model ? { externalModel: details.model } : {}),
+                });
+                observer.runtime?.(details);
+              } : undefined,
               emit: (event) => {
+                observer?.event(event);
                 srv.broadcastToSession(sessionKey, `agent.${event.type}`, event);
                 if (event.type === "done") {
                   sawDoneEvent = true;
@@ -1107,6 +1134,47 @@ export function registerAgentMethods(
       reply: assistantText || "",
       ...(lastToolImage ? { image: lastToolImage } : {}),
     };
+  }
+  server.registerMethod("chat.send", (conn, params, srv) => sendChat(conn, params, srv));
+  const delegationService = registerDelegationMethods(server, (conn, task, observer) => {
+    if (task.runtime !== "native" && !externalAgentRuntimesEnabled()) throw new MethodError("FORBIDDEN", "Enable CLI runtimes in Settings > Live > Hawk bridge before using Codex or Claude.");
+    const session = sessions.getOrCreate(task.backendSession, conn.workingDirectory || undefined, task.runtime);
+    if (session.runtimeKind !== task.runtime) throw new MethodError("CONFLICT", "Backend session is bound to a different runtime");
+    return sendChat(conn, { sessionKey: task.backendSession, message: task.brief ?? task.request }, server, observer);
+  }, {
+      cancel: task => {
+        const session = sessions.get(task.backendSession);
+        session?.loop.cancel(); session?.externalRuntime?.cancel(); cancelPendingPermissions(task.backendSession);
+        const question = getPendingAskUserForSession(task.backendSession);
+        if (question) rejectAskUser(question.requestId, "Task cancelled");
+      },
+      input: task => {
+        const permission = getPendingPermissionForSession(task.backendSession);
+        if (permission) return { id: permission.requestId, kind: "permission", prompt: `Allow ${permission.dialog.toolName}?`, detail: permission.dialog };
+        const question = getPendingAskUserForSession(task.backendSession);
+        if (question) return { id: question.requestId, kind: "question", prompt: question.question, detail: question.options };
+      },
+      respond: (task, p) => {
+        if (task.input?.kind === "permission") {
+          if (!["allow_once", "deny"].includes(p.decision)) throw new MethodError("INVALID_REQUEST", "Choose allow_once or deny");
+          resolveWsPermission(task.input.id, p.decision);
+        } else if (task.input?.kind === "question" && typeof p.answer === "string") resolveAskUser(task.input.id, [p.answer]);
+        else throw new MethodError("INVALID_REQUEST", "An answer is required");
+      },
+    });
+
+  registerGptLiveMethods(server, delegationService, (sessionKey, turn) => {
+    const session = sessions.getOrCreate(sessionKey);
+    const message = { role: turn.role, content: [{ type: "text" as const, text: turn.text }], timestamp: new Date().toISOString() };
+    session.loop.setHistory([...session.loop.getHistory(), message]);
+    session.sessionManager.appendMessage(message);
+  });
+
+  registerLiveStreamMethods(server, delegationService, (sessionKey, turn) => {
+    const session = sessions.getOrCreate(sessionKey);
+    const message = { role: turn.role, content: [{ type: "text" as const, text: turn.text }], timestamp: new Date().toISOString() };
+    session.loop.setHistory([...session.loop.getHistory(), message]);
+    session.sessionManager.appendMessage(message);
   });
 
   // -------------------------------------------------------------------------
@@ -1819,6 +1887,13 @@ export function registerAgentMethods(
   // session.list (message count) and reloads via session.history. Mirrors how
   // the fork path injects context (loop.setHistory + sessionManager.append).
   // -------------------------------------------------------------------------
+  server.registerMethod("session.archiveCameraFrame", (_conn, params) => archiveCameraFrame(params));
+  server.registerMethod("realtime.archive.start", (_conn, params) => beginRealtimeArchive(params as Parameters<typeof beginRealtimeArchive>[0]));
+  server.registerMethod("realtime.archive.append", (_conn, params) => appendRealtimeEvent(params as Parameters<typeof appendRealtimeEvent>[0]));
+  server.registerMethod("realtime.archive.image", (_conn, params) => saveRealtimeImage(params as Parameters<typeof saveRealtimeImage>[0]));
+  server.registerMethod("realtime.archive.receipt", (_conn, params) => saveRealtimeReceipt(params as Parameters<typeof saveRealtimeReceipt>[0]));
+  server.registerMethod("session.archiveCameraReceipt", (_conn, params) => archiveCameraReceipt(params));
+
   server.registerMethod("session.appendMessages", (_conn, params) => {
     const p = params as
       | { sessionKey?: string; messages?: Array<{ role?: string; text?: string; timestamp?: string }> }

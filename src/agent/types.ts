@@ -520,11 +520,19 @@ export interface OpenAICompatibleProfile {
 }
 
 export interface HawkyConfig {
+  /** Self-hosted live endpoints are configured by the gateway operator, never client supplied. */
+  live_providers?: {
+    venus?: { url: string; api_key?: string };
+    joyai?: { url: string; model?: string; api_key?: string;
+      asr_url?: string; asr_model?: string; asr_api_key?: string;
+      tts_url?: string; tts_voice?: string };
+  };
   /** API keys for external services */
   api_keys: {
     anthropic: string;
     brave_search: string;
     openai: string;
+    gemini?: string;
   };
   /** Anthropic API base URL (default: https://api.anthropic.com). Override for proxies. */
   api_base_url: string;
@@ -568,11 +576,19 @@ export interface HawkyConfig {
   memory?: {
     /**
      * Model used for memory distillation (session → daily log → MEMORY.md).
-     * Defaults to "claude-haiku-4-5". When a Claude model, distillation uses the
-     * Anthropic provider directly (api_keys.anthropic), independent of the
-     * default chat provider.
+     * Defaults to Haiku with an Anthropic key, GPT-5.4 mini with only an OpenAI
+     * key, or the configured model for Vertex/OpenAI-compatible endpoints.
+     * An explicit model always wins; direct Claude/GPT models use their own keys.
      */
     distill_model?: string;
+    /** Incremental conversation → session/daily memory. Enabled by default. */
+    session_enabled?: boolean;
+    /** Minimum delay between updates to a session; default 120 seconds. */
+    session_interval_seconds?: number;
+    /** Process an active conversation after this many new messages; default 6. */
+    session_min_messages?: number;
+    /** Process smaller batches once the conversation is idle; default 60 seconds. */
+    session_idle_seconds?: number;
   };
   /** Workspace directory */
   workspace_dir: string;

@@ -68,3 +68,11 @@ export function byokParam(): { byok_api_key?: string } {
   const key = loadByokKey();
   return looksLikeOpenAIKey(key) ? { byok_api_key: key } : {};
 }
+
+/** Provider-specific keys never cross into another provider's request. */
+export function loadGeminiKey(): string {
+  try { return localStorage.getItem("hawky-gemini-byok-key")?.trim() ?? ""; } catch { return ""; }
+}
+export function saveGeminiKey(key: string) {
+  try { if (key.trim()) localStorage.setItem("hawky-gemini-byok-key", key.trim()); else localStorage.removeItem("hawky-gemini-byok-key"); } catch { /* unavailable */ }
+}

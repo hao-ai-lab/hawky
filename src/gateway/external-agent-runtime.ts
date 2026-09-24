@@ -1,7 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ChatMessage, StreamEvent, TokenUsage } from "../agent/types.js";
 import { createSubsystemLogger } from "../logging/index.js";
 import type { SessionRuntimeKind } from "../storage/session.js";
@@ -16,6 +18,12 @@ export interface ExternalAgentTurnOptions {
   history: ChatMessage[];
   message: string;
   emit: Emit;
+  /** Resume the CLI's actual conversation rather than reconstructing a prompt. */
+  persistent?: boolean;
+  runtimeSessionId?: string;
+  onRuntime?: (details: { sessionId?: string; model?: string }) => void;
+  readOnly?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface ExternalAgentTurnResult {
@@ -135,6 +143,9 @@ function normalizeRuntimeUsage(usage: unknown): TokenUsage | undefined {
 export interface CodexJsonLineResult {
   assistantText?: string;
   usage?: TokenUsage;
+  sessionId?: string;
+  model?: string;
+  error?: string;
   eventType?: string;
   itemType?: string;
   toolStarts?: RuntimeToolStart[];
@@ -164,6 +175,11 @@ export function parseCodexJsonLine(line: string): CodexJsonLineResult | null {
       eventType: typeof event?.type === "string" ? event.type : undefined,
       itemType: typeof item?.type === "string" ? item.type : undefined,
     };
+    if (event?.type === "thread.started" && typeof event.thread_id === "string") result.sessionId = event.thread_id;
+    if (typeof event?.model === "string") result.model = event.model;
+    if (event?.type === "turn.failed" || event?.type === "error") {
+      result.error = event.error?.message ?? event.message ?? "Codex turn failed";
+    }
     if (event?.type === "item.completed" && item?.type === "agent_message" && typeof item.text === "string") {
       result.assistantText = item.text.trim();
     }
@@ -307,6 +323,9 @@ export interface ClaudeJsonLineResult {
   resultText?: string;
   usage?: TokenUsage;
   totalCostUSD?: number;
+  sessionId?: string;
+  model?: string;
+  error?: string;
   eventType?: string;
   subtype?: string;
   streamEventType?: string;
@@ -324,6 +343,14 @@ export function parseClaudeJsonLine(line: string): ClaudeJsonLineResult | null {
       subtype: typeof event?.subtype === "string" ? event.subtype : undefined,
     };
 
+    if (typeof event?.session_id === "string") result.sessionId = event.session_id;
+    if (typeof event?.model === "string") result.model = event.model;
+    if (typeof event?.message?.model === "string") result.model = event.message.model;
+    if (event?.type === "result" && (event.is_error || (event.permission_denials?.length ?? 0) > 0)) {
+      result.error = event.permission_denials?.length
+        ? "Claude needs tool permission. This CLI print adapter cannot answer approval prompts. Review its permissions in the CLI, then explicitly retry the task."
+        : event.result || event.errors?.join("\n") || `Claude turn failed (${event.subtype ?? "unknown"})`;
+    }
     if (event?.type === "assistant") {
       const text = claudeContentToText(event?.message?.content).trim();
       if (text) result.assistantText = text;
@@ -637,7 +664,11 @@ function resolveHawkyMcpServerCommand(runtimeKind: "codex" | "claude" = "codex")
     };
   }
 
-  const entrypoint = process.argv[1];
+  if (process.env.HAWKY_BIN?.trim()) return { command: resolveRuntimeExecutable("hawky"), args: ["mcp"] };
+  // A gateway may be launched by a custom script. That script is not the
+  // Hawky CLI and must not be spawned again as an MCP server.
+  const sourceCli = fileURLToPath(new URL("../index.ts", import.meta.url));
+  const entrypoint = existsSync(sourceCli) ? sourceCli : process.argv[1];
   if (entrypoint) {
     return {
       command: process.execPath,
@@ -715,22 +746,42 @@ function tomlStringArray(values: string[]): string {
   return `[${values.map(tomlString).join(", ")}]`;
 }
 
-function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, prompt: string, cwd: string): RuntimeCommand {
+/** Shell sandboxing does not cover MCP servers or hooks. Disable these for
+ * concurrent readers while retaining the user's model, provider and CLI login.
+ * Enumerate effective MCP config: an empty table override does NOT clear it.
+ */
+async function codexReadOnlyOverrides(cmd: string, cwd: string, signal?: AbortSignal): Promise<string[]> {
+  const flags = ["--ignore-rules", "-c", 'approval_policy="never"', "-c", "notify=[]",
+    ...["apps", "plugins", "hooks", "codex_hooks", "plugin_hooks", "skill_mcp_dependency_install", "computer_use", "browser_use"].flatMap(name => ["--disable", name])];
+  const { stdout } = await promisify(execFile)(cmd, [...flags.slice(1), "mcp", "list", "--json"], {
+    cwd, env: runtimeEnv(), signal, timeout: 10000, maxBuffer: 1024 * 1024,
+  });
+  let servers: unknown;
+  try { servers = JSON.parse(stdout); } catch { throw new Error("Cannot verify Codex MCP configuration for read-only execution. Update the Codex CLI."); }
+  if (!Array.isArray(servers) || servers.some(s => typeof s?.name !== "string" || !/^[A-Za-z0-9_-]+$/.test(s.name)))
+    throw new Error("Cannot disable the configured Codex MCP servers for read-only execution.");
+  for (const server of servers) flags.push("-c", `mcp_servers.${server.name}.enabled=false`);
+  return flags;
+}
+
+async function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, prompt: string, cwd: string, session?: { persistent?: boolean; runtimeSessionId?: string; readOnly?: boolean; signal?: AbortSignal }): Promise<RuntimeCommand> {
   if (runtimeKind === "codex") {
+    const cmd = resolveRuntimeExecutable("codex");
+    const readOnlyFlags = session?.readOnly ? await codexReadOnlyOverrides(cmd, cwd, session.signal) : [];
     const cleanupDir = mkdtempSync(join(tmpdir(), "hawky-codex-"));
     const outputPath = join(cleanupDir, "last-message.txt");
-    const sandbox = process.env.HAWKY_CODEX_SANDBOX?.trim() || "workspace-write";
+    const sandbox = session?.readOnly ? "read-only" : process.env.HAWKY_CODEX_SANDBOX?.trim() || "workspace-write";
     return {
-      cmd: resolveRuntimeExecutable("codex"),
+      cmd,
       args: [
         "exec",
-        ...(codexMcpEnabled() ? buildCodexMcpConfigOverrides() : []),
+        ...(session?.runtimeSessionId ? ["resume"] : []),
+        ...(session?.readOnly ? readOnlyFlags : codexMcpEnabled() ? buildCodexMcpConfigOverrides() : []),
         "--json",
         "--output-last-message", outputPath,
-        "--color", "never",
-        "-C", cwd,
-        "-s", sandbox,
+        ...(session?.runtimeSessionId ? ["-c", `sandbox_mode=${tomlString(sandbox)}`] : ["--color", "never", "-C", cwd, "-s", sandbox]),
         "--skip-git-repo-check",
+        ...(session?.runtimeSessionId ? [session.runtimeSessionId] : []),
         "-",
       ],
       stdin: prompt,
@@ -756,7 +807,8 @@ function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, p
       "--tools", tools,
       "--permission-mode", permissionMode,
     ];
-    if (process.env.HAWKY_CLAUDE_SESSION_PERSISTENCE?.trim() !== "1") {
+    if (session?.runtimeSessionId) args.push("--resume", session.runtimeSessionId);
+    if (!session?.persistent && process.env.HAWKY_CLAUDE_SESSION_PERSISTENCE?.trim() !== "1") {
       args.push("--no-session-persistence");
     }
     if (model) {
@@ -810,18 +862,20 @@ function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, p
 
 export class ExternalAgentRuntime {
   private child: ChildProcessWithoutNullStreams | null = null;
+  private preparing: AbortController | null = null;
   private currentText = "";
   private forceKillTimer: ReturnType<typeof setTimeout> | null = null;
 
   getCurrentTurn(): ExternalAgentCurrentTurn {
     return {
-      busy: this.child !== null,
+      busy: this.child !== null || this.preparing !== null,
       streaming: this.child !== null && this.currentText.length > 0,
       text: this.currentText,
     };
   }
 
   cancel(): boolean {
+    if (this.preparing) { this.preparing.abort(new Error("Task cancelled")); return true; }
     if (!this.child) return false;
     this.killChild("SIGTERM");
     if (!this.forceKillTimer) {
@@ -846,7 +900,7 @@ export class ExternalAgentRuntime {
   }
 
   async sendMessage(opts: ExternalAgentTurnOptions): Promise<ExternalAgentTurnResult> {
-    if (this.child) throw new Error(`${opts.runtimeKind} runtime is already running`);
+    if (this.child || this.preparing) throw new Error(`${opts.runtimeKind} runtime is already running`);
 
     const timestamp = new Date().toISOString();
     const userMessage: ChatMessage = {
@@ -854,8 +908,20 @@ export class ExternalAgentRuntime {
       content: [{ type: "text", text: opts.message }],
       timestamp,
     };
-    const prompt = buildPrompt(opts.history, opts.message, opts.runtimeKind);
-    const command = commandForRuntime(opts.runtimeKind, prompt, opts.cwd);
+    const prompt = opts.runtimeSessionId ? opts.message : buildPrompt(opts.history, opts.message, opts.runtimeKind);
+    opts.signal?.throwIfAborted();
+    const preparation = this.preparing = new AbortController();
+    let command: RuntimeCommand;
+    try {
+      command = await commandForRuntime(opts.runtimeKind, prompt, opts.cwd, { ...opts,
+        signal: opts.signal ? AbortSignal.any([preparation.signal, opts.signal]) : preparation.signal });
+    } finally { this.preparing = null; }
+    if (opts.signal?.aborted || preparation.signal.aborted) {
+      if (command.cleanupDir) rmSync(command.cleanupDir, { recursive: true, force: true });
+      preparation.signal.throwIfAborted();
+      opts.signal?.throwIfAborted();
+    }
+    let runtimeError: string | undefined;
     let stderr = "";
     let stdout = "";
     let runtimeUsage: TokenUsage | undefined;
@@ -967,8 +1033,7 @@ export class ExternalAgentRuntime {
             tool_use_id: tool.tool_use_id,
             name: tool.name,
             input: tool.input,
-            approvalReason: "auto_approve",
-          });
+            });
         };
 
         const emitToolResult = (tool: RuntimeToolResult): void => {
@@ -1046,6 +1111,8 @@ export class ExternalAgentRuntime {
         };
 
         const handleJsonResult = (result: CodexJsonLineResult | ClaudeJsonLineResult) => {
+          if (result.sessionId || result.model) opts.onRuntime?.({ sessionId: result.sessionId, model: result.model });
+          if (result.error) runtimeError = result.error;
           if (command.streamJson === "claude") handleClaudeResult(result as ClaudeJsonLineResult);
           else handleCodexResult(result as CodexJsonLineResult);
         };
@@ -1088,6 +1155,7 @@ export class ExternalAgentRuntime {
             reject(new Error(`${opts.runtimeKind} runtime timed out after ${runtimeTurnTimeoutMs()}ms`));
             return;
           }
+          if (runtimeError) { reject(new Error(runtimeError)); return; }
           if (code === 0) {
             const parsed = command.parseStdout?.(stdout, command.outputPath) ?? { text: stripAnsi(stdout).trim() };
             if (parsed.usage) runtimeUsage = parsed.usage;

@@ -10,7 +10,7 @@
 // Existing files are NEVER overwritten (idempotent init).
 // =============================================================================
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfigDir } from "./config.js";
@@ -233,6 +233,18 @@ export class WorkspaceManager {
   writeFile(filename: string, content: string): void {
     const filePath = this.prepareWritableWorkspacePath(filename);
     writeFileSync(filePath, content, "utf-8");
+  }
+
+  /** Replace a derived file/checkpoint without exposing a partially written file. */
+  writeFileAtomic(filename: string, content: string): void {
+    const filePath = this.prepareWritableWorkspacePath(filename);
+    const temporary = `${filePath}.${crypto.randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, content, { encoding: "utf-8", flag: "wx", mode: 0o600 });
+      renameSync(temporary, filePath);
+    } finally {
+      if (existsSync(temporary)) unlinkSync(temporary);
+    }
   }
 
   /**

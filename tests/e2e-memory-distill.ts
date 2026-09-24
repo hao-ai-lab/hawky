@@ -34,7 +34,10 @@ class StubProvider implements LLMProvider {
   constructor(private readonly text: string) {}
   async *stream(request: LLMStreamRequest): AsyncIterable<LLMStreamEvent> {
     this.calls.push(request);
-    yield { type: "text_delta", text: this.text };
+    yield { type: "text_delta", text: this.text && String(request.system).includes('"session_memory"')
+      ? JSON.stringify({ type: "session_memory", summary: this.text, daily_memory: this.text }) : this.text };
+    yield { type: "message_delta", stop_reason: "end_turn", usage: { output_tokens: 20 } };
+    yield { type: "message_stop" };
   }
   async countTokens(): Promise<{ input_tokens: number }> {
     return { input_tokens: 0 };
@@ -57,7 +60,7 @@ function makeConfig(): HawkyConfig {
     max_tokens: 1024,
     max_iterations: 10,
     max_tool_result_chars: 30000,
-    workspace_dir: "/tmp",
+    workspace_dir: wsDir,
     gateway_port: 4242,
     heartbeat: { enabled: false, interval_minutes: 30, keep_recent_messages: 8, active_hours: { start: "08:00", end: "22:00" } },
   } as HawkyConfig;
@@ -238,6 +241,19 @@ describe("memory-distill-pipeline", () => {
 
       const wsm = new WorkspaceManager(wsDir);
       expect(wsm.readFile(result.file)).toContain("coffee black");
+
+      const memory = await sendRequest(ws, "memory.session", { session_key: "realtime:live-real" });
+      expect(memory.ok).toBe(true);
+      expect((memory.payload as any).memory.summary).toContain("coffee black");
+      expect((memory.payload as any).memory.revision).toBe(1);
+      const resume = await sendRequest(ws, "memory.resume", { session_key: "realtime:live-real" });
+      expect(resume.ok).toBe(true);
+      expect((resume.payload as any).mode).toBe("summary");
+      expect((resume.payload as any).summary).toContain("coffee black");
+      expect((resume.payload as any).messages).toEqual([]);
+      const repeat = (await sendRequest(ws, "memory.distill", { scope: "daily", session_key: "realtime/live-real" })).payload as any;
+      expect(repeat.skipped).toBe(true);
+      expect(stubProvider.calls).toHaveLength(1);
     } finally {
       ws.close();
     }

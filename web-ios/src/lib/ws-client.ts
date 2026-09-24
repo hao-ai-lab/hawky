@@ -33,6 +33,7 @@ const MAX_BACKOFF_MS = 15_000;
 const BACKOFF_MULTIPLIER = 1.5;
 const JITTER_FACTOR = 0.2; // ±20% randomization
 const REQUEST_TIMEOUT_MS = 30_000;
+const MEMORY_REQUEST_TIMEOUT_MS = 45_000; // allow the backend's 30s model deadline to return its error
 // chat.send has no timeout — turns can run indefinitely
 const NO_TIMEOUT_METHODS = new Set(["chat.send"]);
 const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -233,7 +234,7 @@ export class WebSocketClient {
       const timer = NO_TIMEOUT_METHODS.has(method) ? null : setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`RPC timeout: ${method}`));
-      }, REQUEST_TIMEOUT_MS);
+      }, method === "live.gpt.create" ? 50_000 : method === "memory.distill" ? MEMORY_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
 
       this.pendingRequests.set(id, { resolve, reject, timer });
 

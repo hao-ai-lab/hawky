@@ -76,7 +76,7 @@ describe("memory_get — basic reads", () => {
     expect(result.type).toBe("text");
     const parsed = JSON.parse(result.content);
     expect(parsed.path).toBe("SOUL.md");
-    expect(parsed.text).toContain("genuinely helpful");
+    expect(parsed.text).toBe(new WorkspaceManager(wsDir).readFile("SOUL.md"));
   });
 
   test("reads USER.md from workspace", async () => {
@@ -493,6 +493,7 @@ describe("memory_search — limits and edge cases", () => {
 
 describe("memory_search — workspace root files", () => {
   test("searches SOUL.md", async () => {
+    writeFileSync(join(wsDir, "SOUL.md"), "# SOUL.md\nBe genuinely helpful.\n");
     const result = await runMemorySearch({ query: "genuinely helpful" });
     const parsed = JSON.parse(result.content);
     expect(parsed.results.length).toBeGreaterThan(0);

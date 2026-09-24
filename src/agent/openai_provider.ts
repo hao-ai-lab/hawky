@@ -67,7 +67,9 @@ export class OpenAIProvider implements LLMProvider {
     // OpenAI equivalent; cache_control was already stripped in translateMessages.
     const params: any = {
       model: request.model,
-      max_tokens: request.max_tokens,
+      ...(/^(?:gpt-[5-9](?:[.-]|$)|o[1-9](?:-|$))/.test(request.model)
+        ? { max_completion_tokens: request.max_tokens }
+        : { max_tokens: request.max_tokens }),
       messages,
       stream: true,
       stream_options: { include_usage: true },
