@@ -4,7 +4,8 @@ Hawk keeps one application conversation across different voice connections. Sele
 an OpenAI Realtime, GPT-Live, Gemini Live, Venus or JoyAI model in Live settings. While connected, use
 **Switch to …** to close the old connection and start the selected model in the
 same conversation. Switching is a brief reconnect, not transfer of hidden model
-state. Saved session memory plus recent text are restored; task IDs remain stable.
+state. Saved session memory and recent text remain in Hawk; task IDs stay stable.
+Restoration into each model follows the provider-specific limits below.
 
 ## Boundaries and files
 
@@ -152,7 +153,10 @@ optional; the gateway also accepts `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
 The browser sends 16 kHz PCM16 and JPEG frames through authenticated gateway
 RPC; only the originating connection receives output audio. Keys stay off the
 provider event stream. Gemini returns 24 kHz PCM, input/output transcripts and
-native function calls. Its model setup omits unsupported thinking fields.
+native function calls. Its model setup omits unsupported thinking fields, sets
+explicit automatic voice activity detection, and includes all input in a turn.
+Typed camera questions attach the latest fresh JPEG to that same text turn,
+avoiding ordering races with the separate realtime video stream.
 
 `live.stream.*` owns lifecycle and authentication; `src/live/providers/gemini.ts`
 owns Gemini JSON. `GatewayStreamProvider` and `PcmMedia` own browser lifecycle,
@@ -161,7 +165,10 @@ Realtime. Completed jobs wait for generation and playback to drain before an
 announcement; reconnect loads task state quietly. Tool-call cancellation from
 speech interruption suppresses an obsolete tool response without cancelling an
 already accepted durable task. Provider diagnostics record context delivery;
-task cards do not claim that a particular task result has been heard.
+task cards do not claim that a particular task result has been heard. The new
+stream adapters do not yet correlate announcements with task-level playback
+receipts, so a completed task can still show **playback unconfirmed** after its
+answer appears. Backend completion is tracked independently and remains accurate.
 
 Provider disconnects surface an error and allow Start to restore saved text and
 memory. Automatic hidden-state resumption is not implemented. Gemini's sliding
@@ -173,6 +180,14 @@ Checks: `bun test ./tests/test-live-stream.ts`; browser fixtures in
 `bun scripts/probes/gemini-live.ts`. The probe verifies real session setup,
 spoken output and seeded-history recall, without using a physical microphone.
 Protocol: https://ai.google.dev/gemini-api/docs/live-api/capabilities
+
+The probe also accepts `GEMINI_LIVE_PROBE=tool`, `image`, or `voice-image`.
+Image modes require `GEMINI_LIVE_IMAGE=/path/to/red.jpg`; voice-image additionally
+requires `GEMINI_LIVE_WAV=/path/to/question.wav`, a mono 16 kHz PCM16 synthetic
+question asking the image color. It verifies transcription, spoken output and
+the image answer even with a different color in restored history. For example,
+on macOS: `say -o /tmp/question.aiff 'What color is the image?'`, followed by
+`afconvert -f WAVE -d LEI16@16000 -c 1 /tmp/question.aiff /tmp/question.wav`.
 
 ## Self-hosted Realtime-Venus
 
@@ -195,17 +210,26 @@ on the gateway). These operator settings cannot be changed through browser RPC.
 Use loopback or an authenticated TLS tunnel when the model is remote.
 
 The bridge checks protocol token IDs and decodes incremental Unicode without
-dropping reserved tokens. Hawk hides `<delegate>` spans, dispatches one validated
-task per turn and returns sanitized `<backend>` feedback. Partial/private tokens
+dropping reserved tokens. Captions project only native speech spans, excluding
+codec markers and text before the speech marker. Hawk hides `<delegate>` spans,
+dispatches one validated task per turn and returns sanitized `<backend>` feedback. Partial/private tokens
 cannot become spoken task instructions. Delegations use the shared serial worker;
 this native marker contains no structured concurrency/follow-up fields.
 
 Venus receives one-second PCM chunks and JPEG frames. With Mic off, zero PCM
-keeps its streaming clock advancing. Saved history and instructions are installed
-with fresh user input; upstream prefill starts generation, so reconnect alone
-must not install a speaking prefill. Backend completions wait for a model turn
+keeps its streaming clock advancing. Typed requests wait until the associated
+camera frame has entered model context, using ServingPort's input sequence fence.
+Saved history and instructions are installed with the first **typed** request.
+The current ServingPort has no quiet context installation: a prefill always starts
+a backend generation. Doing that on the first voice utterance can replace its
+native answer or leave a listening backend turn running. Microphone-only sessions
+therefore use the model host's prompt and start with fresh context; the UI warns
+about this limitation. Do not claim voice-only restoration parity with Gemini.
+Backend completions wait for a model turn
 boundary and playback drain. Only a contiguous prefix of actually played audio
-is acknowledged. Stop closes only this connection's model session.
+is acknowledged. Stop and gateway disconnect close only this connection's model
+session. The bridge releases owned sessions after 45 seconds of inactivity if the
+gateway is killed. Restarting the bridge still requires a matching tokenizer.
 
 Current protocol limits: one active model session, no input ASR transcript,
 no immediate external barge-in operation, server-selected voice, and no manual
@@ -215,6 +239,10 @@ memory is not transferred on reconnect. Native iOS is unchanged.
 
 Fixtures: `bun test ./tests/test-venus-live.ts` and
 `services/venus/.venv/bin/python -m unittest discover -s services/venus -v`.
+Real probe: `VENUS_LIVE_IMAGE=/path/to/red.jpg bun scripts/probes/venus-live.ts`.
+Set `HAWKY_VENUS_URL` to your bridge; optionally add `VENUS_LIVE_WAV` using the
+same synthetic WAV format as the Gemini probe. It checks native speech plus
+camera understanding and closes the session afterward.
 Source protocol: https://github.com/inclusionAI/Realtime-Venus/tree/main/demos/model
 
 ## Self-hosted JoyAI-VL-Interaction
@@ -289,6 +317,31 @@ Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interacti
    longer task explicitly.
 4. Interrupt a spoken answer and change the request. Gemini and Joy should stop
    old playback; Venus currently relies on the model's native listening behavior.
-5. Switch between providers within the same conversation. Recent text, session
-   memory and task IDs survive; provider-specific hidden state and raw images do
-   not. Stop must release microphone/camera and the upstream connection.
+5. Switch between providers within the same conversation. Saved text, session
+   memory and task IDs survive in Hawk. Gemini/Joy load that text; Venus injects
+   it with the first typed request (see voice-only limitation above).
+   Provider-specific hidden state and raw images do not transfer. Stop must
+   release microphone/camera and the upstream connection.
+
+## Verification snapshot: 2026-09-24
+
+- 198 web tests, 91 targeted gateway/provider/task tests, and three Python bridge
+  tests passed. TypeScript checking and the web production build passed.
+- Gemini 3.8 Live: real API probes passed seeded-history recall, native function
+  invocation, typed-image questions and synthetic voice-plus-image questions.
+  Browser checks passed typed replies, quiet reconnect, recall after reconnect,
+  and an actual backend delegation through the native worker: calculate 17 + 25,
+  show one completed task card, and return 42 in the live conversation.
+  Synthetic speech and solid-color images were used; no physical camera or mic
+  was recorded during automated testing.
+- Venus: an existing self-hosted model passed typed-image and native
+  voice-plus-image probes. Browser connection, provider switch and Stop were
+  verified. A browser history-recall check did **not** pass: the model said it
+  would check instead of returning the supplied fact. Native voice-only history
+  restoration is also unsupported. Treat Venus behavior as experimental; passing
+  the wire protocol tests does not establish recall or delegation quality.
+- JoyAI: fixtures cover cue endpointing, ASR, image coalescing, action tokens,
+  private delegation, TTS, interruption and connection reset. No live JoyAI model
+  service was available during this batch; actual inference remains unverified.
+- Native iOS, durable visual-memory transfer and per-task model/effort selection
+  are outside this batch. Existing backend model configuration is unchanged.
