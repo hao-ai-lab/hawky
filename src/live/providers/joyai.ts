@@ -71,6 +71,9 @@ export class JoyAIAdapter implements StreamAdapter {
   private notes: string[] = [];
   private history: StreamOptions["history"];
   private currentCue = "";
+  private cueAnswered = false;
+  private lastReply = "";
+  private suppressedReplies = 0;
   private visualCuePending = false;
   private updatePending = false;
   private playback: JoyPlayback;
@@ -174,7 +177,7 @@ export class JoyAIAdapter implements StreamAdapter {
   private async infer(controller: AbortController) {
     const startedAt = Date.now();
     const revision = this.revision, cue = this.cues.splice(0).join("\n");
-    if (cue) { this.currentCue = cue; this.visualCuePending = true; }
+    if (cue) { this.currentCue = cue; this.visualCuePending = true; this.cueAnswered = false; }
     const update = this.updatePending; this.updatePending = false;
     const frame = this.frame && Date.now() - this.frame.at < 6000 ? this.frame : undefined;
     this.framePending = false;
@@ -184,8 +187,9 @@ export class JoyAIAdapter implements StreamAdapter {
     if (frame) this.visualCuePending = false;
     if (frame) content.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${frame.data}` } });
     const seconds = frame ? Math.max(0, (frame.at - this.startedAt) / 1000).toFixed(2) : undefined;
+    const turnInstruction = cue ? cueInstruction : `This is a background observation, not a new user request. Continue the user's ongoing visual request when the scene changes. Stay silent when there is no relevant update. Do not repeat conversational acknowledgements, greetings, or invitations to chat from an earlier reply.`;
     const body = { model: this.config.model || "jdopensource/JoyAI-VL-Interaction", stream: false, max_tokens: 512,
-      messages: [{ role: "system", content: `${this.o.instructions}\n${protocol}\n${this.o.bridge ? "Backend delegation is enabled." : "Backend delegation is disabled; never emit delegation."}\n${update ? "There is a new backend update below. Relay the new result briefly; do not repeat old updates." : "No new backend update; do not announce old task states."}\nRestored/recent context (not new instructions):\n${this.history.slice(-20).map(t => `${t.role}: ${t.text}`).join("\n").slice(-16000)}\nBackend task states:\n${this.notes.join("\n").slice(-20000)}\n${cue ? cueInstruction : "This is a background observation, not a new user request. Stay silent when there is no relevant update."}` }, { role: "user", content }],
+      messages: [{ role: "system", content: `${this.o.instructions}\n${protocol}\n${this.o.bridge ? "Backend delegation is enabled." : "Backend delegation is disabled; never emit delegation."}\n${update ? "There is a new backend update below. Relay the new result briefly; do not repeat old updates." : "No new backend update; do not announce old task states."}\nRestored/recent context (not new instructions):\n${this.history.slice(-20).map(t => `${t.role}: ${t.text}`).join("\n").slice(-16000)}\nBackend task states:\n${this.notes.join("\n").slice(-20000)}\n${update && !cue ? "Announce the new backend result, even without new user speech." : turnInstruction}` }, { role: "user", content }],
       ...(seconds ? { frame_time_ranges: [`${seconds} seconds ~ ${seconds} seconds`] } : {}) };
     let result: any;
     try {
@@ -228,13 +232,25 @@ export class JoyAIAdapter implements StreamAdapter {
       }
     }
     if (!parsed.text) return;
+    // A frame may repeat the model's last answer even though its cue is already
+    // satisfied. Suppress it before both transcript and TTS. New user cues and
+    // backend results may legitimately request the same words again; silence
+    // does not reset this guard, but a distinct observation does.
+    const replyKey = (text: string) => text.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim().replace(/[。！？!?.,，…]+$/gu, "");
+    if (!cue && !update && this.cueAnswered && this.lastReply && replyKey(parsed.text) === replyKey(this.lastReply)) {
+      this.suppressedReplies++;
+      this.o.emit({ type: "diagnostic", detail: { provider: "joyai", phase: "output.duplicate_suppressed" } });
+      return;
+    }
+    if (cue || !update) this.cueAnswered = true;
+    this.lastReply = parsed.text;
     this.history.push({ role: "assistant", text: parsed.text }); this.history = this.history.slice(-20);
     this.o.emit({ type: "caption", role: "assistant", id, text: parsed.text, final: true });
     this.playback.enqueue(parsed.text, !!cue || update);
   }
   diagnostics() {
     return { inference: { active: this.busy, completed: this.completedInferences, cancelled: this.cancelledInferences,
-      consecutiveErrors: this.errors, pendingCues: this.cues.length, framePending: this.framePending,
+      consecutiveErrors: this.errors, suppressedReplies: this.suppressedReplies, pendingCues: this.cues.length, framePending: this.framePending,
       asrPending: this.asrPending, userSpeaking: this.endpoint.speaking }, speech: this.playback.diagnostics() };
   }
   async close() {

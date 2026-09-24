@@ -360,3 +360,54 @@ test("a cue before the first image is also delivered to the stateful visual sess
     expect(events.filter(e => e.type === "error")).toHaveLength(0);
   } finally { await a.close(); }
 });
+
+test("a filler cue followed by camera frames cannot repeat an answered cue into the transcript or TTS", async () => {
+  const events: any[] = [], bodies: any[] = [], spoken: string[] = [];
+  const replies = ["在呢，随时可以聊。", "在呢，随时可以聊。", "", "在呢，随时可以聊。"];
+  const http = (async (url: string, init: RequestInit) => {
+    if (!url.endsWith("completions")) return Response.json({});
+    bodies.push(JSON.parse(String(init.body)));
+    const text = replies.shift();
+    return Response.json(response(text ? `</response> ${text}` : "</silence>"));
+  }) as typeof fetch;
+  const a = new JoyAIAdapter(options(events), { url: "http://fixture", tts_url: "ws://fixture" }, http,
+    async (_url, text) => { spoken.push(text); });
+  try {
+    await a.start(); a.input({ type: "text", text: "嗯。" }); await tick();
+    a.input({ type: "mic", enabled: false });
+    for (let n = 0; n < 3; n++) {
+      a.input({ type: "image", data: "AAAA", at: Date.now() }); await tick(1050);
+    }
+    expect(bodies).toHaveLength(4); // Perception continues, even while the mic is muted.
+    expect(bodies[1].messages[0].content).toContain("Do not repeat conversational acknowledgements");
+    expect(events.filter(e => e.role === "assistant").map(e => e.text)).toEqual(["在呢，随时可以聊。"]);
+    expect(spoken).toEqual(["在呢，随时可以聊。"]);
+    expect(a.diagnostics().inference.suppressedReplies).toBe(2);
+    const diagnostics = events.filter(e => e.detail?.phase === "output.duplicate_suppressed");
+    expect(diagnostics).toHaveLength(2);
+    expect(JSON.stringify(diagnostics)).not.toContain("在呢");
+  } finally { await a.close(); }
+});
+
+test("duplicate suppression preserves visual changes, requested repetitions, and new backend results", async () => {
+  const events: any[] = [], spoken: string[] = [];
+  const replies = ["Red.", "Blue.", "Red.", "</silence>", "Red.", "Red."];
+  const http = (async (url: string) => url.endsWith("completions")
+    ? Response.json(response(replies[0] === "</silence>" ? replies.shift() : `</response> ${replies.shift()}`)) : Response.json({})) as typeof fetch;
+  const a = new JoyAIAdapter(options(events), { url: "http://fixture", tts_url: "ws://fixture" }, http,
+    async (_url, text) => { spoken.push(text); });
+  try {
+    await a.start(); a.input({ type: "text", text: "Continuously describe the color" }); await tick();
+    for (const data of ["AQAA", "AgAA"]) {
+      a.input({ type: "image", data, at: Date.now() }); await tick(1050);
+    }
+    a.input({ type: "text", text: "Repeat that" }); await tick();
+    // A question still awaiting its answer can be satisfied on the next frame,
+    // even when the answer happens to match the previous turn.
+    a.input({ type: "image", data: "AgAA", at: Date.now() }); await tick(1050);
+    a.context("New backend result: Red.", true); await tick(1050);
+    expect(spoken).toEqual(["Red.", "Blue.", "Red.", "Red.", "Red."]);
+    expect(events.filter(e => e.role === "assistant").map(e => e.text)).toEqual(spoken);
+    expect(a.diagnostics().inference.suppressedReplies).toBe(0);
+  } finally { await a.close(); }
+});

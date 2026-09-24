@@ -339,6 +339,13 @@ Repeated inference failures back off and do not flood the transcript.
 It dispatches through Hawk's existing task service with serial execution;
 natural-language markers do not carry native parallel/follow-up fields. Repeated
 frame responses cannot repeat an identical delegation for the same user turn.
+Camera-only steps distinguish an already delivered reply from a pending question.
+They should report new relevant observations, not greet or acknowledge the same
+cue again. A consecutive duplicate answer is dropped before captions and TTS,
+even if silence occurs between duplicates. Fresh user cues, pending answers,
+distinct visual observations and new backend results remain eligible to speak.
+The diagnostic `output.duplicate_suppressed` and the health counter
+`suppressedReplies` record this without logging the reply text.
 Fresh speech interrupts TTS, cancels the active HTTP request and prevents an older
 inference from speaking or starting a stale task. This is client-side cancellation:
 the upstream API has no generation-cancel endpoint and may finish an already
@@ -360,6 +367,11 @@ not raw model text or media.
 Hawk restores its saved text/session memory on reconnect; transferring Joy visual
 memory into Hawk's durable archive is deferred. Local RMS endpointing and optional
 ASR/TTS add latency and need microphone testing before claiming voice quality.
+
+Regression check: say “嗯”, mute Mic and leave Camera on for 15 seconds. A brief
+acknowledgment is possible, but it must not keep greeting or inviting conversation with each
+frame. Then ask a visual question and request continuous descriptions while
+changing the scene; new questions and relevant changes must still get replies.
 
 Hawk imposes no speech-duration cutoff on Joy TTS or the shared PCM player used
 by Joy, Gemini and Venus. Long replies can finish or be interrupted normally.
@@ -418,6 +430,12 @@ Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interacti
   reconnect through the gateway. 29 targeted provider/gateway tests and 22 browser
   transport/playback tests passed, as did TypeScript and the web build. These
   probes used generated color images and synthetic speech, not physical devices.
+  A repetition follow-up replayed a filler cue with the affected session's prompt
+  and seven archived camera frames: no additional replies, followed by a correct
+  answer to a new visual question. A red-to-blue observation during held playback
+  and a synthetic Chinese interruption also passed. 31 targeted provider/gateway
+  tests now cover duplicate suppression, silence between duplicates, requested
+  repetition, pending answers, visual changes and fresh backend updates.
   Physical microphone behavior, long-session summaries and live delegation
   quality remain unverified.
 - Native iOS, durable visual-memory transfer and per-task model/effort selection
