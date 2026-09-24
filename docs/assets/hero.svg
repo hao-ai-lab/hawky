@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d">
+  <title id="t">Hawky, a realtime agent in your smart glasses</title>
+  <desc id="d">A person wearing camera smart glasses looks at a monstera plant and asks Hawky what it is. Hawky answers by voice and sets a watering reminder, while background tasks keep running on the side.</desc>
+  <defs>
+    <clipPath id="panel"><rect width="1280" height="640" rx="32"/></clipPath>
+    <radialGradient id="glow" cx="330" cy="300" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3A2A14"/>
+      <stop offset="1" stop-color="#15110D"/>
+    </radialGradient>
+    <linearGradient id="cone" x1="446" y1="0" x2="930" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD475" stop-opacity=".42"/>
+      <stop offset=".55" stop-color="#FFD475" stop-opacity=".13"/>
+      <stop offset="1" stop-color="#FFD475" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="fen" maskUnits="userSpaceOnUse" x="-220" y="-260" width="440" height="320">
+      <path fill="#fff" d="M0 0C-30 8-85-5-95-60C-105-120-55-170 5-172C65-170 105-125 95-65C88-10 35 8 0 0Z"/>
+      <g fill="#000">
+        <path d="M-102-96L-99-85L-42-100Z"/>
+        <path d="M-93-46L-86-35L-38-62Z"/>
+        <path d="M-70-150L-62-157L-30-134Z"/>
+        <path d="M101-94L98-83L42-100Z"/>
+        <path d="M91-42L84-31L38-60Z"/>
+        <path d="M64-154L72-147L32-132Z"/>
+        <ellipse cx="-24" cy="-138" rx="7" ry="3.5" transform="rotate(-20 -24 -138)"/>
+        <ellipse cx="30" cy="-140" rx="7" ry="3.5" transform="rotate(20 30 -140)"/>
+      </g>
+    </mask>
+    <g id="leaf">
+      <g mask="url(#fen)">
+        <path fill="#8CC1B3" d="M0 0C-30 8-85-5-95-60C-105-120-55-170 5-172C65-170 105-125 95-65C88-10 35 8 0 0Z"/>
+        <path fill="#5F978B" d="M0 0C-30 8-85-5-95-60C-105-120-55-170 5-172Z"/>
+      </g>
+      <path d="M0 0L5-170" stroke="#3F6E64" stroke-width="3" fill="none"/>
+    </g>
+    <symbol id="owl" viewBox="0 0 100 100">
+      <path fill="#F5A845" d="M16 26L28 6L42 28Z"/>
+      <path fill="#E08A2E" d="M84 26L72 6L58 28Z"/>
+      <path fill="#FFF2DB" d="M12 36L30 20L50 26L70 20L88 36L92 62L78 86L50 94L22 86L8 62Z"/>
+      <path fill="#EFD9B4" d="M50 26L70 20L88 36L92 62L78 86L50 94Z"/>
+      <path fill="#E6CBA0" d="M50 70L78 86L50 94L22 86Z"/>
+      <circle cx="33" cy="51" r="14" fill="#F5A845"/>
+      <circle cx="67" cy="51" r="14" fill="#F5A845"/>
+      <circle cx="33" cy="51" r="9.5" fill="#15110D"/>
+      <circle cx="67" cy="51" r="9.5" fill="#15110D"/>
+      <circle cx="36" cy="47" r="3" fill="#FFF2DB"/>
+      <circle cx="70" cy="47" r="3" fill="#FFF2DB"/>
+      <path fill="#FF853E" d="M45 60L55 60L50 74Z"/>
+    </symbol>
+  </defs>
+
+  <g clip-path="url(#panel)" font-family="'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+    <rect width="1280" height="640" fill="url(#glow)"/>
+
+    <!-- ambient listening rings -->
+    <g fill="none" stroke="#FFD475">
+      <circle cx="340" cy="290" r="200" stroke-opacity=".10" stroke-width="2"/>
+      <circle cx="340" cy="290" r="260" stroke-opacity=".07" stroke-width="2"/>
+      <circle cx="340" cy="290" r="320" stroke-opacity=".045" stroke-width="2"/>
+    </g>
+
+    <!-- shelf -->
+    <path d="M600 601H960" stroke="#3D3228" stroke-width="3" stroke-linecap="round"/>
+
+    <!-- camera field of view -->
+    <path d="M446 228L930 238L900 600Z" fill="url(#cone)"/>
+    <path d="M446 228L930 238M446 228L900 600" stroke="#FFD475" stroke-opacity=".35" stroke-width="2" stroke-dasharray="3 9" stroke-linecap="round"/>
+
+    <!-- monstera -->
+    <g>
+      <g stroke="#4F8579" stroke-width="6" fill="none" stroke-linecap="round">
+        <path d="M770 520C765 470 748 430 736 400"/>
+        <path d="M772 520C776 470 796 420 812 388"/>
+        <path d="M774 520C788 498 812 482 832 476"/>
+      </g>
+      <use href="#leaf" transform="translate(736 402) rotate(-28) scale(.82)"/>
+      <use href="#leaf" transform="translate(812 390) rotate(24) scale(.9)"/>
+      <use href="#leaf" transform="translate(832 476) rotate(58) scale(.56)"/>
+      <!-- pot -->
+      <path fill="#F5A845" d="M712 526H832L818 600H726Z"/>
+      <path fill="#D8893A" d="M772 526H832L818 600H772Z"/>
+      <path fill="#FF853E" d="M702 510H842V530H702Z"/>
+      <path fill="#E56F2C" d="M772 510H842V530H772Z"/>
+    </g>
+
+    <!-- viewfinder -->
+    <g fill="none" stroke="#FFD475" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M636 282V256H662"/>
+      <path d="M904 256H930V282"/>
+      <path d="M930 566V592H904"/>
+      <path d="M662 592H636V566"/>
+    </g>
+    <g>
+      <rect x="648" y="268" width="196" height="30" rx="8" fill="#15110D" fill-opacity=".86"/>
+      <circle cx="664" cy="283" r="5" fill="#FFD475"/>
+      <text x="677" y="289" font-size="16" fill="#FFD475" font-weight="500">Monstera deliciosa</text>
+    </g>
+
+    <!-- person -->
+    <g>
+      <path fill="#D9B68A" d="M326 370L378 384L384 436L320 432Z"/>
+      <g transform="translate(0 -18)">
+      <!-- torso -->
+      <path fill="#FF853E" d="M140 670L192 518L250 470L318 446L386 452L446 482L490 546L522 670Z"/>
+      <path fill="#E0692C" d="M140 670L192 518L250 470L318 446L302 548L268 670Z"/>
+      <path fill="#FF9D5E" d="M386 452L446 482L490 546L522 670L436 670L404 530Z"/>
+      <!-- neck + collar -->
+      <path fill="#FFF2DB" d="M318 446L386 452L372 508Z"/>
+      <path fill="#F5A845" d="M386 452L424 470L404 530L372 508Z"/>
+      <path fill="#D9793A" d="M318 446L372 508L300 520L296 470Z"/>
+      </g>
+      <!-- head -->
+      <path fill="#F1D9B3" d="M300 170L360 150L396 168L412 210L418 232L446 284L428 298L432 312L426 322L431 332L418 362L382 388L330 380L295 345L285 290Z"/>
+      <path fill="#FFF2DB" d="M396 168L412 210L418 232L446 284L428 298L432 312L426 322L431 332L418 362L382 388L372 330L386 262Z"/>
+      <path fill="#E8CCA3" d="M386 262L372 330L382 388L340 372Z"/>
+      <!-- hair -->
+      <path fill="#3E2C1F" d="M292 330L270 262L272 204L298 160L342 138L388 144L414 172L418 198L398 190L374 180L352 196L338 230L324 266L314 306Z"/>
+      <path fill="#5A4130" d="M298 160L342 138L388 144L414 172L374 180L352 196Z"/>
+      <!-- ear -->
+      <path fill="#E4C398" d="M316 254L336 250L342 282L326 298L312 280Z"/>
+      <!-- eye -->
+      <ellipse cx="416" cy="244" rx="6" ry="4" fill="#15110D"/>
+      <!-- glasses -->
+      <path d="M326 258L404 234" stroke="#110E0B" stroke-width="10" stroke-linecap="round"/>
+      <path d="M400 222H448Q454 222 452 230L446 258Q444 266 436 266H412Q402 266 401 256Z" fill="#FFD475" fill-opacity=".26" stroke="#110E0B" stroke-width="8" stroke-linejoin="round"/>
+      <path d="M408 232L420 232" stroke="#FFF2DB" stroke-opacity=".7" stroke-width="3" stroke-linecap="round"/>
+      <!-- camera dot -->
+      <circle cx="446" cy="228" r="13" fill="#FFD475" fill-opacity=".25"/>
+      <circle cx="446" cy="228" r="7.5" fill="#110E0B" stroke="#FFD475" stroke-width="2.5"/>
+      <circle cx="448" cy="226" r="2" fill="#FFF2DB"/>
+    </g>
+
+    <!-- wearer speaks -->
+    <g>
+      <path fill="#FFF2DB" d="M374 104L412 104L404 138Z"/>
+      <rect x="140" y="42" width="474" height="66" rx="33" fill="#FFF2DB"/>
+      <g fill="#E0692C">
+        <rect x="170" y="69" width="4" height="12" rx="2"/>
+        <rect x="178" y="62" width="4" height="26" rx="2"/>
+        <rect x="186" y="56" width="4" height="38" rx="2"/>
+        <rect x="194" y="64" width="4" height="22" rx="2"/>
+        <rect x="202" y="69" width="4" height="12" rx="2"/>
+      </g>
+      <text x="222" y="84" font-size="25" fill="#1A1205" font-weight="500">Hey Hawky, what's this plant?</text>
+    </g>
+
+    <!-- Hawky replies -->
+    <g>
+      <path fill="#FFD475" d="M616 170L616 204L560 214Z"/>
+      <rect x="600" y="118" width="632" height="100" rx="28" fill="#FFD475"/>
+      <circle cx="652" cy="168" r="32" fill="#15110D"/>
+      <use href="#owl" x="628" y="144" width="48" height="48"/>
+      <text x="700" y="158" font-size="25" fill="#1A1205" font-weight="700">That's a monstera.</text>
+      <text x="700" y="193" font-size="24" fill="#1A1205">I'll remind you to water it on Sundays.</text>
+    </g>
+
+    <!-- handoff thread -->
+    <path d="M1150 218C1150 256 1112 262 1104 300" fill="none" stroke="#F5A845" stroke-width="2.5" stroke-dasharray="2 8" stroke-linecap="round"/>
+    <path d="M1116 414C1126 424 1128 432 1124 442" fill="none" stroke="#F5A845" stroke-opacity=".6" stroke-width="2.5" stroke-dasharray="2 8" stroke-linecap="round"/>
+
+    <!-- background tasks -->
+    <g transform="translate(958 302) rotate(-2)">
+      <rect width="272" height="112" rx="18" fill="#231D16" stroke="#3D3228" stroke-width="2"/>
+      <circle cx="34" cy="33" r="12" fill="#FFD475"/>
+      <path d="M28 33L32.5 37.5L40 29" fill="none" stroke="#1A1205" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="56" y="39" font-size="17" fill="#FFD475" font-weight="600">Reminder added</text>
+      <text x="22" y="74" font-size="21" fill="#FFF2DB" font-weight="600">Water the monstera</text>
+      <text x="22" y="99" font-size="17" fill="#B5A58D">Sundays · 9:00 am</text>
+    </g>
+    <g transform="translate(990 446) rotate(2.5)" opacity=".92">
+      <rect width="250" height="122" rx="18" fill="#1D1813" stroke="#3D3228" stroke-width="2" stroke-dasharray="6 6"/>
+      <g fill="#F5A845">
+        <circle cx="26" cy="33" r="3.5"/>
+        <circle cx="37" cy="33" r="3.5" fill-opacity=".6"/>
+        <circle cx="48" cy="33" r="3.5" fill-opacity=".3"/>
+      </g>
+      <text x="62" y="39" font-size="17" fill="#F5A845" font-weight="600">Agent working</text>
+      <text x="22" y="72" font-size="20" fill="#FFF2DB" font-weight="600">Checking light needs</text>
+      <text x="22" y="96" font-size="17" fill="#B5A58D">Reading care guides…</text>
+      <rect x="22" y="106" width="206" height="5" rx="2.5" fill="#3D3228"/>
+      <rect x="22" y="106" width="124" height="5" rx="2.5" fill="#F5A845"/>
+    </g>
+  </g>
+</svg>
