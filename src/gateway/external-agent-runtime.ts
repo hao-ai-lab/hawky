@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,8 @@ export interface ExternalAgentTurnOptions {
   persistent?: boolean;
   runtimeSessionId?: string;
   onRuntime?: (details: { sessionId?: string; model?: string }) => void;
+  readOnly?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface ExternalAgentTurnResult {
@@ -743,17 +746,37 @@ function tomlStringArray(values: string[]): string {
   return `[${values.map(tomlString).join(", ")}]`;
 }
 
-function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, prompt: string, cwd: string, session?: { persistent?: boolean; runtimeSessionId?: string }): RuntimeCommand {
+/** Shell sandboxing does not cover MCP servers or hooks. Disable these for
+ * concurrent readers while retaining the user's model, provider and CLI login.
+ * Enumerate effective MCP config: an empty table override does NOT clear it.
+ */
+async function codexReadOnlyOverrides(cmd: string, cwd: string, signal?: AbortSignal): Promise<string[]> {
+  const flags = ["--ignore-rules", "-c", 'approval_policy="never"', "-c", "notify=[]",
+    ...["apps", "plugins", "hooks", "codex_hooks", "plugin_hooks", "skill_mcp_dependency_install", "computer_use", "browser_use"].flatMap(name => ["--disable", name])];
+  const { stdout } = await promisify(execFile)(cmd, [...flags.slice(1), "mcp", "list", "--json"], {
+    cwd, env: runtimeEnv(), signal, timeout: 10000, maxBuffer: 1024 * 1024,
+  });
+  let servers: unknown;
+  try { servers = JSON.parse(stdout); } catch { throw new Error("Cannot verify Codex MCP configuration for read-only execution. Update the Codex CLI."); }
+  if (!Array.isArray(servers) || servers.some(s => typeof s?.name !== "string" || !/^[A-Za-z0-9_-]+$/.test(s.name)))
+    throw new Error("Cannot disable the configured Codex MCP servers for read-only execution.");
+  for (const server of servers) flags.push("-c", `mcp_servers.${server.name}.enabled=false`);
+  return flags;
+}
+
+async function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, prompt: string, cwd: string, session?: { persistent?: boolean; runtimeSessionId?: string; readOnly?: boolean; signal?: AbortSignal }): Promise<RuntimeCommand> {
   if (runtimeKind === "codex") {
+    const cmd = resolveRuntimeExecutable("codex");
+    const readOnlyFlags = session?.readOnly ? await codexReadOnlyOverrides(cmd, cwd, session.signal) : [];
     const cleanupDir = mkdtempSync(join(tmpdir(), "hawky-codex-"));
     const outputPath = join(cleanupDir, "last-message.txt");
-    const sandbox = process.env.HAWKY_CODEX_SANDBOX?.trim() || "workspace-write";
+    const sandbox = session?.readOnly ? "read-only" : process.env.HAWKY_CODEX_SANDBOX?.trim() || "workspace-write";
     return {
-      cmd: resolveRuntimeExecutable("codex"),
+      cmd,
       args: [
         "exec",
         ...(session?.runtimeSessionId ? ["resume"] : []),
-        ...(codexMcpEnabled() ? buildCodexMcpConfigOverrides() : []),
+        ...(session?.readOnly ? readOnlyFlags : codexMcpEnabled() ? buildCodexMcpConfigOverrides() : []),
         "--json",
         "--output-last-message", outputPath,
         ...(session?.runtimeSessionId ? ["-c", `sandbox_mode=${tomlString(sandbox)}`] : ["--color", "never", "-C", cwd, "-s", sandbox]),
@@ -839,18 +862,20 @@ function commandForRuntime(runtimeKind: Exclude<SessionRuntimeKind, "native">, p
 
 export class ExternalAgentRuntime {
   private child: ChildProcessWithoutNullStreams | null = null;
+  private preparing: AbortController | null = null;
   private currentText = "";
   private forceKillTimer: ReturnType<typeof setTimeout> | null = null;
 
   getCurrentTurn(): ExternalAgentCurrentTurn {
     return {
-      busy: this.child !== null,
+      busy: this.child !== null || this.preparing !== null,
       streaming: this.child !== null && this.currentText.length > 0,
       text: this.currentText,
     };
   }
 
   cancel(): boolean {
+    if (this.preparing) { this.preparing.abort(new Error("Task cancelled")); return true; }
     if (!this.child) return false;
     this.killChild("SIGTERM");
     if (!this.forceKillTimer) {
@@ -875,7 +900,7 @@ export class ExternalAgentRuntime {
   }
 
   async sendMessage(opts: ExternalAgentTurnOptions): Promise<ExternalAgentTurnResult> {
-    if (this.child) throw new Error(`${opts.runtimeKind} runtime is already running`);
+    if (this.child || this.preparing) throw new Error(`${opts.runtimeKind} runtime is already running`);
 
     const timestamp = new Date().toISOString();
     const userMessage: ChatMessage = {
@@ -884,7 +909,18 @@ export class ExternalAgentRuntime {
       timestamp,
     };
     const prompt = opts.runtimeSessionId ? opts.message : buildPrompt(opts.history, opts.message, opts.runtimeKind);
-    const command = commandForRuntime(opts.runtimeKind, prompt, opts.cwd, opts);
+    opts.signal?.throwIfAborted();
+    const preparation = this.preparing = new AbortController();
+    let command: RuntimeCommand;
+    try {
+      command = await commandForRuntime(opts.runtimeKind, prompt, opts.cwd, { ...opts,
+        signal: opts.signal ? AbortSignal.any([preparation.signal, opts.signal]) : preparation.signal });
+    } finally { this.preparing = null; }
+    if (opts.signal?.aborted || preparation.signal.aborted) {
+      if (command.cleanupDir) rmSync(command.cleanupDir, { recursive: true, force: true });
+      preparation.signal.throwIfAborted();
+      opts.signal?.throwIfAborted();
+    }
     let runtimeError: string | undefined;
     let stderr = "";
     let stdout = "";

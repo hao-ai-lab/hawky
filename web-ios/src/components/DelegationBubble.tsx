@@ -28,6 +28,7 @@ export function DelegationBubble({ task, image, onImageClick }: { task: Delegati
       <span className="font-medium">Backend task</span>
       <span className="ml-2">{task.status} {duration}</span>
       <span title={task.request} className="mt-1 line-clamp-2 break-words text-white/70">{task.request}</span>
+      {task.status === "queued" && task.queueReason && <span className="mt-1 block text-xs text-white/60">{task.queueReason}</span>}
     </summary>
     <div aria-label="Backend task details" role="region" tabIndex={0} className="max-h-[min(55dvh,28rem)] space-y-3 overflow-y-auto overscroll-contain border-t border-white/10 p-3 text-xs text-white/85 [overflow-wrap:anywhere]">
       <p>{task.runtime} · {task.model || "Model reported by runtime when available"}</p>

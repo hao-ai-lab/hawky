@@ -89,6 +89,27 @@ test("cancelled queued work never starts, while reconnect reads the same active 
   expect(g.call("delegation.get", request).status).toBe("cancelled");
 });
 
+test("a Codex write follow-up keeps its conversation but waits for exclusive access", async () => {
+  let finish!: () => void;
+  const g = gateway(async (_c, t, o) => {
+    o.started(undefined);
+    if (t.id === "unrelated") await new Promise<void>(r => finish = r);
+    return { reply: "done" };
+  });
+  const first = await g.call("delegation.run", { ...request, runtime: "codex", execution: "read_only" });
+  const other = g.call("delegation.run", { ...request, id: "unrelated", runtime: "codex", execution: "read_only" });
+  await new Promise(r => setTimeout(r, 0));
+  const follow = g.call("delegation.run", { ...request, id: "write-follow-up", message: "Update the file", continueTask: first.id, execution: "serial" });
+  await new Promise(r => setTimeout(r, 0));
+  const queued = g.call("delegation.get", { ...request, id: "write-follow-up" });
+  expect(queued.status).toBe("queued");
+  expect(queued.queueReason).toContain("exclusive workspace access");
+  expect(queued.readOnly).toBe(false);
+  expect(queued.backendSession).toBe(first.backendSession);
+  finish(); await other;
+  expect((await follow).status).toBe("completed");
+});
+
 test("a gateway restart marks unfinished work interrupted without repeating side effects", async () => {
   let finish!: () => void;
   const g = gateway(async () => { await new Promise<void>(r => finish = r); return { reply: "done" }; });
@@ -139,19 +160,60 @@ test("dependent work consumes the completed result and does not run after a fail
   expect(failed.status).toBe("failed"); expect(started).not.toContain("blocked");
 });
 
-test("external runtime choices retain their own conversation and serialize even read-only requests", async () => {
+test("external runtime tasks own their conversation; explicit follow-ups resume it", async () => {
   const g = gateway(async (_c, t, observer) => {
     observer.started(undefined); observer.runtime?.({ sessionId: `cli-${t.runtime}`, model: t.runtime === "claude" ? "reported-model" : undefined });
     return { reply: t.backendSession };
   });
   const a = await g.call("delegation.run", { ...request, runtime: "codex", execution: "read_only" });
   expect(a.runtime).toBe("codex"); expect(a.model).toBeUndefined(); expect(a.runtimeSessionId).toBe("cli-codex");
-  expect(a.backendSession).toBe("web:test-codex-bridge"); expect(a.readOnly).toBe(false);
+  expect(a.backendSession).toBe("web:test-codex-work-fixture-1"); expect(a.readOnly).toBe(true);
   const b = await g.call("delegation.run", { ...request, id: "second", runtime: "claude", continueTask: a.id });
   expect(b.runtime).toBe("codex"); expect(b.backendSession).toBe(a.backendSession);
   const c = await g.call("delegation.run", { ...request, id: "claude", runtime: "claude" });
   expect(c.backendSession).not.toBe(a.backendSession); expect(c.model).toBe("reported-model");
+  expect(c.readOnly).toBe(false);
   expect(() => g.call("delegation.submit", { ...request, id: "bad", runtime: "made-up" })).toThrow("Unknown backend runtime");
+});
+
+test("Codex readers overlap; a follow-up cannot block another independent task; cancellation stays scoped", async () => {
+  const started: string[] = [], finishes = new Map<string, () => void>();
+  const g = gateway(async (_c, t, observer) => {
+    observer.started(undefined); started.push(t.id);
+    observer.runtime?.({ sessionId: `runtime-${t.backendSession}` });
+    await new Promise<void>(r => { finishes.set(t.id, r); observer.signal.addEventListener("abort", () => r(), { once: true }); });
+    return { reply: t.id };
+  });
+  const params = (id: string) => ({ ...request, id, runtime: "codex", execution: "read_only" });
+  const a = g.call("delegation.run", params("research"));
+  await new Promise(r => setTimeout(r, 0));
+  const follow = g.call("delegation.run", { ...params("follow"), continueTask: "research" });
+  const b = g.call("delegation.run", params("directory"));
+  await new Promise(r => setTimeout(r, 0));
+  expect(started).toEqual(["research", "directory"]);
+  expect(g.call("delegation.get", params("follow")).queueReason).toContain("previous turn");
+  // Reconnecting only reads persisted state; it does not create another task.
+  expect(g.call("delegation.list", request).tasks).toHaveLength(3);
+  g.call("delegation.cancel", params("research"));
+  expect((await a).status).toBe("cancelled");
+  await new Promise(r => setTimeout(r, 0));
+  expect(g.call("delegation.get", params("directory")).status).toBe("running");
+  finishes.get("directory")!(); finishes.get("follow")!();
+  const [directory, following] = await Promise.all([b, follow]);
+  expect(directory.runtimeSessionId).not.toBe(following.runtimeSessionId);
+  expect(following.backendSession).toBe((await a).backendSession);
+});
+
+test("a Codex revision keeps task lineage and its conversation without replacing an unrelated task", async () => {
+  const g = gateway(async (_c, t, observer) => { observer.started(undefined); return { reply: t.backendSession }; });
+  const a = await g.call("delegation.run", { ...request, runtime: "codex", execution: "read_only" });
+  const b = await g.call("delegation.run", { ...request, id: "independent", runtime: "codex", execution: "read_only" });
+  const revision = g.call("delegation.revise", { ...request, revisionId: "revision", message: "Read beta.txt" });
+  expect(revision.backendSession).toBe(a.backendSession);
+  expect(revision.continues).toBe(a.id);
+  expect(revision.supersedes).toBe(a.id);
+  expect(g.call("delegation.get", { ...request, id: b.id }).validity).toBe("current");
+  await new Promise(r => setTimeout(r, 0));
 });
 
 test("cancelling a dependent task settles before its prerequisite, without starting it", async () => {

@@ -893,6 +893,8 @@ export function registerAgentMethods(
               history: session.loop.getHistory(),
               message: userMessage,
               persistent: !!observer,
+              readOnly: observer?.readOnly,
+              signal: observer?.signal,
               runtimeSessionId: observer ? loadSessionMeta()[sessionKey]?.externalSessionId : undefined,
               onRuntime: observer ? details => {
                 updateSessionMeta(sessionKey, {

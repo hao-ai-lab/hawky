@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -532,6 +532,66 @@ describe("codex external runtime JSONL parsing", () => {
 });
 
 describe("persistent delegated CLI conversations", () => {
+  test("read-only Codex turns disable external tools and retain the sandbox on resume", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hawk-readonly-runtime-")); cleanup.push(dir);
+    const binary = join(dir, "codex"), capture = join(dir, "invocations.jsonl");
+    writeFileSync(binary, `#!${process.execPath}
+import {appendFileSync} from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(capture)}, JSON.stringify({args, cwd: process.cwd()}) + '\\n');
+if (args.includes('list')) { console.log(JSON.stringify([{name:'configured-tools'}])); process.exit(0); }
+await Bun.stdin.text();
+console.log(JSON.stringify({type:'thread.started', thread_id:'readonly-conversation'}));
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:'read result'}}));
+`, { mode: 0o755 });
+    const previous = process.env.HAWKY_CODEX_BIN, sandbox = process.env.HAWKY_CODEX_SANDBOX;
+    process.env.HAWKY_CODEX_BIN = binary; process.env.HAWKY_CODEX_SANDBOX = "danger-full-access";
+    try {
+      const options = { runtimeKind: "codex" as const, sessionKey: "readonly", cwd: dir, history: [], readOnly: true, persistent: true, emit() {} };
+      await new ExternalAgentRuntime().sendMessage({ ...options, message: "Read alpha" });
+      await new ExternalAgentRuntime().sendMessage({ ...options, runtimeSessionId: "readonly-conversation", message: "Explain it" });
+      const calls = readFileSync(capture, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      expect(calls).toHaveLength(4);
+      for (const call of calls) {
+        expect(call.cwd).toBe(realpathSync(dir));
+        expect(call.args).toContain('approval_policy="never"');
+        expect(call.args).toContain("notify=[]");
+        expect(call.args).toContain("plugins");
+        expect(call.args).toContain("apps");
+        expect(call.args).toContain("hooks");
+        expect(call.args.join(" ")).not.toContain("danger-full-access");
+      }
+      for (const call of [calls[1], calls[3]]) {
+        expect(call.args).toContain("--ignore-rules");
+        expect(call.args).toContain("mcp_servers.configured-tools.enabled=false");
+        expect(call.args.join(" ")).not.toContain("mcp_servers.hawky.enabled=true");
+      }
+      expect(calls[1].args).toContain("read-only");
+      expect(calls[3].args).toContain('sandbox_mode="read-only"');
+      expect(calls[3].args).toContain("readonly-conversation");
+    } finally {
+      if (previous === undefined) delete process.env.HAWKY_CODEX_BIN; else process.env.HAWKY_CODEX_BIN = previous;
+      if (sandbox === undefined) delete process.env.HAWKY_CODEX_SANDBOX; else process.env.HAWKY_CODEX_SANDBOX = sandbox;
+    }
+  });
+
+  test("cancellation during Codex configuration discovery never starts execution", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hawk-readonly-cancel-")); cleanup.push(dir);
+    const binary = join(dir, "codex");
+    writeFileSync(binary, `#!${process.execPath}\nsetTimeout(() => console.log('[]'), 20000);\n`, { mode: 0o755 });
+    const previous = process.env.HAWKY_CODEX_BIN; process.env.HAWKY_CODEX_BIN = binary;
+    try {
+      const runtime = new ExternalAgentRuntime(), events: unknown[] = [];
+      const turn = runtime.sendMessage({ runtimeKind: "codex", sessionKey: "cancel", cwd: dir, history: [], readOnly: true, message: "Read", emit: e => events.push(e) });
+      const outcome = turn.then(() => null, error => error);
+      expect(runtime.getCurrentTurn().busy).toBe(true);
+      expect(runtime.cancel()).toBe(true);
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(runtime.getCurrentTurn().busy).toBe(false);
+      expect(events).toEqual([]);
+    } finally { if (previous === undefined) delete process.env.HAWKY_CODEX_BIN; else process.env.HAWKY_CODEX_BIN = previous; }
+  });
+
   for (const kind of ["codex", "claude"] as const) {
     test(`${kind} resumes the confirmed conversation after a runtime restart without replaying history`, async () => {
       const dir = mkdtempSync(join(tmpdir(), "hawk-resume-")); cleanup.push(dir);
