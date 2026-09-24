@@ -122,7 +122,7 @@ export function resetRealtimeMintQuotaForTests(): void {
   realtimeMintQuotas.clear();
 }
 
-function selectRealtimeApiKey(
+export function selectRealtimeApiKey(
   params: LiveRealtimeClientSecretParams,
   configuredKey: string | undefined,
 ): RealtimeApiKeySelection {
@@ -277,7 +277,7 @@ function extractJsonError(payload: unknown): string | null {
   return typeof error === "string" && error.trim() ? error : null;
 }
 
-function enforceRealtimeMintQuota(rawKey: string): void {
+export function enforceRealtimeMintQuota(rawKey: string): void {
   const perHour = envInt("HAWKY_REALTIME_MINTS_PER_HOUR", 12);
   const perDay = envInt("HAWKY_REALTIME_MINTS_PER_DAY", 50);
   if (perHour <= 0 && perDay <= 0) return;

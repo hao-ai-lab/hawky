@@ -234,7 +234,7 @@ export class WebSocketClient {
       const timer = NO_TIMEOUT_METHODS.has(method) ? null : setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`RPC timeout: ${method}`));
-      }, method === "memory.distill" ? MEMORY_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+      }, method === "live.gpt.create" ? 50_000 : method === "memory.distill" ? MEMORY_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
 
       this.pendingRequests.set(id, { resolve, reject, timer });
 

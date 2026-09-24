@@ -1,3 +1,4 @@
+import { registerGptLiveMethods } from "./gpt-live-methods.js";
 // =============================================================================
 // Agent RPC Method Handlers
 //
@@ -1132,7 +1133,7 @@ export function registerAgentMethods(
     };
   }
   server.registerMethod("chat.send", (conn, params, srv) => sendChat(conn, params, srv));
-  registerDelegationMethods(server, (conn, task, observer) => {
+  const delegationService = registerDelegationMethods(server, (conn, task, observer) => {
     if (task.runtime !== "native" && !externalAgentRuntimesEnabled()) throw new MethodError("FORBIDDEN", "Enable CLI runtimes in Settings > Live > Hawk bridge before using Codex or Claude.");
     const session = sessions.getOrCreate(task.backendSession, conn.workingDirectory || undefined, task.runtime);
     if (session.runtimeKind !== task.runtime) throw new MethodError("CONFLICT", "Backend session is bound to a different runtime");
@@ -1158,6 +1159,13 @@ export function registerAgentMethods(
         else throw new MethodError("INVALID_REQUEST", "An answer is required");
       },
     });
+
+  registerGptLiveMethods(server, delegationService, (sessionKey, turn) => {
+    const session = sessions.getOrCreate(sessionKey);
+    const message = { role: turn.role, content: [{ type: "text" as const, text: turn.text }], timestamp: new Date().toISOString() };
+    session.loop.setHistory([...session.loop.getHistory(), message]);
+    session.sessionManager.appendMessage(message);
+  });
 
   // -------------------------------------------------------------------------
   // chat.cancel — cancel the current agent turn for a session

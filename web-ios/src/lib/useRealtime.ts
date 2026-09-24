@@ -1,16 +1,17 @@
+import { realtimeSessionConfig, connectRealtime } from "./live/providers/openai-realtime";
+import { useTaskSubscription } from "./live/task-subscription";
+import { useConversationPersistence } from "./live/conversation-persistence";
+import { liveCapabilities } from "../../../src/live/contracts";
+import { GptLiveProvider, gptLivePrompt } from "./live/providers/gpt-live";
 import { createMediaConnection } from "./live/media-connection";
 import { delegationEntry } from "./delegation-view";
 // =============================================================================
 // useRealtime — the Live engine for the web-ios app (#681)
 //
-// Reproduces the iOS Live session pipeline in the browser, reusing the proven
-// flow from web/'s LiveLab: gateway boot context → BYOK-aware realtime client
-// secret (live.openaiClientSecret) → WebRTC peer connection to OpenAI Realtime
-// → mic/voice + camera frame loop → transcript of user/assistant/system/tool
-// entries. Exposes iOS-style phases so the Live screen can render the FaceTime
-// stage states (idle / connecting / restoring / connected / paused / failed).
-//
-// Kept as a hook so the screen component stays presentational.
+// Coordinates provider connections with shared media, history, recording and task
+// UI. OpenAI Realtime uses its startup/response/compaction state machines;
+// GPT-Live uses an independent adapter and a gateway-owned task coordinator.
+// Provider wire formats must stay in those provider modules, not the screen.
 // =============================================================================
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -32,7 +33,7 @@ import {
   type PersonModelToolName,
 } from "../../../src/identity/person/tool-contract";
 
-import { COCKTAIL_INSTRUCTIONS, isFinishedTask, LivePhase, TranscriptKind, ToolStatus, TranscriptEntry, BACKEND_TOOL, BACKEND_CONTROL_TOOL, WEB_PERSON_TOOL_NAMES, WEB_PERSON_TOOLS, SEND_PHOTO_TOOL, GENERATE_CHART_TOOL, BrokerResponse, TOOL_MARKER, entryId, toolLabel, personRpcMethod, personToolDetail, buildTurnDetection, mapHistoryToTranscript, clientSecretValue, safeJSON } from "./realtime-tools";
+import { COCKTAIL_INSTRUCTIONS, isFinishedTask, LivePhase, TranscriptKind, TranscriptEntry, BACKEND_TOOL, BACKEND_CONTROL_TOOL, WEB_PERSON_TOOL_NAMES, WEB_PERSON_TOOLS, SEND_PHOTO_TOOL, GENERATE_CHART_TOOL, BrokerResponse, entryId, toolLabel, personRpcMethod, personToolDetail, buildTurnDetection, mapHistoryToTranscript, clientSecretValue, safeJSON } from "./realtime-tools";
 export { artifactsFromTranscript, mapHistoryToTranscript, WEB_PERSON_TOOL_NAME_LIST } from "./realtime-tools";
 export type { LivePhase, TranscriptEntry, Artifact, ToolStatus } from "./realtime-tools";
 
@@ -47,6 +48,13 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Live settings (model, voice, VAD, reasoning, tool choice, bridge).
   const settings = useLiveSettings();
 
+  const disposeMediaRef = useRef<(() => void) | null>(null);
+  const gptRef = useRef<GptLiveProvider | null>(null);
+  const gptClosingRef = useRef<Promise<void>>(Promise.resolve());
+  const restartPendingRef = useRef(false);
+  const [activeModel, setActiveModel] = useState<string | null>(null);
+  const capabilities = liveCapabilities(activeModel ?? settings.model);
+  const isGpt = capabilities.provider === "gpt-live";
   const [phase, setPhase] = useState<LivePhase>("idle");
   const [compaction, setCompaction] = useState<CompactionState>(initialCompaction);
   const compactionRef = useRef<RealtimeCompaction | null>(null);
@@ -62,24 +70,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const [historyKey, setHistoryKey] = useState<string | null>(null);
   const historyRequestRef = useRef<{ key: string; promise: Promise<void>; failed: boolean } | null>(null);
   const transcriptSessionRef = useRef<string | null>(null);
-  const tasksRef = useRef(new Map<string, DelegationTask>());
   const injectTasksRef = useRef<(announce?: boolean) => void>(() => {});
   const injectedTasksRef = useRef(new Set<string>());
-  const quietTasksRef = useRef(new Set<string>());
   const submittingTasksRef = useRef(new Set<string>());
-  useEffect(() => {
-    tasksRef.current.clear();
-    quietTasksRef.current.clear();
-    let disposed = false;
-    const accept = (task: DelegationTask, recovered = false) => {
-      if (disposed || task.ownerSession !== sessionKey) return;
-      const previous = tasksRef.current.get(task.id);
-      if ((previous?.events.at(-1)?.seq ?? 0) > (task.events.at(-1)?.seq ?? 0)) return;
-      // A historical task first discovered by recovery is context, not news.
-      // A known running task that finishes during this connection is news.
-      if (recovered && !previous && isFinishedTask(task)) quietTasksRef.current.add(task.id);
-      tasksRef.current.set(task.id, task);
-      if (task.validity === "superseded") {
+  const { tasksRef, quietTasksRef } = useTaskSubscription({ sessionKey, connected: gatewayStatus === "connected", rpc, subscribe,
+    changed: (task, previous) => {
+      if (task.validity === "superseded" && !gptRef.current) {
         responsesRef.current?.invalidateTask(task.id);
         if (previous?.validity !== "superseded" && readyRef.current) sendRealtime({ type: "conversation.item.create",
           item: { type: "message", role: "system", content: [{ type: "input_text", text: `Backend task ${task.id} was superseded by a correction. Its result is no longer current; do not present it as the answer.` }] } });
@@ -91,21 +87,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
           : [...cur, entry];
       });
       injectTasksRef.current();
-    };
-    const unsubscribe = subscribe(event => {
-      if (event.event === "delegation.updated") {
-        const task = (event.payload as { task?: DelegationTask })?.task;
-        if (task) accept(task);
-      }
-    });
-    const refresh = async () => {
-      try { const result = await rpc("delegation.list", { ownerSession: sessionKey }) as { tasks?: DelegationTask[] }; result.tasks?.forEach(task => accept(task, true)); }
-      catch { /* Older/offline gateways do not prevent the voice connection. */ }
-    };
-    if (gatewayStatus === "connected") void refresh();
-    const timer = setInterval(() => { if (gatewayStatus === "connected") void refresh(); }, 2000);
-    return () => { disposed = true; unsubscribe(); clearInterval(timer); };
-  }, [subscribe, sessionKey, rpc, gatewayStatus]);
+    },
+    error: payload => { if (payload?.id === gptRef.current?.id) push("warning", String(payload.message)); },
+  });
   const startupRef = useRef<RealtimeStartup | null>(null);
   const readyRef = useRef(false);
   const [micOn, setMicOn] = useState(settings.microphoneEnabled);
@@ -120,10 +104,10 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   replyModeRef.current = speakerOn ? "audio" : "text";
   useEffect(() => {
     if (phase !== "idle" && phase !== "failed") return;
-    setMicOn(settings.microphoneEnabled); setCameraOn(settings.cameraEnabled);
-    setSpeakerOn(settings.responseModality === "audio"); setStaySilent(settings.staySilent);
-    setCocktailParty(settings.cocktailParty); setSafetyOn(settings.safetyCheck);
-  }, [phase, settings.microphoneEnabled, settings.cameraEnabled, settings.responseModality, settings.staySilent, settings.cocktailParty, settings.safetyCheck]);
+    setMicOn(settings.microphoneEnabled); setCameraOn(settings.cameraEnabled && liveCapabilities(settings.model).camera);
+    setSpeakerOn(settings.responseModality === "audio"); setStaySilent(settings.staySilent && liveCapabilities(settings.model).provider !== "gpt-live");
+    setCocktailParty(settings.cocktailParty && liveCapabilities(settings.model).camera); setSafetyOn(settings.safetyCheck && liveCapabilities(settings.model).camera);
+  }, [phase, settings.microphoneEnabled, settings.cameraEnabled, settings.responseModality, settings.staySilent, settings.cocktailParty, settings.safetyCheck, settings.model]);
   const [speaking, setSpeaking] = useState(false);
   const [bridgeOffline, setBridgeOffline] = useState(false);
   // Artifacts (charts) are derived from `transcript` — no separate state.
@@ -154,7 +138,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
     if (videoElRef.current && mediaRef.current) videoElRef.current.srcObject = mediaRef.current;
-    if (audioElRef.current) audioElRef.current.muted = !speakerOn;
+    if (audioElRef.current) audioElRef.current.muted = !speakerOn || (gptRef.current?.awaitingUser ?? false);
   }, [cameraOn, phase, speakerOn]);
   const frameTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -188,61 +172,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     });
   }
 
-  // Persist Live conversation turns to the backend session (so they show in
-  // session.list message count + reload via session.history). Batched + flushed
-  // shortly after, to avoid an RPC per word. Only user/assistant turns.
-  const pendingTurnsRef = useRef<Array<{ sessionKey: string; role: "user" | "assistant"; text: string; timestamp: string }>>([]);
-  const flushInFlightRef = useRef<Promise<boolean> | null>(null);
-  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persistTurn = useCallback((role: "user" | "assistant", text: string, identity?: { responseId: string; itemId?: string; contentIndex: number }) => {
-    const t = text.trim();
-    if (!t) return;
-    // Auto-title the session from its first user message (ChatGPT-style).
-    cameraArchiveRef.current?.record("message.completed", { role, text: t, ...identity });
-    if (role === "user") void useSessionStore.getState().maybeAutoTitle(liveSessionKeyRef.current, t);
-    pendingTurnsRef.current.push({ sessionKey: liveSessionKeyRef.current, role, text: t, timestamp: new Date().toISOString() });
-    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
-    flushTimerRef.current = setTimeout(() => { void flushTurns(); }, 1200);
-  }, []);
-
-  // Persist a tool-call record so it survives in history. The gateway only
-  // accepts user/assistant turns, so we encode the tool as an assistant message
-  // with a marker that mapHistoryToTranscript decodes back into a tool bubble.
-  const persistTool = useCallback((label: string, status: ToolStatus, detail: string, ms: number, imageData?: string, imageTitle?: string, delegation?: DelegationTask) => {
-    // Charts persist into history by embedding the data: URL in the marker. Cap
-    // the size so a huge image can't bloat the session (it still shows live).
-    const image = imageData && imageData.length <= 600_000 ? imageData : undefined;
-    pendingTurnsRef.current.push({
-      sessionKey: liveSessionKeyRef.current,
-      role: "assistant",
-      text: `${TOOL_MARKER}${JSON.stringify({ label, status, detail, ms, image, imageTitle: image ? imageTitle : undefined, delegation })}`,
-      timestamp: new Date().toISOString(),
-    });
-    if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
-    flushTimerRef.current = setTimeout(() => { void flushTurns(); }, 1200);
-  }, []);
-  const flushTurns = useCallback(async (): Promise<boolean> => {
-    const previous = flushInFlightRef.current ?? Promise.resolve(true);
-    const job = previous.then(async (saved) => {
-      if (!saved) return false;
-      while (pendingTurnsRef.current.length) {
-        const key = pendingTurnsRef.current[0].sessionKey;
-        const boundary = pendingTurnsRef.current.findIndex(turn => turn.sessionKey !== key);
-        const batch = pendingTurnsRef.current.splice(0, boundary < 0 ? pendingTurnsRef.current.length : boundary);
-        try {
-          await rpc("session.appendMessages", { sessionKey: key, messages: batch.map(({ sessionKey: _, ...turn }) => turn) });
-          void useSessionStore.getState().fetchSessions();
-        } catch {
-          pendingTurnsRef.current.unshift(...batch);
-          return false;
-        }
-      }
-      return true;
-    });
-    flushInFlightRef.current = job;
-    try { return await job; }
-    finally { if (flushInFlightRef.current === job) flushInFlightRef.current = null; }
-  }, [rpc]);
+  const { persistTurn, persistTool, flushTurns } = useConversationPersistence(rpc, liveSessionKeyRef, cameraArchiveRef);
   const { state: sessionMemory, update: updateSessionMemory } = useSessionMemory(sessionKey, rpc, flushTurns);
 
   // Provider state changes synchronously in event handlers. React receives
@@ -275,6 +205,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }
 
   const transmitRealtime = useCallback((event: unknown, duringStartup = false) => {
+    if (gptRef.current) return false;
     if (!readyRef.current && !duringStartup) return false;
     const dc = dcRef.current;
     if (!dc || dc.readyState !== "open") return false;
@@ -302,6 +233,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }, [transmitRealtime]);
 
   injectTasksRef.current = (announce = true) => {
+    if (gptRef.current) return;
     if (!readyRef.current) return;
     for (const task of tasksRef.current.values()) {
       if (task.ownerSession !== liveSessionKeyRef.current || task.validity === "superseded" || ["played", "displayed"].includes(task.delivery ?? "") || submittingTasksRef.current.has(task.id)) continue;
@@ -322,6 +254,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   useEffect(() => { if (phase === "connected") injectTasksRef.current(); }, [phase]);
 
   const teardown = useCallback(() => {
+    if (gptRef.current) { gptClosingRef.current = gptRef.current.close(); gptRef.current = null; }
+    setActiveModel(null);
     compactionRef.current?.dispose();
     compactionRef.current = null;
     injectedTasksRef.current.clear();
@@ -339,6 +273,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     if (safetyTimerRef.current) { clearInterval(safetyTimerRef.current); safetyTimerRef.current = null; }
     const dc = dcRef.current; dcRef.current = null; dc?.close();
     const pc = pcRef.current; pcRef.current = null; pc?.close();
+    disposeMediaRef.current?.(); disposeMediaRef.current = null;
     mediaRef.current?.getTracks().forEach((t) => t.stop());
     mediaRef.current = null;
     audioSenderRef.current = null;
@@ -421,6 +356,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
 
   const start = useCallback(async () => {
     if (startingRef.current || closing) return;
+    const isGpt = liveCapabilities(settings.model).provider === "gpt-live";
+    const cameraOn = !isGpt && cameraOnRef.current;
     const blocked = micOn || cameraOn ? mediaUnavailableReason() : null;
     if (blocked) { setError(blocked); setPhase("failed"); push("warning", blocked); return; }
 
@@ -430,6 +367,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     staySilentRef.current = staySilent;
     responsesRef.current?.setSilent(staySilent);
     startingRef.current = true;
+    setActiveModel(settings.model);
     setPhase("connecting");
     setError(null);
     setBridgeOffline(false);
@@ -439,6 +377,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     liveSessionKeyRef.current = sessionKey;
 
     try {
+      await gptClosingRef.current;
       await loadHistory(sessionKey);
       if (attempt !== attemptRef.current) return;
       if (transcriptSessionRef.current !== sessionKey) throw new Error("Selected conversation changed while loading. Tap Start to retry.");
@@ -505,8 +444,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         push("system", "Hawk backend unreachable — running without memory/tools.");
       }
 
-      instructionsRef.current = buildRealtimePrompt(bootContext);
-      const instructions = instructionsRef.current + (cocktailParty ? COCKTAIL_INSTRUCTIONS : "");
+      instructionsRef.current = isGpt ? gptLivePrompt(bootContext, settings.backendBridge, settings.backendRuntime) : buildRealtimePrompt(bootContext);
+      const instructions = instructionsRef.current + (!isGpt && cocktailParty ? COCKTAIL_INSTRUCTIONS : "");
       // Realtime tools: backend bridge + shared person tools. The browser attaches
       // frames privately when a person tool needs the current camera image.
       const tools = [
@@ -517,7 +456,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       if (attempt !== attemptRef.current) return;
 
       // 2) Mint a realtime client secret (BYOK-aware), using the chosen model.
-      const broker = (await rpc("live.openaiClientSecret", {
+      const broker = isGpt ? { model: settings.model } : (await rpc("live.openaiClientSecret", {
         ...byokParam(),
         model: settings.model,
         instructions,
@@ -527,9 +466,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       })) as BrokerResponse;
       if (broker.ok === false) throw new Error(broker.error ?? "Realtime broker failed");
       const token = clientSecretValue(broker);
-      if (!token) throw new Error("Realtime broker did not return a client secret");
+      if (!isGpt && !token) throw new Error("Realtime broker did not return a client secret");
       if (attempt !== attemptRef.current) return;
-      archive.record("context.initial", { model: broker.model ?? settings.model, instructions, tools,
+      archive.record("context.initial", { model: broker.model ?? settings.model, instructions, tools: isGpt ? [] : tools,
         reasoningEffort: settings.reasoningEffort, restoredMessageCount: priorTurns.length, memoryRevision });
 
       // 3) Capture mic/camera (camera position from settings).
@@ -544,12 +483,14 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       if (videoElRef.current) videoElRef.current.srcObject = media;
 
       // 4) WebRTC peer connection to OpenAI Realtime.
-      const { pc, dc, sender } = createMediaConnection(media, stream => {
+      const { pc, dc, sender, dispose } = createMediaConnection(media, stream => {
         if (audioElRef.current) {
+          audioElRef.current.muted = (isGpt && (gptRef.current?.awaitingUser ?? true)) || replyModeRef.current !== "audio";
           audioElRef.current.srcObject = stream;
           void audioElRef.current.play().catch(() => {});
         }
-      });
+      }, isGpt);
+      disposeMediaRef.current = dispose;
       pcRef.current = pc; dcRef.current = dc; audioSenderRef.current = sender;
       const disconnected = () => {
         if (pcRef.current !== pc || reconnectTimerRef.current) return;
@@ -573,25 +514,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         if (pcRef.current !== pc) return;
         reconnectCountRef.current = 0;
         archive.record("connection.connected", { model: broker.model ?? settings.model });
-        const wantAudio = replyModeRef.current === "audio";
+        if (isGpt) return;
         const interrupt = settings.bargeIn !== "let_finish";
-        const session: Record<string, unknown> = {
-          type: "realtime",
-          instructions,
-          output_modalities: [wantAudio ? "audio" : "text"],
-          tools,
-          tool_choice: settings.toolChoice,
-          parallel_tool_calls: settings.parallelToolCalls,
-          audio: {
-            input: {
-              ...(settings.noiseReduction !== "none" ? { noise_reduction: { type: settings.noiseReduction } } : {}),
-              ...(settings.userTranscript ? { transcription: { model: settings.transcribeModel } } : {}),
-              turn_detection: buildTurnDetection(settings, staySilent, interrupt),
-            },
-            output: { voice: settings.voice },
-          },
-        };
-        if (settings.maxTokensMode === "custom") session.max_response_output_tokens = settings.maxTokens;
+        const session = realtimeSessionConfig(settings, instructions, tools, replyModeRef.current, staySilent);
         setPhase("restoring");
         push("system", "Restoring conversation…");
         setCompaction(initialCompaction);
@@ -642,18 +567,45 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         startupRef.current = startup;
         startup.start();
       });
+      if (isGpt) {
+        const provider = new GptLiveProvider({ ownerSession: sessionKey, dc, rpc,
+          caption: caption => {
+            if (pcRef.current !== pc) return;
+            const entry: TranscriptEntry = { id: caption.id, kind: caption.role, text: caption.text, at: new Date().toLocaleTimeString() };
+            setTranscript(cur => (cur.some(t => t.id === entry.id) ? cur.map(t => t.id === entry.id ? entry : t) : [...cur, entry]).slice(-200));
+            if (caption.role === "assistant") flashSpeaking();
+          },
+          archived: caption => {
+            archive.record("message.completed", { role: caption.role, text: caption.text, fragmentGroupId: caption.id });
+            if (caption.role === "user") void useSessionStore.getState().maybeAutoTitle(sessionKey, caption.text);
+          },
+          onInteraction: () => { if (audioElRef.current) audioElRef.current.muted = replyModeRef.current !== "audio"; },
+          onReady: () => {
+            if (pcRef.current !== pc) return;
+            readyRef.current = true; startingRef.current = false; reconnectCountRef.current = 0;
+            media.getAudioTracks().forEach(t => { t.enabled = micOn; }); provider.mic(micOn);
+            setPhase("connected"); push("system", `Connected to gpt-live-1 with ${priorTurns.length} prior context messages. Camera is unavailable.`);
+          },
+          onError: message => {
+            if (pcRef.current !== pc) return;
+            setError(message); push("warning", message); setPhase("failed"); teardown();
+          },
+        });
+        gptRef.current = provider;
+      }
       const cameraArchive = cameraArchiveRef.current;
       dc.addEventListener("message", (e) => { if (pcRef.current === pc) void handleMessage(String(e.data), cameraArchive); });
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        body: offer.sdp,
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
-      });
-      if (!sdpRes.ok) throw new Error(`OpenAI Realtime call failed (HTTP ${sdpRes.status})`);
-      const answer = await sdpRes.text();
+      let answer: string;
+      if (gptRef.current) {
+        setPhase("restoring");
+        answer = await gptRef.current.connect(offer.sdp!, { ...byokParam(), instructions, history: priorTurns,
+          voice: settings.voice, runtime: settings.backendRuntime, bridge: settings.backendBridge });
+      } else {
+        answer = await connectRealtime(offer.sdp!, token!);
+      }
       if (attempt !== attemptRef.current) return;
       await pc.setRemoteDescription({ type: "answer", sdp: answer });
     } catch (err) {
@@ -678,6 +630,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     setClosing(true);
     attemptRef.current++;
     const archive = cameraArchiveRef.current;
+    if (gptRef.current) await gptRef.current.close();
     archive?.record("connection.ended", { reason: "user_stop" });
     if (archive?.liveSessionId) clearLiveRecording(liveSessionKeyRef.current, archive.liveSessionId);
     teardown();
@@ -694,6 +647,16 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     finally { cameraArchiveRef.current = null; connectionArchivesRef.current = []; setClosing(false); }
   }, [teardown, flushTurns, closing]);
 
+  const reconnect = async () => {
+    restartPendingRef.current = true;
+    await stop();
+  };
+  useEffect(() => {
+    if (!restartPendingRef.current || closing || phase !== "idle") return;
+    restartPendingRef.current = false;
+    void startRef.current();
+  }, [closing, phase]);
+
   function startFrameLoop(fps: number) {
     if (frameTimerRef.current) clearInterval(frameTimerRef.current);
     const intervalMs = Math.max(200, Math.round(1000 / Math.max(fps, 0.05)));
@@ -701,6 +664,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }
 
   function sendCameraFrame() {
+    if (gptRef.current) return;
     const video = videoElRef.current;
     if (!video || video.readyState < 2) return;
     if (!mediaRef.current?.getVideoTracks().some(track => track.enabled)) return;
@@ -735,6 +699,11 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const sendText = useCallback((text: string) => {
     const t = text.trim();
     if (!t || !readyRef.current) return;
+    if (gptRef.current) {
+      push("user", t);
+      void gptRef.current.text(t).catch(e => push("warning", String(e)));
+      return;
+    }
     sendRealtime({
       type: "conversation.item.create",
       item: { type: "message", role: "user", content: [{ type: "input_text", text: t }] },
@@ -749,6 +718,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   async function handleMessage(raw: string, archive = cameraArchiveRef.current) {
     const ev = safeJSON(raw);
     if (!ev) return;
+    if (gptRef.current) { gptRef.current.observe(ev); return; }
     archive?.observe(ev);
     if (compactionRef.current?.observe(ev)) return;
     const startup = startupRef.current;
@@ -1031,6 +1001,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Before Start these only save preferences. During Live a previously disabled
   // input is acquired on demand; the negotiated audio sender can accept it.
   async function toggleInput(kind: "audio" | "video") {
+    if (kind === "video" && isGpt) return;
     if (startingRef.current || inputBusyRef.current) return;
     const current = kind === "audio" ? micOnRef.current : cameraOnRef.current;
     const next = !current;
@@ -1059,6 +1030,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         return;
       } finally { if (pcRef.current === pc) inputBusyRef.current = false; }
     }
+    if (kind === "audio") gptRef.current?.mic(next);
     if (kind === "audio") { micOnRef.current = next; setMicOn(next); settings.set("microphoneEnabled", next); }
     else { cameraOnRef.current = next; setCameraOn(next); settings.set("cameraEnabled", next); }
   }
@@ -1068,7 +1040,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const next = !speakerOn;
     setSpeakerOn(next); replyModeRef.current = next ? "audio" : "text";
     settings.set("responseModality", replyModeRef.current);
-    if (audioElRef.current) audioElRef.current.muted = !next;
+    if (audioElRef.current) audioElRef.current.muted = !next || (gptRef.current?.awaitingUser ?? false);
     sendRealtime({ type: "session.update", session: { type: "realtime", output_modalities: [replyModeRef.current] } });
   };
 
@@ -1112,6 +1084,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // (create_response) to the LIVE session so toggling works mid-conversation —
   // not just at connect time. On release, recap what was heard (#671).
   const toggleStaySilent = () => {
+    if (isGpt) return;
     const next = !staySilent;
     setStaySilent(next); settings.set("staySilent", next);
     if (!readyRef.current) return;
@@ -1145,6 +1118,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Cocktail Party: instruct the realtime model to recognize & recall people
   // from the face database on demand. Pushed live via instructions update.
   const toggleCocktailParty = () => {
+    if (isGpt) return;
     const next = !cocktailParty;
     setCocktailParty(next); settings.set("cocktailParty", next);
     if (!readyRef.current) return;
@@ -1175,6 +1149,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }, [rpc, sendRealtime]);
 
   const toggleSafety = () => {
+    if (isGpt) return;
     const next = !safetyOn;
     setSafetyOn(next); settings.set("safetyCheck", next);
     if (readyRef.current) push(next ? "warning" : "system", next ? "Safety Check on — silently watching for hazards." : "Safety Check off.");
@@ -1189,12 +1164,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
 
   return {
     // state
-    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart, compaction, sessionMemory, updateSessionMemory,
+    capabilities, activeModel, phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart, compaction, sessionMemory, updateSessionMemory,
     resumable: hasLiveRecording(sessionKey),
     // refs (bind to <video>/<audio> in the screen)
     videoElRef, audioElRef,
     // actions
-    start, stop, sendText, sendCameraFrame,
+    start, stop, reconnect, sendText, sendCameraFrame,
     compactNow: () => { if (readyRef.current) void compactionRef.current?.compact(); },
     toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
     // test-only: drive the realtime event handler directly
