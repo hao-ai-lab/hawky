@@ -339,6 +339,11 @@ Hawk restores its saved text/session memory on reconnect; transferring Joy visua
 memory into Hawk's durable archive is deferred. Local RMS endpointing and optional
 ASR/TTS add latency and need microphone testing before claiming voice quality.
 
+Hawk imposes no speech-duration cutoff on Joy TTS or the shared PCM player used
+by Joy, Gemini and Venus. Long replies can finish or be interrupted normally.
+Joy TTS times out only after 30 seconds without audio progress; malformed PCM
+and stalled gateway requests still report errors.
+
 Fixtures: `bun test ./tests/test-joyai-live.ts`. Shared browser fixtures:
 `NODE_OPTIONS=--no-experimental-webstorage bun run --cwd web-ios test -- tests/gateway-stream.test.tsx`.
 Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interaction/tree/main/services/webinfer),

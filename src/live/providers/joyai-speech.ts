@@ -37,16 +37,24 @@ export function joySpeech(url: string, text: string, voice: string, signal: Abor
   chunk: (pcm: Buffer) => void, socketFactory = (url: string) => new WebSocket(url)): Promise<void> {
   return new Promise((resolve, reject) => {
     const ws = socketFactory(url); ws.binaryType = "arraybuffer";
-    let settled = false, bytes = 0;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
     const finish = (error?: Error) => {
       if (settled) return; settled = true; clearTimeout(timer); signal.removeEventListener("abort", abort);
       ws.close(); error ? reject(error) : resolve();
     };
-    const timer = setTimeout(() => finish(new Error("JoyAI speech synthesis timed out")), 30000);
+    // Limit stalls, not reply duration: keep receiving while audio progresses.
+    const resetIdleTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(new Error("JoyAI speech synthesis stopped producing audio for 30 seconds")), 30000);
+    };
+    resetIdleTimer();
     const abort = () => finish();
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) { finish(); return; }
     ws.addEventListener("open", () => {
+      if (settled) return;
+      resetIdleTimer();
       ws.send(JSON.stringify({ config: { voice, output_audio_format: "pcm16", sample_rate: 24000 } }));
       ws.send(JSON.stringify({ type: "input_text.append", text }));
       ws.send(JSON.stringify({ type: "input_text.commit" }));
@@ -55,8 +63,9 @@ export function joySpeech(url: string, text: string, voice: string, signal: Abor
       if (settled) return;
       try {
         if (event.data instanceof ArrayBuffer) {
-          const pcm = Buffer.from(event.data); bytes += pcm.length;
-          if (pcm.length % 2 || bytes > 960000) throw new Error("JoyAI speech output exceeds the 20-second playback limit");
+          const pcm = Buffer.from(event.data);
+          if (pcm.length % 2) throw new Error("JoyAI speech service returned an incomplete PCM sample");
+          if (pcm.length) resetIdleTimer();
           chunk(pcm);
         } else {
           const e = JSON.parse(String(event.data));

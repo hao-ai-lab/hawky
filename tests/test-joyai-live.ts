@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { JoyAIAdapter, parseJoyOutput } from "../src/live/providers/joyai";
 import { CueAudio, joySpeech, pcmWav } from "../src/live/providers/joyai-speech";
 const tick = (ms = 20) => new Promise(r => setTimeout(r, ms));
@@ -92,4 +92,54 @@ test("Joy TTS speaks only visible text and closes on interrupt", async () => {
   expect(ws.sent.map(e => e.type)).toEqual([undefined, "input_text.append", "input_text.commit"]);
   ws.dispatchEvent(new MessageEvent("message", { data: new ArrayBuffer(24) }));
   abort.abort(); await done; expect(ws.closed).toBe(true); expect(pcm[0].length).toBe(24);
+});
+
+class SpeechSocket extends EventTarget {
+  binaryType = ""; closed = false;
+  send(_text: string) {} close() { this.closed = true; }
+  audio(bytes: number) { this.dispatchEvent(new MessageEvent("message", { data: new ArrayBuffer(bytes) })); }
+  done() { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "response.done" }) })); }
+}
+test("Joy TTS delivers a full minute of audio without truncating the reply", async () => {
+  const ws = new SpeechSocket(); let bytes = 0;
+  const done = joySpeech("ws://fixture", "Long reply", "vivian", new AbortController().signal,
+    pcm => { bytes += pcm.length; }, () => ws as any).then(() => "completed", e => e.message);
+  ws.dispatchEvent(new Event("open"));
+  for (let i = 0; i < 6; i++) ws.audio(24000 * 2 * 10);
+  ws.done();
+  expect(await done).toBe("completed");
+  expect(bytes).toBe(24000 * 2 * 60); expect(ws.closed).toBe(true);
+});
+test("Joy TTS still rejects incomplete PCM samples with a specific error", async () => {
+  const ws = new SpeechSocket(); let chunks = 0;
+  const done = joySpeech("ws://fixture", "Hello", "vivian", new AbortController().signal,
+    () => { chunks++; }, () => ws as any).then(() => "completed", e => e.message);
+  ws.audio(1);
+  expect(await done).toContain("incomplete PCM sample");
+  expect(chunks).toBe(0); expect(ws.closed).toBe(true);
+});
+test("Joy TTS allows ongoing generation beyond 30 seconds but stops an idle stream", async () => {
+  let now = 0, nextId = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  const set = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms: number) => {
+    const id = ++nextId; timers.set(id, { at: now + ms, fn }); return id;
+  }) as any);
+  const clear = spyOn(globalThis, "clearTimeout").mockImplementation(((id: number) => { timers.delete(id); }) as any);
+  const advance = (ms: number) => {
+    now += ms;
+    for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.fn(); }
+  };
+  const abort = new AbortController();
+  try {
+    const ws = new SpeechSocket(); let chunks = 0;
+    const done = joySpeech("ws://fixture", "Long reply", "vivian", abort.signal,
+      () => { chunks++; }, () => ws as any).then(() => "completed", e => e.message);
+    ws.dispatchEvent(new Event("open"));
+    for (let i = 0; i < 4; i++) { advance(20000); ws.audio(48000); }
+    expect(ws.closed).toBe(false); expect(chunks).toBe(4);
+    advance(29999); expect(ws.closed).toBe(false);
+    advance(1);
+    expect(await done).toContain("stopped producing audio for 30 seconds");
+    expect(ws.closed).toBe(true); expect(timers.size).toBe(0);
+  } finally { abort.abort(); set.mockRestore(); clear.mockRestore(); }
 });

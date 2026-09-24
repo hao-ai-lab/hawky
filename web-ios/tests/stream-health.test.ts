@@ -29,7 +29,7 @@ class Capture extends Node {
 }
 let connection: GatewayStreamProvider | undefined;
 afterEach(async () => { await connection?.close(); connection = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); });
-async function fixture() {
+async function fixture(model = "gemini-3.8-live") {
   vi.useFakeTimers(); vi.stubGlobal("AudioContext", Context); vi.stubGlobal("AudioWorkletNode", Capture);
   const record = vi.fn(), warning = vi.fn(), onError = vi.fn(); let listener!: (event: any) => void;
   const rpc = vi.fn(async (method: string, _params?: any) => method === "live.stream.heartbeat" ? { diagnostics: { provider: "gemini", input: { audioPackets: 1 } } } : {});
@@ -37,7 +37,7 @@ async function fixture() {
     caption() {}, subscribe: fn => { listener = fn; return () => {}; } });
   const track = { enabled: true, muted: false, readyState: "live" };
   await connection.connect({ getAudioTracks: () => [track] } as unknown as MediaStream,
-    { model: "gemini-3.8-live", instructions: "", history: [], runtime: "native", bridge: false }, true, true);
+    { model, instructions: "", history: [], runtime: "native", bridge: false }, true, true);
   return { record, warning, onError, rpc, track, emit: (e: any) => listener({ event: "live.stream.event", payload: { ...e, connectionId: connection!.id } }) };
 }
 it("distinguishes silent but flowing audio from a stalled capture, then records recovery", async () => {
@@ -86,6 +86,18 @@ function queueSpeech(emit: (event: any) => void, count = 60) {
 const receipts = (rpc: ReturnType<typeof vi.fn>) => rpc.mock.calls
   .filter(([method, p]) => method === "live.stream.input" && p.input.type === "playback")
   .map(([, p]) => p.input);
+
+it.each(["joyai-vl-interaction", "gemini-3.8-live", "realtime-venus-omni"])("plays a full minute from %s without a duration cutoff", async model => {
+  const f = await fixture(model); queueSpeech(f.emit, 240);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(f.record).toHaveBeenCalledWith("media.health", expect.objectContaining({ playbackChunks: 240, playbackQueuedMs: 60000 }));
+  for (const output of Context.current.outputs) output.onended?.();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(receipts(f.rpc)).toHaveLength(240);
+  expect(receipts(f.rpc).every(receipt => receipt.played)).toBe(true);
+  expect(f.onError).not.toHaveBeenCalled();
+});
 
 it.each(["interrupt", "mute", "finished"])("drains a burst of playback receipts on %s without failing the media connection", async action => {
   const f = await fixture(); queueSpeech(f.emit);

@@ -79,7 +79,6 @@ export class PcmMedia {
   play(id: string, data: string, rate: number) {
     if (this.stopped || !this.audible) { this.o.played(id, false); return; }
     if (![16000, 22050, 24000, 44100, 48000].includes(rate)) { this.o.error("Unsupported provider audio sample rate"); return; }
-    if (this.next - this.context.currentTime > 20) { this.o.error("Audio playback fell more than 20 seconds behind. Reconnect to recover."); return; }
     try {
       const pcm = decodePcm(data), buffer = this.context.createBuffer(1, pcm.length, rate);
       buffer.copyToChannel(pcm as Float32Array<ArrayBuffer>, 0);
