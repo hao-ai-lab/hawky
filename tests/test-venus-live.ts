@@ -4,7 +4,7 @@ import { VenusAdapter } from "../src/live/providers/venus";
 
 test("Venus split private spans stay hidden; native turn end closes the request", () => {
   const p = new VenusText();
-  expect(p.feed("<|speak|>Okay <del")).toEqual({ visible: "Okay ", request: undefined, mute: true, invalid: false });
+  expect(p.feed("<|speak|>Okay <del")).toMatchObject({ visible: "Okay ", request: undefined, mute: true, invalid: false, captureStarted: true });
   expect(p.feed("egate>read ").visible).toBe("");
   expect(p.feed("the file<|turn_eos|>").request).toBe("read the file");
   expect(p.finish().malformed).toBe(false);

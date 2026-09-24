@@ -23,6 +23,7 @@ export interface DelegationTask {
   originalRequest?: string;
   constraints?: string;
   context?: Array<{ role: "user" | "assistant"; text: string }>;
+  evidence?: { manifest: string; at: number; inputSequence: number; images: number; audioMs: number };
   brief?: string;
   supersedes?: string;
   validity?: "current" | "superseded";

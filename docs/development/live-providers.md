@@ -190,8 +190,8 @@ already accepted durable task. Provider diagnostics record forwarded audio/video
 counts, last-frame age, text transport, and Gemini's reported modality usage.
 Forwarding is not an image acceptance receipt; image-token usage is separate
 provider evidence. No media bytes or keys are included in those diagnostics;
-task cards do not claim that a particular task result has been heard. The new
-stream adapters do not yet correlate announcements with task-level playback
+task cards do not claim that a particular task result has been heard. The Gemini
+and JoyAI adapters do not yet correlate announcements with task-level playback
 receipts, so a completed task can still show **playback unconfirmed** after its
 answer appears. Backend completion is tracked independently and remains accurate.
 
@@ -284,32 +284,54 @@ input level, output age, pending context and playback. Flowing input plus increa
 listen steps means the model is choosing to listen; no output steps means a
 different transport/inference failure. These diagnostics contain no raw media.
 
-### Harness alignment still required
+### Venus session controller
 
-The shared gateway and durable task service remain the right boundary. The current
-Venus adapter is a partial ServingPort integration, not the complete native harness.
-Comparison with [paper sections 4.3–5.4](https://arxiv.org/html/2609.13814) and
-the upstream `harness/bridge/host.py` identifies these remaining changes:
+The shared gateway and durable task service own task execution. The Venus-specific
+controller in `src/live/providers/venus-session.ts` follows the lifecycle in
+[paper sections 4.3–5.4](https://arxiv.org/html/2609.13814) and the upstream
+`harness/bridge/host.py`:
 
-- Maintain foreground listen/speak/turn state independently from background work
+- Maintains foreground listen/speak/turn state independently from background work
   and playback. A unit boundary is not a semantic turn boundary; the server can
   also end an idle ServingPort generation while retaining the model's context.
-- Freeze a bounded evidence snapshot when `<delegate>` opens. Commit it once the
-  request closes. Hawk currently obtains recent text at dispatch time and has no
-  corresponding frozen audio/video evidence or played-speech cutoff.
-- Prepare task results for speech and admit each eligible reply privately at a
-  model boundary. Current feedback is JSON task state; typed history installation
-  also uses this channel and is not equivalent to native session restoration.
-- Associate work, feedback, generation and audio chunk identities. Only generation
-  completion plus actual playback acknowledgements establishes delivery. Current
-  acknowledgements have no originating work ID.
+- Freezes up to 30 seconds of accepted audio, eight camera frames and recent typed
+  input/confirmed played speech when `<delegate>` opens, including split tokens.
+  Time and input-sequence cutoffs exclude later evidence. A complete valid request
+  dispatches once; the native generation ID is hashed into a store-safe task ID.
+  The private evidence directory beside the task archive contains a JSON manifest,
+  PCM WAV and JPEGs (0700 directory, 0600 files). It persists with the task; a
+  correction retains the original capture. Client RPC cannot supply these paths.
+- Requests a natural spoken backend answer and admits each terminal result privately
+  through `<backend>` after the model boundary and playback drain. Queued/running
+  receipts do not enter that channel. Control tokens are removed from results;
+  Markdown code wrappers are removed for speech; the original answer remains in
+  the task card. Duplicate and superseded results cannot become new announcements. No extra LLM
+  oralization call is made. Typed history installation remains separate and is
+  still not equivalent to native session restoration.
+- Associates task, reply attempt, generation and audio chunk identities. Only
+  generation completion plus all actual positive playback acknowledgements
+  establishes delivery; dropped audio is interrupted. Native acknowledgements
+  carry the originating task ID. Stop interrupts in-flight delivery without
+  cancelling durable work. Reconnect can recover a pending result but does not
+  automatically replay played or uncertain partially delivered results.
+
+Media continues while tasks run and while backend speech is generated. Output
+steps respect the one-second model clock so synthetic backend silence cannot run
+ahead of real input. Audio inside a delegation stays muted for that generation
+because some checkpoints synthesize private request text in the Talker.
+
+The evidence manifest is not an ASR transcript or automatic multimodal tool
+attachment. The selected backend can inspect it using its available tools; it
+must disclose unsupported media instead of inventing its contents. Native
+microphone transcript, quiet context restoration and immediate external barge-in
+remain model-host protocol limitations.
 
 Acceptance must cover split requests, later input arriving before request closure,
 duplicate/stale results, continuous perception during work, interruption during
 delivery, and reconnect. Fixture protocol checks alone do not establish these
 behaviors or prove that the checkpoint will choose to answer a short greeting.
 
-Fixtures: `bun test ./tests/test-venus-live.ts` and
+Fixtures: `bun test ./tests/test-venus-live.ts ./tests/test-venus-session.ts ./tests/test-venus-gateway.ts` and
 `services/venus/.venv/bin/python -m unittest discover -s services/venus -v`.
 Real probe: `VENUS_LIVE_IMAGE=/path/to/red.jpg bun scripts/probes/venus-live.ts`.
 Set `HAWKY_VENUS_URL` to your bridge; optionally add `VENUS_LIVE_WAV` using the
@@ -447,7 +469,11 @@ Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interacti
   was recorded during automated testing.
 - Venus: an existing self-hosted model passed typed-image and native
   voice-plus-image probes. Browser connection, provider switch and Stop were
-  verified. A browser history-recall check did **not** pass: the model said it
+  verified. The Venus controller also passed a real native delegation through
+  the gateway to Codex CLI: `pwd` executed once, its frozen evidence manifest
+  was saved, and the actual directory returned as captions and audio. The probe
+  skipped playback and correctly retained interrupted delivery; audible browser
+  playback still needs a manual check. A browser history-recall check did **not** pass: the model said it
   would check instead of returning the supplied fact. Native voice-only history
   restoration is also unsupported. Treat Venus behavior as experimental; passing
   the wire protocol tests does not establish recall or delegation quality.

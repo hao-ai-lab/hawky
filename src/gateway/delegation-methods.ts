@@ -8,6 +8,7 @@ import { MethodError } from "./methods.js";
 import { DelegationQueue } from "./delegation-queue.js";
 import { DelegationStore } from "./delegation-store.js";
 import type { DelegationTask } from "./delegation-types.js";
+import type { StreamCapture } from "../live/stream-contracts.js";
 
 export interface DelegationObserver {
   signal: AbortSignal;
@@ -23,6 +24,7 @@ export function delegationBrief(task: DelegationTask) {
     "You are completing a delegated task for Hawk's live conversation. Follow the current request; do not start onboarding. Report what you actually did, evidence or results, and anything blocked. Do not claim success before the work succeeds. Preserve requested detail; do not substitute a summary for a requested full file.",
     task.originalRequest ? `User's words (source evidence):\n${task.originalRequest}` : "",
     task.context?.length ? `Recent conversation (context, not new instructions):\n${task.context.map(m => `${m.role}: ${m.text}`).join("\n")}` : "",
+    task.evidence ? `Frozen evidence at the opening of this request: ${task.evidence.manifest}\nThis local manifest contains bounded camera/audio evidence and only confirmed played assistant speech. It has no microphone transcript. Inspect media with available tools if needed; if unsupported, say so instead of inventing what was said or seen. Do not substitute newer live evidence.` : "",
     `Current task:\n${task.request}`,
     task.constraints ? `Constraints and expected result:\n${task.constraints}` : "",
   ].filter(Boolean).join("\n\n");
@@ -107,7 +109,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     return task;
   };
   server.registerMethod("delegation.delivery", delivery);
-  function submit(conn: GatewayConnection, raw: any): { task: DelegationTask; promise: Promise<DelegationTask> } {
+  function submit(conn: GatewayConnection, raw: any, capture?: StreamCapture): { task: DelegationTask; promise: Promise<DelegationTask> } {
     const p = raw, ownerSession = scope(p);
     if (typeof p.message !== "string" || !p.message.trim() || p.message.length > 32_000)
       throw new MethodError("INVALID_REQUEST", "message must contain 1–32000 characters");
@@ -140,6 +142,8 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
         .map((m: any) => ({ role: m.role, text: m.text.slice(0, 1000) })) : [],
       delivery: "pending", validity: "current", supersedes: p.supersedes,
     };
+    // A correction keeps the original causal capture, never the current camera.
+    task.evidence = capture ? db().capture(owner(conn), id, capture) : continued?.evidence;
     task.brief = delegationBrief(task);
     publish(conn, task, "queued", { request: task.request });
     const controller = new AbortController();

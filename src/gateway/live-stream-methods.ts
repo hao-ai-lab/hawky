@@ -2,7 +2,7 @@ import { VenusAdapter } from "../live/providers/venus.js";
 import { JoyAIAdapter } from "../live/providers/joyai.js";
 import { loadConfig } from "../storage/config.js";
 import { GeminiLiveAdapter } from "../live/providers/gemini.js";
-import type { StreamAdapter, StreamEvent, StreamInput, StreamOptions } from "../live/stream-contracts.js";
+import type { StreamAdapter, StreamEvent, StreamInput, StreamOptions, StreamTaskUpdate } from "../live/stream-contracts.js";
 import type { ConversationTurn } from "../live/contracts.js";
 import type { GatewayServer } from "./server.js";
 import type { GatewayConnection } from "./connection.js";
@@ -12,8 +12,8 @@ import { MethodError } from "./methods.js";
 import { enforceRealtimeMintQuota } from "./live-realtime-broker.js";
 
 const terminal = (t: DelegationTask) => ["completed", "failed", "cancelled", "interrupted"].includes(t.status);
-const state = (t: DelegationTask) => ({ task_id: t.id, request: t.request, status: t.status, validity: t.validity,
-  result: t.result?.slice(0, 12000), error: t.error });
+const state = (t: DelegationTask): StreamTaskUpdate => ({ task_id: t.id, request: t.request, status: t.status, validity: t.validity,
+  result: t.result?.slice(0, 12000), error: t.error, completedAt: t.completedAt, delivery: t.delivery, deliveryResponseId: t.deliveryResponseId });
 export function validateStreamCreate(p: any) {
   if (!p || typeof p.id !== "string" || !/^[\w-]{8,80}$/.test(p.id) ||
     typeof p.ownerSession !== "string" || !p.ownerSession.trim() || p.ownerSession.length > 200 ||
@@ -61,6 +61,7 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
   tasks.subscribe((_conn, task) => {
     for (const s of active.values()) {
       if (s.closed || s.ownerSession !== task.ownerSession || (s.conn.deviceTokenId ?? "local") !== (_conn.deviceTokenId ?? "local")) continue;
+      if (s.adapter.taskUpdate) { s.adapter.taskUpdate({ ...state(task), result: task.result }); continue; }
       if (task.validity === "superseded") { s.adapter.context(`Task ${task.id} is superseded; ignore its old result.`, false); continue; }
       if (!terminal(task) || s.completed.has(task.id)) continue;
       s.completed.add(task.id); s.adapter.context(JSON.stringify(state(task)), true);
@@ -109,9 +110,21 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
       });
       calls.set(id, result); return result;
     };
-    const options: StreamOptions = { ...p, bridge: p.bridge === true, emit, tool };
+    const options: StreamOptions = { ...p, bridge: p.bridge === true, emit, tool,
+      delegate: async (id, message, capture) => {
+        if (session.closed || session.closing || !p.bridge) throw new Error("Backend bridge is unavailable");
+        const task = tasks.submit(conn, { id: `${p.id}-${id}`, ownerSession: p.ownerSession, message, runtime: p.runtime, execution: "serial",
+          originalRequest: capture.history.filter(t => t.role === "user").map(t => t.text).join("\n"), context: capture.history,
+          constraints: "The result returns to a voice conversation. Lead with a concise, natural spoken answer in the request's language. Preserve any full detail explicitly requested. Do not include internal task IDs or claim the answer was already spoken.",
+        }, capture).task;
+        return { ...state(task), result: task.result };
+      },
+      delivery: (taskId, responseId, state) => {
+        if (!session.closed) tasks.delivery(conn, { ownerSession: p.ownerSession, id: taskId, responseId, state });
+      },
+    };
     const joy = loadConfig().live_providers?.joyai;
-    const adapter = factory ? factory(options, p) : isGemini ? new GeminiLiveAdapter(options, key) : p.model === "joyai-vl-interaction" ? new JoyAIAdapter(options, {
+    const adapter: StreamAdapter = factory ? factory(options, p) : isGemini ? new GeminiLiveAdapter(options, key) : p.model === "joyai-vl-interaction" ? new JoyAIAdapter(options, {
       ...joy, url: process.env.HAWKY_JOYAI_URL || joy?.url || "http://127.0.0.1:8070",
       asr_url: process.env.HAWKY_JOYAI_ASR_URL || joy?.asr_url,
       tts_url: process.env.HAWKY_JOYAI_TTS_URL || joy?.tts_url,
@@ -133,7 +146,10 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
       previous.filter(terminal).forEach(t => session.completed.add(t.id));
       await adapter.start();
       if (session.closed) throw new Error("Connection was stopped during startup");
-      if (previous.length && p.bridge) adapter.context(`Restored task states. Use silently; do not announce on reconnect:\n${JSON.stringify(previous.slice(-15).map(state))}`, false);
+      if (previous.length && p.bridge) {
+        if (adapter.taskUpdate) for (const task of previous) adapter.taskUpdate({ ...state(task), result: task.result }, true);
+        else adapter.context(`Restored task states. Use silently; do not announce on reconnect:\n${JSON.stringify(previous.slice(-15).map(state))}`, false);
+      }
       return { id: p.id, model: p.model };
     } catch (error) { await session.close(); throw error; }
   });
