@@ -341,7 +341,11 @@ Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interacti
   restoration is also unsupported. Treat Venus behavior as experimental; passing
   the wire protocol tests does not establish recall or delegation quality.
 - JoyAI: fixtures cover cue endpointing, ASR, image coalescing, action tokens,
-  private delegation, TTS, interruption and connection reset. No live JoyAI model
-  service was available during this batch; actual inference remains unverified.
+  private delegation, TTS, interruption and connection reset. The self-hosted
+  deployment was restored on September 24 after an earlier experiment had stopped
+  it. Real probes through Hawk's adapter passed a typed red-image question and
+  synthetic speech through ASR → JoyAI → TTS, with complete PCM output and session
+  cleanup. Model, summary, ASR and TTS endpoints were healthy. Physical microphone
+  behavior, long-session summaries and live delegation quality remain unverified.
 - Native iOS, durable visual-memory transfer and per-task model/effort selection
   are outside this batch. Existing backend model configuration is unchanged.
