@@ -22,6 +22,7 @@ export class GatewayStreamProvider {
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribe: () => void;
   private inFlight = 0;
+  private captureProblem = "";
   private closePromise?: Promise<void>;
   constructor(private o: {
     ownerSession: string; rpc: (method: string, p?: unknown) => Promise<unknown>;
@@ -31,7 +32,7 @@ export class GatewayStreamProvider {
     onError: (message: string) => void; warning: (message: string) => void;
   }) {
     this.media = new PcmMedia({ audio: data => this.input({ type: "audio", data }),
-      played: (id, played) => this.input({ type: "playback", id, played }), error: message => o.onError(message) });
+      played: (id, played) => this.input({ type: "playback", id, played }), error: message => this.fail(message) });
     this.unsubscribe = o.subscribe(event => {
       const e = event.payload as StreamEvent & { connectionId?: string };
       if (event.event !== "live.stream.event" || e?.connectionId !== this.id || this.stopped) return;
@@ -39,8 +40,8 @@ export class GatewayStreamProvider {
       if (e.type === "audio") this.media.play(e.id, e.data, e.rate);
       if (e.type === "interrupt") this.media.interrupt();
       if (e.type === "diagnostic") o.record("provider.diagnostic", e.detail);
-      if (e.type === "warning") o.warning(e.message);
-      if (e.type === "error") o.onError(e.message);
+      if (e.type === "warning") { o.record("provider.warning", { message: e.message }); o.warning(e.message); }
+      if (e.type === "error") this.fail(e.message);
     });
   }
   async connect(stream: MediaStream, settings: { model: string; instructions: string; history: ConversationTurn[];
@@ -57,17 +58,39 @@ export class GatewayStreamProvider {
     this.input({ type: "mic", enabled: mic });
     this.media.mic(mic);
     this.heartbeat = setInterval(() => {
-      void this.o.rpc("live.stream.heartbeat", this.scope()).catch(e => { if (!this.stopped) this.o.onError(String(e)); });
-    }, 10000);
+      const health = this.media.health();
+      this.o.record("media.health", { ...health, inFlight: this.inFlight });
+      const problem = !health.micEnabled ? "" : !health.track ? "Microphone track is missing."
+        : health.track.readyState === "ended" ? "Microphone track has ended."
+        : health.track.muted ? "The browser has muted microphone capture."
+        : !health.track.enabled ? "Microphone track is disabled."
+        : health.contextState !== "running" ? `Audio processing is ${health.contextState}.`
+        : health.captureGapMs !== null && health.captureGapMs >= 5000 ? "Microphone capture has stopped producing audio packets." : "";
+      if (problem !== this.captureProblem) {
+        if (problem) {
+          this.o.record("media.warning", { message: problem });
+          this.o.warning(`${problem} Reconnect if speech is not getting through.`);
+        } else if (this.captureProblem) this.o.record("media.recovered", {});
+        this.captureProblem = problem;
+      }
+      void this.o.rpc("live.stream.heartbeat", this.scope()).then(result => {
+        const diagnostics = (result as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics;
+        if (!this.stopped && diagnostics) this.o.record("provider.health", diagnostics);
+      }).catch(e => { if (!this.stopped) this.fail(String(e)); });
+    }, 5000);
+  }
+  private fail(message: string) {
+    // Record before onError tears down the connection.
+    this.o.record("provider.error", { message }); this.o.onError(message);
   }
   private scope() { return { id: this.id, ownerSession: this.o.ownerSession }; }
   private input(input: StreamInput) {
     if (!this.ready || this.stopped) return;
     // Don't accumulate unbounded audio on a slow/disconnected gateway.
-    if (this.inFlight >= 20) { this.o.onError("Gateway media connection is falling behind. Reconnect to continue."); return; }
+    if (this.inFlight >= 20) { this.fail("Gateway media connection is falling behind. Reconnect to continue."); return; }
     this.inFlight++;
     void this.o.rpc("live.stream.input", { ...this.scope(), input })
-      .catch(e => { if (!this.stopped) this.o.onError(String(e)); }).finally(() => this.inFlight--);
+      .catch(e => { if (!this.stopped) this.fail(String(e)); }).finally(() => this.inFlight--);
   }
   text(text: string) { this.input({ type: "text", text }); }
   image(data: string) { this.input({ type: "image", data: data.replace(/^data:image\/jpeg;base64,/, ""), at: Date.now() }); return this.ready && !this.stopped; }

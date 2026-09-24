@@ -25,5 +25,7 @@ export interface StreamAdapter {
   start(): Promise<void>;
   input(input: StreamInput): void | Promise<void>;
   context(text: string, announce: boolean): void;
+  /** Safe metadata for troubleshooting; never raw media, prompts or keys. */
+  diagnostics?(): Record<string, unknown>;
   close(): void | Promise<void>;
 }

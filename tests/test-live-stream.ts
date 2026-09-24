@@ -106,14 +106,28 @@ test("media validation rejects unsupported commands, oversized packets, and part
   expect(() => validateStreamInput({ type: "text", text: "" })).toThrow();
   expect(() => validateStreamInput({ type: "audio", data: "AAA=" })).not.toThrow();
 });
+test("health separates gateway audio input from provider transcription without exposing media or credentials", async () => {
+  const f = await fixture();
+  f.adapter.input({ type: "audio", data: "AAAA" });
+  f.socket.receive({ serverContent: { inputTranscription: { text: "private speech" }, turnComplete: true } });
+  f.adapter.input({ type: "audio", data: "AAAA" });
+  const health = f.adapter.diagnostics();
+  expect(health.input.audioPackets).toBe(2);
+  expect(health.output.transcriptions).toBe(1);
+  expect(health.output.completedTurns).toBe(1);
+  expect(health.output.lastTranscriptionAgeMs).not.toBeNull();
+  for (const secret of ["AAAA", "private speech", "fixture-key"]) expect(JSON.stringify(health)).not.toContain(secret);
+});
 test("gateway media is connection scoped, transcripts persist once, stop closes provider", async () => {
   const methods = new Map<string, Function>(), events: any[] = [], saved: any[] = []; let options!: StreamOptions; let closed = 0;
   let cleanup!: (conn: any) => Promise<void>;
   const conn = { clientId: "fixture", deviceTokenId: "a", bindSession() {}, sendEvent: (e: any) => { events.push(e); return true; } };
   registerLiveStreamMethods({ registerMethod: (n: string, f: Function) => methods.set(n, f), registerConnectionCleanup: (f: typeof cleanup) => { cleanup = f; } } as any,
-    { subscribe() {}, list: () => [] } as any, (_key, turn) => saved.push(turn), o => { options = o; return { start: async () => {}, input() {}, context() {}, close: () => { closed++; } }; });
+    { subscribe() {}, list: () => [] } as any, (_key, turn) => saved.push(turn), o => { options = o; return { start: async () => {}, input() {}, context() {}, diagnostics: () => ({ inputPackets: 42 }), close: () => { closed++; } }; });
   const p = { id: "fixture-connection", ownerSession: "web:test", model: "gemini-3.8-live", runtime: "native", instructions: "", history: [], gemini_api_key: "test" };
   await methods.get("live.stream.create")!(conn, p);
+  expect(methods.get("live.stream.heartbeat")!(conn, p)).toEqual({ ok: true, diagnostics: { inputPackets: 42 } });
+  expect(() => methods.get("live.stream.heartbeat")!({ ...conn }, p)).toThrow("not found");
   await expect(methods.get("live.stream.input")!({ ...conn }, { ...p, input: { type: "text", text: "Hello" } })).rejects.toThrow("not found");
   options.emit({ type: "caption", id: "turn1", role: "user", text: "Hello", final: true }); options.emit({ type: "caption", id: "turn1", role: "user", text: "Hello", final: true });
   expect(saved).toHaveLength(1); expect(events[0].payload.connectionId).toBe(p.id); expect(events[0].payload.id).toBe("turn1");

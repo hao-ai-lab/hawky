@@ -147,6 +147,22 @@ Primary protocol references:
 
 ## Gemini Live
 
+For a silent/stuck session, open its local archive at
+`~/.hawky/realtime-sessions/<recording-id>/conversation.jsonl`. Every five seconds,
+`media.health` records browser AudioContext/track state, capture/forwarded packet
+counts, recent peak level and playback backlog. `provider.health` records Gemini's
+gateway input counts, last input/server/transcription ages and turn counts. These
+health entries contain no raw audio, image bytes, device identifiers or API keys.
+The archive's other entries still contain the normal conversation and context.
+
+Growing browser counts with frozen gateway counts point to transport. If packet
+counts advance at both ends, check audio level during speech before attributing
+missing transcription to the provider.
+Zero audio level alone means silence, not a broken connection. A muted/ended
+track, suspended audio context or missing capture packets produces a visible
+warning. Provider errors (including quota errors) are archived before teardown.
+The previous sparse logs cannot retrospectively distinguish these failure stages.
+
 Select `gemini-3.8-live` in Live settings. A separate browser Gemini key is
 optional; the gateway also accepts `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
 `api_keys.gemini` in its private config. No OpenAI key is used for this path.

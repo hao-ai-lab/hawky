@@ -142,7 +142,8 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
     await s.adapter.input(p.input); return { ok: true };
   });
   server.registerMethod("live.stream.heartbeat", (conn, p: any) => {
-    const s = get(conn, p); clearTimeout(s.lease); s.lease = setTimeout(() => void s.close(), 45000); return { ok: true };
+    const s = get(conn, p); clearTimeout(s.lease); s.lease = setTimeout(() => void s.close(), 45000);
+    return { ok: true, diagnostics: s.adapter.diagnostics?.() };
   });
   server.registerMethod("live.stream.close", async (conn, p) => { await get(conn, p).close(); return { ok: true }; });
 }

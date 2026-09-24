@@ -20,6 +20,12 @@ export class PcmMedia {
   private stopped = false;
   private enabled = true;
   private audible = true;
+  private track?: MediaStreamTrack;
+  private attachedAt?: number;
+  private lastCaptureAt?: number;
+  private packets = 0;
+  private forwardedPackets = 0;
+  private peak = 0;
   constructor(private o: { audio: (data: string) => void; played: (id: string, played: boolean) => void; error: (message: string) => void }) {
     this.gain.connect(this.context.destination);
     void this.context.resume().catch(() => {});
@@ -27,17 +33,45 @@ export class PcmMedia {
   async attach(stream: MediaStream) {
     this.source?.disconnect(); this.capture?.disconnect(); this.sink?.disconnect();
     this.source = undefined; this.capture = undefined;
-    if (!stream.getAudioTracks().length || this.stopped) return;
+    this.track = stream.getAudioTracks()[0];
+    this.attachedAt = Date.now(); this.lastCaptureAt = undefined;
+    if (!this.track || this.stopped) return;
     await this.context.audioWorklet.addModule("/audio/pcm-capture.js");
     if (this.stopped) return;
     this.capture = new AudioWorkletNode(this.context, "hawk-pcm-capture");
-    this.capture.port.onmessage = event => { if (this.enabled && !this.stopped) this.o.audio(encodePcm(event.data)); };
+    this.capture.onprocessorerror = () => {
+      if (!this.stopped) this.o.error("Microphone audio processing stopped. Reconnect to restore capture.");
+    };
+    this.capture.port.onmessage = event => {
+      if (this.stopped) return;
+      this.lastCaptureAt = Date.now(); this.packets++;
+      const samples = new DataView(event.data as ArrayBuffer);
+      for (let i = 0; i < samples.byteLength; i += 2)
+        this.peak = Math.max(this.peak, Math.abs(samples.getInt16(i, true)) / 32768);
+      if (this.enabled) { this.forwardedPackets++; this.o.audio(encodePcm(event.data)); }
+    };
     this.source = this.context.createMediaStreamSource(stream);
     // Silent sink keeps capture scheduled without feeding the microphone back.
     this.sink = this.context.createGain(); this.sink.gain.value = 0;
     this.source.connect(this.capture); this.capture.connect(this.sink); this.sink.connect(this.context.destination);
   }
-  mic(enabled: boolean) { this.enabled = enabled; }
+  mic(enabled: boolean) {
+    if (enabled && !this.enabled) { this.attachedAt = Date.now(); this.lastCaptureAt = undefined; }
+    this.enabled = enabled;
+  }
+  /** Bounded health metadata only: no audio, track labels or device identifiers. */
+  health() {
+    const report = {
+      contextState: this.context.state, micEnabled: this.enabled,
+      capturePackets: this.packets, forwardedPackets: this.forwardedPackets,
+      captureGapMs: this.attachedAt === undefined ? null : Date.now() - (this.lastCaptureAt ?? this.attachedAt),
+      peakSinceLastCheck: Number(this.peak.toFixed(4)),
+      track: this.track ? { enabled: this.track.enabled, muted: this.track.muted, readyState: this.track.readyState } : null,
+      playbackChunks: this.sources.size, playbackQueuedMs: Math.round(Math.max(0, this.next - this.context.currentTime) * 1000),
+    };
+    this.peak = 0;
+    return report;
+  }
   speaker(enabled: boolean) {
     this.audible = enabled; this.gain.gain.value = enabled ? 1 : 0;
     if (!enabled) this.interrupt();

@@ -44,6 +44,10 @@ export class GeminiLiveAdapter implements StreamAdapter {
   // Once audio streaming starts, keep text on that protocol for this connection.
   // Flushing/muting audio is not a reset of the server's conversation state.
   private realtimeAudio = false;
+  private lastAudioAt?: number;
+  private lastServerAt?: number;
+  private lastTranscriptionAt?: number;
+  private serverCounts = { messages: 0, transcriptions: 0, audioChunks: 0, completedTurns: 0, interruptions: 0 };
   constructor(private o: StreamOptions, private key: string,
     private socketFactory = (url: string) => new WebSocket(url)) {}
   async start() {
@@ -92,14 +96,17 @@ export class GeminiLiveAdapter implements StreamAdapter {
   }
   private observe(e: any) {
     if (this.stopped) return;
+    this.lastServerAt = Date.now(); this.serverCounts.messages++;
     if (e.error) { this.fail(e.error.message ?? "Gemini error"); return; }
     if (e.goAway) { this.fail("Gemini connection is expiring. Reconnect to restore saved context."); return; }
     const sc = e.serverContent;
     if (sc?.inputTranscription?.text) {
+      this.lastTranscriptionAt = Date.now(); this.serverCounts.transcriptions++;
       this.interacted = true;
       this.caption("user", sc.inputTranscription.text, sc.inputTranscription.finished === true);
     }
     if (sc?.interrupted) {
+      this.serverCounts.interruptions++;
       this.playback.clear(); this.generating = false;
       this.o.emit({ type: "interrupt" }); this.caption("assistant", "", true);
     }
@@ -108,6 +115,7 @@ export class GeminiLiveAdapter implements StreamAdapter {
       for (const part of sc.modelTurn.parts) {
         if (part.thought) continue;
         if (part.inlineData?.mimeType?.startsWith("audio/pcm") && this.interacted) {
+          this.serverCounts.audioChunks++;
           const id = crypto.randomUUID(); this.playback.add(id);
           const rate = Number(/rate=(\d+)/.exec(part.inlineData.mimeType)?.[1] ?? 24000);
           this.o.emit({ type: "audio", id, data: part.inlineData.data, rate });
@@ -119,6 +127,7 @@ export class GeminiLiveAdapter implements StreamAdapter {
     if (sc?.outputTranscription?.text && this.interacted)
       this.caption("assistant", sc.outputTranscription.text, sc.outputTranscription.finished === true);
     if (sc?.turnComplete) {
+      this.serverCounts.completedTurns++;
       this.generating = false;
       this.caption("user", "", true); this.caption("assistant", "", true);
       this.drain();
@@ -139,6 +148,13 @@ export class GeminiLiveAdapter implements StreamAdapter {
     this.o.emit({ type: "diagnostic", detail: { provider: "gemini", event,
       input: { ...this.inputCounts, lastVideoAgeMs: this.image ? Math.max(0, Date.now() - this.image.at) : null }, ...detail } });
   }
+  diagnostics() {
+    const age = (at?: number) => at === undefined ? null : Math.max(0, Date.now() - at);
+    return { provider: "gemini", ready: this.ready, socketState: this.ws?.readyState,
+      input: { ...this.inputCounts, lastAudioAgeMs: age(this.lastAudioAt), lastVideoAgeMs: age(this.image?.at) },
+      output: { ...this.serverCounts, lastServerAgeMs: age(this.lastServerAt), lastTranscriptionAgeMs: age(this.lastTranscriptionAt) },
+      generating: this.generating, pendingPlaybackChunks: this.playback.size, pendingUpdates: this.pending.length };
+  }
   private sendTurn(text: string, includeImage = false) {
     const video = includeImage && this.image && Date.now() - this.image.at < 6000
       ? { mimeType: "image/jpeg", data: this.image.data } : undefined;
@@ -158,6 +174,7 @@ export class GeminiLiveAdapter implements StreamAdapter {
     if (i.type === "audio") {
       this.realtimeAudio = true;
       this.inputCounts.audioPackets++;
+      this.lastAudioAt = Date.now();
       this.send({ realtimeInput: { audio: { data: i.data, mimeType: "audio/pcm;rate=16000" } } });
     }
     if (i.type === "image") {
