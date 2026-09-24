@@ -48,8 +48,11 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
   persist: (key: string, turn: ConversationTurn) => void,
   factory?: (options: StreamOptions, params: any) => StreamAdapter) {
   type Session = { conn: GatewayConnection; ownerSession: string; adapter: StreamAdapter; lease: ReturnType<typeof setTimeout>;
-    closed: boolean; closing: boolean; seen: Set<string>; completed: Set<string>; history: ConversationTurn[]; close: () => Promise<void> };
+    closed: boolean; closing: boolean; closePromise?: Promise<void>; seen: Set<string>; completed: Set<string>; history: ConversationTurn[]; close: () => Promise<void> };
   const active = new Map<string, Session>();
+  server.registerConnectionCleanup(async conn => {
+    await Promise.allSettled([...active.values()].filter(s => s.conn === conn).map(s => s.close()));
+  });
   const get = (conn: GatewayConnection, p: any) => {
     const s = active.get(p?.id);
     if (!s || s.conn !== conn || s.ownerSession !== p.ownerSession || s.closed || s.closing) throw new MethodError("NOT_FOUND", "Live connection not found");
@@ -118,10 +121,10 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
     });
     session = { conn, ownerSession: p.ownerSession, adapter, closed: false, closing: false, seen: new Set(), completed: new Set(), history: [...p.history],
       lease: setTimeout(() => void session.close(), 45000),
-      close: async () => {
-        if (session.closed || session.closing) return;
+      close: () => {
+        if (session.closePromise) return session.closePromise;
         session.closing = true; clearTimeout(session.lease);
-        try { await adapter.close(); } finally { session.closed = true; active.delete(p.id); }
+        return session.closePromise = Promise.resolve().then(() => adapter.close()).finally(() => { session.closed = true; active.delete(p.id); });
       },
     };
     active.set(p.id, session); conn.bindSession(p.ownerSession);

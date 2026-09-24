@@ -219,6 +219,17 @@ describe("server: HTTP endpoints", () => {
 // =============================================================================
 
 describe("server: WebSocket connection", () => {
+  test("disconnect and shutdown release connection resources once", async () => {
+    const cleaned: string[] = [];
+    server.registerConnectionCleanup(async conn => { await Bun.sleep(5); cleaned.push(conn.connId); });
+    server.start(port);
+    const a = await handshake(port), b = await handshake(port);
+    a.ws.close();
+    for (let i = 0; i < 50 && !cleaned.includes(a.connId); i++) await Bun.sleep(5);
+    expect(cleaned).toEqual([a.connId]);
+    await server.stop();
+    expect(cleaned.sort()).toEqual([a.connId, b.connId].sort());
+  });
   test("accepts WebSocket connection", async () => {
     server.start(port);
     const ws = await connectWs(port);

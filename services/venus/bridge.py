@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -44,15 +45,37 @@ class OutputDecoder:
         return {**output, "text_delta": delta}
 
 
-def create_app(upstream, tokenizer, api_key="", transport=None):
+def create_app(upstream, tokenizer, api_key="", transport=None, idle_seconds=45):
     sessions = {}
     client = httpx.AsyncClient(base_url=upstream.rstrip("/"), timeout=20, follow_redirects=False, transport=transport)
 
+    async def reap_idle():
+        # A killed gateway cannot send DELETE. Release only sessions opened by
+        # this bridge, so one abandoned browser cannot lock a single-session GPU.
+        while True:
+            await asyncio.sleep(min(10, idle_seconds / 2))
+            for sid, state in list(sessions.items()):
+                if time.monotonic() - state["last_seen"] < idle_seconds:
+                    continue
+                state["expiring"] = True
+                try:
+                    r = await client.delete(f"/sessions/{sid}", params={"incarnation": state["incarnation"], "reason": "bridge_idle"})
+                    if r.is_success or r.status_code in {404, 410}:
+                        if sessions.get(sid) is state:
+                            sessions.pop(sid)
+                except httpx.HTTPError:
+                    pass  # Retry the owned session on the next sweep.
+                finally:
+                    state["expiring"] = False
+
     @asynccontextmanager
     async def lifespan(_app):
+        reaper = asyncio.create_task(reap_idle())
         try:
             yield
         finally:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
             for sid, state in list(sessions.items()):
                 try:
                     await client.delete(f"/sessions/{sid}", params={"incarnation": state["incarnation"], "reason": "bridge_shutdown"})
@@ -92,6 +115,7 @@ def create_app(upstream, tokenizer, api_key="", transport=None):
                 return JSONResponse({"error": "Bridge tokenizer does not match the Venus checkpoint"}, status_code=502)
             # Never clear/reuse another client's live model state implicitly.
             sessions[sid] = {"incarnation": data["incarnation"], "lock": asyncio.Lock(),
+                             "last_seen": time.monotonic(), "expiring": False,
                              "decoder": OutputDecoder(tokenizer, data["capabilities"]["raw_token_mode"])}
         return JSONResponse(data, status_code=r.status_code)
 
@@ -102,6 +126,9 @@ def create_app(upstream, tokenizer, api_key="", transport=None):
         state = sessions.get(sid)
         if not state:
             return JSONResponse({"error": "Session not owned by this bridge"}, status_code=404)
+        if state["expiring"]:
+            return JSONResponse({"error": "Idle session is closing"}, status_code=410)
+        state["last_seen"] = time.monotonic()
         raw = await request.body()
         if len(raw) > 600000:
             return JSONResponse({"error": "Packet too large"}, status_code=413)

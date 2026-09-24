@@ -110,6 +110,8 @@ function proxyHeaders(headers: Headers): Headers {
 export class GatewayServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private connections = new Map<string, GatewayConnection>();
+  private connectionCleanups = new Set<(conn: GatewayConnection) => void | Promise<void>>();
+  private cleanupPromises = new WeakMap<GatewayConnection, Promise<void>>();
   private methods: MethodRegistry;
   private deviceAuth: DeviceAuth | null;
   private boundToLoopback = true;
@@ -345,6 +347,7 @@ export class GatewayServer {
           const conn = self.connections.get(connId);
           if (conn) {
             conn.clearHandshakeTimer();
+            void self.cleanupConnection(conn);
 
             // Node host disconnection — unregister from node registry
             if (conn.clientRole === "node") {
@@ -428,6 +431,15 @@ export class GatewayServer {
       log.warn("shutdown timeout, some tasks still active");
     }
 
+    // Release provider connections before the host process exits. Idle leases
+    // remain a fallback for a hard kill or an unresponsive upstream.
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all([...this.connections.values()].map(conn => this.cleanupConnection(conn))),
+      new Promise<void>(resolve => { cleanupTimer = setTimeout(resolve, Math.max(1000, timeoutMs)); }),
+    ]);
+    clearTimeout(cleanupTimer);
+
     // Close all connections
     for (const conn of this.connections.values()) {
       conn.close(1012, "service restart");
@@ -450,6 +462,19 @@ export class GatewayServer {
   /** Register an RPC method handler. */
   registerMethod(method: string, handler: MethodHandler): void {
     this.methods.register(method, handler);
+  }
+
+  registerConnectionCleanup(handler: (conn: GatewayConnection) => void | Promise<void>): void {
+    this.connectionCleanups.add(handler);
+  }
+
+  private cleanupConnection(conn: GatewayConnection): Promise<void> {
+    const existing = this.cleanupPromises.get(conn);
+    if (existing) return existing;
+    const cleanup = Promise.allSettled([...this.connectionCleanups].map(fn => Promise.resolve().then(() => fn(conn))))
+      .then(results => { if (results.some(r => r.status === "rejected")) log.warn("connection cleanup failed", { connId: conn.connId }); });
+    this.cleanupPromises.set(conn, cleanup);
+    return cleanup;
   }
 
   /** Get all connections (for broadcast). */

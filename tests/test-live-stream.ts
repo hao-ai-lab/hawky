@@ -76,8 +76,9 @@ test("media validation rejects unsupported commands, oversized packets, and part
 });
 test("gateway media is connection scoped, transcripts persist once, stop closes provider", async () => {
   const methods = new Map<string, Function>(), events: any[] = [], saved: any[] = []; let options!: StreamOptions; let closed = 0;
+  let cleanup!: (conn: any) => Promise<void>;
   const conn = { clientId: "fixture", deviceTokenId: "a", bindSession() {}, sendEvent: (e: any) => { events.push(e); return true; } };
-  registerLiveStreamMethods({ registerMethod: (n: string, f: Function) => methods.set(n, f) } as any,
+  registerLiveStreamMethods({ registerMethod: (n: string, f: Function) => methods.set(n, f), registerConnectionCleanup: (f: typeof cleanup) => { cleanup = f; } } as any,
     { subscribe() {}, list: () => [] } as any, (_key, turn) => saved.push(turn), o => { options = o; return { start: async () => {}, input() {}, context() {}, close: () => { closed++; } }; });
   const p = { id: "fixture-connection", ownerSession: "web:test", model: "gemini-3.8-live", runtime: "native", instructions: "", history: [], gemini_api_key: "test" };
   await methods.get("live.stream.create")!(conn, p);
@@ -85,4 +86,7 @@ test("gateway media is connection scoped, transcripts persist once, stop closes 
   options.emit({ type: "caption", id: "turn1", role: "user", text: "Hello", final: true }); options.emit({ type: "caption", id: "turn1", role: "user", text: "Hello", final: true });
   expect(saved).toHaveLength(1); expect(events[0].payload.connectionId).toBe(p.id); expect(events[0].payload.id).toBe("turn1");
   await methods.get("live.stream.close")!(conn, p); expect(closed).toBe(1);
+  await methods.get("live.stream.create")!(conn, { ...p, id: "fixture-reconnect" });
+  await cleanup({ ...conn }); expect(closed).toBe(1);
+  await cleanup(conn); expect(closed).toBe(2);
 });

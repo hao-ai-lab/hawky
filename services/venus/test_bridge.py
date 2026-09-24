@@ -1,4 +1,5 @@
 import unittest
+import time
 import httpx
 from fastapi.testclient import TestClient
 from bridge import OutputDecoder, create_app
@@ -13,6 +14,24 @@ class FakeTokenizer:
 
 
 class BridgeTests(unittest.TestCase):
+    def test_idle_gateway_releases_only_its_owned_session(self):
+        deleted = []
+        def upstream(req):
+            if req.method == "DELETE":
+                deleted.append(str(req.url))
+                return httpx.Response(200, json={"ok": True})
+            return httpx.Response(200, json={"incarnation": 1, "capabilities": {"raw_token_mode": "delta", "special_token_ids": {"<delegate>": 42}}})
+        app = create_app("http://fixture", FakeTokenizer(), transport=httpx.MockTransport(upstream), idle_seconds=0.03)
+        with TestClient(app) as client:
+            client.post("/sessions", json={"session_id": "owned"})
+            for _ in range(50):
+                if deleted:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(len(deleted), 1)
+            self.assertIn("/sessions/owned?incarnation=1&reason=bridge_idle", deleted[0])
+            self.assertEqual(client.post("/sessions/owned/output").status_code, 404)
+
     def test_incremental_unicode_and_cumulative_prefix(self):
         decoder = OutputDecoder(FakeTokenizer(), "delta")
         self.assertEqual(decoder.decode({"generation_id": "a", "total_token_ids": [1]})["text_delta"], "hi ")
