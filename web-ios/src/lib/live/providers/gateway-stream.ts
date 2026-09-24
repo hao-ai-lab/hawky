@@ -51,7 +51,11 @@ export class GatewayStreamProvider {
     if (this.stopped) { await this.remoteClose(); return; }
     await this.media.attach(stream);
     if (this.stopped) return;
-    this.ready = true; this.media.mic(mic);
+    this.ready = true;
+    // Tell the provider which turn protocol to use before the first audio
+    // packet or typed message can race connection startup.
+    this.input({ type: "mic", enabled: mic });
+    this.media.mic(mic);
     this.heartbeat = setInterval(() => {
       void this.o.rpc("live.stream.heartbeat", this.scope()).catch(e => { if (!this.stopped) this.o.onError(String(e)); });
     }, 10000);

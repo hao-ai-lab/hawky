@@ -17,18 +17,20 @@ beforeEach(() => {
   localStorage.clear(); useLiveSettings.getState().reset();
   useLiveSettings.setState({ model: "gemini-3.8-live", microphoneEnabled: false, cameraEnabled: false });
   vi.stubGlobal("AudioContext", Context); vi.stubGlobal("MediaStream", Stream);
+  capture.mockResolvedValue(new Stream());
   rpc = vi.fn(async (method: string) => method === "memory.resume" ? { mode: "summary", summary: "User prefers turquoise.", revision: 2, messages: [] } : {});
   useSocketStore.setState({ status: "connected", rpc, eventListeners: new Set() });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-it.each(["gemini-3.8-live", "realtime-venus-omni", "joyai-vl-interaction"])("connects %s without an OpenAI secret or RTC and restores history", async model => {
-  useLiveSettings.setState({ model });
+it.each([["gemini-3.8-live", true], ["gemini-3.8-live", false], ["realtime-venus-omni", false], ["joyai-vl-interaction", false]] as const)("connects %s (mic %s) without an OpenAI secret or RTC and restores history", async (model, microphoneEnabled) => {
+  useLiveSettings.setState({ model, microphoneEnabled });
   const h = renderHook(() => useRealtime({ sessionKey: "web:gemini" }));
   await act(async () => { await h.result.current.start(); });
   expect(h.result.current.phase).toBe("connected");
   const p = rpc.mock.calls.find(c => c[0] === "live.stream.create")![1] as any;
   expect(p.model).toBe(model); expect(p.history[0].text).toContain("turquoise");
   expect(rpc.mock.calls.some(c => c[0] === "live.openaiClientSecret")).toBe(false);
+  expect(rpc).toHaveBeenCalledWith("live.stream.input", { id: p.id, ownerSession: "web:gemini", input: { type: "mic", enabled: microphoneEnabled } });
   await act(async () => { h.result.current.sendText("Hello"); });
   expect(rpc).toHaveBeenCalledWith("live.stream.input", { id: p.id, ownerSession: "web:gemini", input: { type: "text", text: "Hello" } });
   await act(async () => {

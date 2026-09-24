@@ -154,9 +154,15 @@ The browser sends 16 kHz PCM16 and JPEG frames through authenticated gateway
 RPC; only the originating connection receives output audio. Keys stay off the
 provider event stream. Gemini returns 24 kHz PCM, input/output transcripts and
 native function calls. Its model setup omits unsupported thinking fields, sets
-explicit automatic voice activity detection, and includes all input in a turn.
-Typed camera questions attach the latest fresh JPEG to that same text turn,
-avoiding ordering races with the separate realtime video stream.
+explicit automatic voice activity detection, and uses Gemini 3.x's
+`TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO`: retain video between utterances,
+exclude silent audio. Once microphone streaming starts, new text and backend
+announcements use `realtimeInput.text`. Mixing explicit `clientContent` turns
+with continuous audio/video reproduced a missing second reply. Initial history
+still uses `clientContent` before capture begins. Camera-only connections use
+explicit multimodal turns so a typed question includes its fresh JPEG; realtime
+video/text without an audio stream can miss that image. The browser sends the
+initial microphone state before enabling PCM capture.
 
 `live.stream.*` owns lifecycle and authentication; `src/live/providers/gemini.ts`
 owns Gemini JSON. `GatewayStreamProvider` and `PcmMedia` own browser lifecycle,
@@ -164,7 +170,10 @@ capture, bounded playback and interruption. Backend task tools are shared with
 Realtime. Completed jobs wait for generation and playback to drain before an
 announcement; reconnect loads task state quietly. Tool-call cancellation from
 speech interruption suppresses an obsolete tool response without cancelling an
-already accepted durable task. Provider diagnostics record context delivery;
+already accepted durable task. Provider diagnostics record forwarded audio/video
+counts, last-frame age, text transport, and Gemini's reported modality usage.
+Forwarding is not an image acceptance receipt; image-token usage is separate
+provider evidence. No media bytes or keys are included in those diagnostics;
 task cards do not claim that a particular task result has been heard. The new
 stream adapters do not yet correlate announcements with task-level playback
 receipts, so a completed task can still show **playback unconfirmed** after its
@@ -188,6 +197,21 @@ question asking the image color. It verifies transcription, spoken output and
 the image answer even with a different color in restored history. For example,
 on macOS: `say -o /tmp/question.aiff 'What color is the image?'`, followed by
 `afconvert -f WAVE -d LEI16@16000 -c 1 /tmp/question.aiff /tmp/question.wav`.
+
+To test successive replies with the microphone **remaining open**, use:
+
+```sh
+GEMINI_LIVE_PROBE=voice GEMINI_LIVE_IMAGE=/path/to/red.jpg GEMINI_LIVE_WAV=/path/to/question.wav bun scripts/probes/gemini-live-continuous.ts
+GEMINI_LIVE_PROBE=text GEMINI_LIVE_IMAGE=/path/to/red.jpg bun scripts/probes/gemini-live-continuous.ts
+```
+
+This paid probe sends 100 ms PCM packets, including silence, and one JPEG every
+five seconds. It requires two correct image answers, output audio and reported
+image-token usage, without forcing replies by ending the audio stream. On
+2026-09-24 both sequences passed, as did camera-only input and native tool calls.
+These synthetic probes do not verify physical microphone/camera playback in a
+user's browser; retest that separately with mic and camera on, then type a second
+question without stopping the session.
 
 ## Self-hosted Realtime-Venus
 

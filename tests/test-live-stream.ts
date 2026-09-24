@@ -23,7 +23,7 @@ test("Gemini uses native setup and restores text without generating or passing O
   expect(setup.model).toBe("models/gemini-3.8-live");
   expect(setup.generationConfig.thinkingConfig).toBeUndefined();
   expect(setup.realtimeInputConfig.automaticActivityDetection.disabled).toBe(false);
-  expect(setup.realtimeInputConfig.turnCoverage).toBe("TURN_INCLUDES_ALL_INPUT");
+  expect(setup.realtimeInputConfig.turnCoverage).toBe("TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO");
   expect(setup.tools[0].functionDeclarations[0].name).toBe("session_send_message");
   expect(f.socket.sent[1].clientContent.turnComplete).toBe(false);
   f.socket.receive({ serverContent: { outputTranscription: { text: "old answer" }, modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: "AAAA" } }] }, turnComplete: true } });
@@ -40,14 +40,14 @@ test("tool receipts are idempotent; provider cancellation does not cancel durabl
   expect(count).toBe(1); expect(f.socket.sent.filter(e => e.toolResponse)).toEqual([]);
 });
 test("completion waits for generation and audio drain; interruption releases queued work", async () => {
-  const f = await fixture(); f.adapter.input({ type: "text", text: "Hello" });
+  const f = await fixture(); f.adapter.input({ type: "mic", enabled: true }); f.adapter.input({ type: "text", text: "Hello" });
   f.socket.receive({ serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: "AAAA" } }] }, outputTranscription: { text: "Hello there" } } });
   f.adapter.context("Task completed", true);
   const before = f.socket.sent.length;
   f.socket.receive({ serverContent: { turnComplete: true } }); expect(f.socket.sent).toHaveLength(before);
   const audio = f.events.find(e => e.type === "audio")!;
   f.adapter.input({ type: "playback", id: (audio as any).id, played: true });
-  expect(f.socket.sent.at(-1).clientContent.turns[0].parts[0].text).toContain("Task completed");
+  expect(f.socket.sent.at(-1).realtimeInput.text).toContain("Task completed");
   expect(f.events.filter(e => e.type === "caption" && e.final).map(e => (e as any).text)).toEqual(["Hello", "Hello there"]);
   f.socket.receive({ serverContent: { interrupted: true } }); expect(f.events.at(-1)?.type).toBe("interrupt");
 });
@@ -58,14 +58,46 @@ test("mic flush and images use documented native fields", async () => {
   expect(f.socket.sent.at(-1)).toEqual({ realtimeInput: { video: { data: "AAAA", mimeType: "image/jpeg" } } });
   expect(geminiSetup({ ...f.options, bridge: false }).setup.tools).toBeUndefined();
 });
-test("typed camera questions pin a fresh image to the same turn, never a stale image", async () => {
+test("typed camera questions use realtime input with a fresh image, never a stale image", async () => {
   const f = await fixture();
+  f.adapter.input({ type: "mic", enabled: true });
   f.adapter.input({ type: "image", data: "AAAA", at: Date.now() });
   f.adapter.input({ type: "text", text: "What color?" });
-  expect(f.socket.sent.at(-1).clientContent.turns[0].parts).toEqual([{ inlineData: { mimeType: "image/jpeg", data: "AAAA" } }, { text: "What color?" }]);
+  expect(f.socket.sent.at(-1)).toEqual({ realtimeInput: { video: { mimeType: "image/jpeg", data: "AAAA" }, text: "What color?" } });
   f.adapter.input({ type: "image", data: "AAAA", at: Date.now() - 10000 });
   f.adapter.input({ type: "text", text: "What now?" });
-  expect(f.socket.sent.at(-1).clientContent.turns[0].parts).toEqual([{ text: "What now?" }]);
+  expect(f.socket.sent.at(-1)).toEqual({ realtimeInput: { text: "What now?" } });
+});
+test("camera-only typed turns include the JPEG explicitly until microphone streaming starts", async () => {
+  const f = await fixture();
+  f.adapter.input({ type: "mic", enabled: false });
+  f.adapter.input({ type: "image", data: "AAAA", at: Date.now() });
+  f.adapter.input({ type: "text", text: "What color?" });
+  expect(f.socket.sent.at(-1).clientContent.turns[0].parts).toEqual([
+    { inlineData: { mimeType: "image/jpeg", data: "AAAA" } }, { text: "What color?" },
+  ]);
+  f.adapter.input({ type: "mic", enabled: true });
+  f.adapter.input({ type: "text", text: "Before the first audio packet" });
+  expect(f.socket.sent.at(-1).realtimeInput.text).toBe("Before the first audio packet");
+  f.adapter.input({ type: "mic", enabled: false });
+  f.adapter.input({ type: "text", text: "Still on the same stream" });
+  expect(f.socket.sent.at(-1).realtimeInput.text).toBe("Still on the same stream");
+});
+test("continuous microphone input, successive text turns and backend results never inject explicit chat turns", async () => {
+  const f = await fixture();
+  const restored = f.socket.sent.length;
+  for (const text of ["What can you see?", "Hey how are you?"]) {
+    f.adapter.input({ type: "audio", data: "AAAA" });
+    f.adapter.input({ type: "image", data: "AAAA", at: Date.now() });
+    f.adapter.input({ type: "text", text });
+    f.socket.receive({ serverContent: { outputTranscription: { text: "Answer" }, turnComplete: true }, usageMetadata: { promptTokensDetails: [{ modality: "IMAGE", tokenCount: 256 }] } });
+  }
+  f.adapter.context("Task completed", true);
+  expect(f.socket.sent.slice(restored).every(e => e.realtimeInput)).toBe(true);
+  const diagnostics = f.events.filter(e => e.type === "diagnostic");
+  expect(diagnostics.some(e => JSON.stringify(e).includes('"videoFrames":2'))).toBe(true);
+  expect(diagnostics.some(e => JSON.stringify(e).includes('"modality":"IMAGE"'))).toBe(true);
+  expect(JSON.stringify(diagnostics)).not.toContain("AAAA");
 });
 test("media validation rejects unsupported commands, oversized packets, and partial PCM", () => {
   expect(() => validateStreamInput({ type: "audio", data: "AA==" })).toThrow();
