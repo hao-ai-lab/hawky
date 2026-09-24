@@ -212,7 +212,8 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           {/* Keep the same controls available before and during a session. */}
           <div className="overflow-hidden border-white/10 max-md:rounded-glass max-md:border max-md:bg-[var(--glass-bg)] max-md:shadow-glass max-md:backdrop-blur-xl md:border-t md:bg-paper/40">
             <ControlBar
-              audioOnly={capabilities.provider === "gpt-live"}
+              audioOnly={!capabilities.camera}
+              behaviorModes={capabilities.behaviorModes}
               phase={phase} canStart={canStart} isConnected={isConnected} resumable={resumable}
               micOn={micOn} cameraOn={cameraOn} speakerOn={speakerOn} staySilent={staySilent} cocktailParty={cocktailParty} safetyOn={safetyOn} speaking={speaking}
               onStart={() => void start()} onStop={stop}
@@ -266,6 +267,7 @@ const Composer = memo(function Composer({ onSend }: { onSend: (text: string) => 
 // -----------------------------------------------------------------------------
 function ControlBar(p: {
   audioOnly: boolean;
+  behaviorModes: boolean;
   phase: LivePhase; canStart: boolean; isConnected: boolean; resumable: boolean;
   micOn: boolean; cameraOn: boolean; speakerOn: boolean; staySilent: boolean; cocktailParty: boolean; safetyOn: boolean; speaking: boolean;
   onStart: () => void; onStop: () => void;
@@ -281,9 +283,9 @@ function ControlBar(p: {
           <Ctrl disabled={busy} on={p.micOn} onIcon="mic" offIcon="micOff" label="Mic" onClick={p.onToggleMic} />
           <Ctrl disabled={busy || p.audioOnly} on={p.cameraOn} onIcon="video" offIcon="videoOff" label="Camera" onClick={p.onToggleCamera} />
           <Ctrl disabled={busy} on={p.speakerOn} onIcon="speaker" offIcon="speakerOff" label="Spoken replies" onClick={p.onToggleSpeaker} pulse={p.speaking} />
-          <Ctrl disabled={busy || p.audioOnly} on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
-          <Ctrl disabled={busy || p.audioOnly} on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
-          <Ctrl disabled={busy || p.audioOnly} on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
+          <Ctrl disabled={busy || !p.behaviorModes} on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
+          <Ctrl disabled={busy || !p.behaviorModes} on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
+          <Ctrl disabled={busy || !p.behaviorModes} on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
       <PrimaryButton phase={p.phase} canStart={p.canStart} resumable={p.resumable} onStart={p.onStart} onStop={p.onStop} />
       </div>
     </div>

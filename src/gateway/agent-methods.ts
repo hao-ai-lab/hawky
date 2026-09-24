@@ -1,3 +1,4 @@
+import { registerLiveStreamMethods } from "./live-stream-methods.js";
 import { registerGptLiveMethods } from "./gpt-live-methods.js";
 // =============================================================================
 // Agent RPC Method Handlers
@@ -1163,6 +1164,13 @@ export function registerAgentMethods(
     });
 
   registerGptLiveMethods(server, delegationService, (sessionKey, turn) => {
+    const session = sessions.getOrCreate(sessionKey);
+    const message = { role: turn.role, content: [{ type: "text" as const, text: turn.text }], timestamp: new Date().toISOString() };
+    session.loop.setHistory([...session.loop.getHistory(), message]);
+    session.sessionManager.appendMessage(message);
+  });
+
+  registerLiveStreamMethods(server, delegationService, (sessionKey, turn) => {
     const session = sessions.getOrCreate(sessionKey);
     const message = { role: turn.role, content: [{ type: "text" as const, text: turn.text }], timestamp: new Date().toISOString() };
     session.loop.setHistory([...session.loop.getHistory(), message]);

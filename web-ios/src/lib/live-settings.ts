@@ -11,6 +11,8 @@ import { create } from "zustand";
 
 export const REALTIME_MODELS = [
   "gpt-live-1",
+  "gemini-3.8-live",
+  "gemini-3.1-flash-live-preview",
   "gpt-realtime-2",
   "gpt-realtime-mini-2025-12-15",
   "gpt-realtime-mini-2025-10-06",
@@ -41,6 +43,7 @@ export interface LiveSettings {
   // Response
   responseModality: "audio" | "text";
   voice: string;
+  geminiVoice: string;
   noiseReduction: (typeof NOISE_REDUCTION)[number];
   userTranscript: boolean;        // input transcription on
   assistantTranscript: boolean;   // output transcription on
@@ -84,6 +87,7 @@ export const DEFAULT_LIVE_SETTINGS: LiveSettings = {
   model: "gpt-realtime-2",
   responseModality: "audio",
   voice: "marin",
+  geminiVoice: "Kore",
   noiseReduction: "far_field",
   userTranscript: true,
   assistantTranscript: true,

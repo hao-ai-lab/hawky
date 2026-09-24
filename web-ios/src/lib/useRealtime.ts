@@ -1,3 +1,4 @@
+import { GatewayStreamProvider, streamPrompt } from "./live/providers/gateway-stream";
 import { realtimeSessionConfig, connectRealtime } from "./live/providers/openai-realtime";
 import { useTaskSubscription } from "./live/task-subscription";
 import { useConversationPersistence } from "./live/conversation-persistence";
@@ -16,7 +17,7 @@ import { delegationEntry } from "./delegation-view";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSocketStore } from "./socket-store";
-import { byokParam } from "./byok";
+import { byokParam, loadGeminiKey } from "./byok";
 import { getUserMediaSafe, mediaUnavailableReason } from "./media";
 import { useLiveSettings, cadenceFps } from "./live-settings";
 import { useSessionStore } from "./session-store";
@@ -49,12 +50,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const settings = useLiveSettings();
 
   const disposeMediaRef = useRef<(() => void) | null>(null);
+  const streamRef = useRef<GatewayStreamProvider | null>(null);
   const gptRef = useRef<GptLiveProvider | null>(null);
   const gptClosingRef = useRef<Promise<void>>(Promise.resolve());
   const restartPendingRef = useRef(false);
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const capabilities = liveCapabilities(activeModel ?? settings.model);
-  const isGpt = capabilities.provider === "gpt-live";
   const [phase, setPhase] = useState<LivePhase>("idle");
   const [compaction, setCompaction] = useState<CompactionState>(initialCompaction);
   const compactionRef = useRef<RealtimeCompaction | null>(null);
@@ -75,7 +76,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const submittingTasksRef = useRef(new Set<string>());
   const { tasksRef, quietTasksRef } = useTaskSubscription({ sessionKey, connected: gatewayStatus === "connected", rpc, subscribe,
     changed: (task, previous) => {
-      if (task.validity === "superseded" && !gptRef.current) {
+      if (task.validity === "superseded" && !gptRef.current && !streamRef.current) {
         responsesRef.current?.invalidateTask(task.id);
         if (previous?.validity !== "superseded" && readyRef.current) sendRealtime({ type: "conversation.item.create",
           item: { type: "message", role: "system", content: [{ type: "input_text", text: `Backend task ${task.id} was superseded by a correction. Its result is no longer current; do not present it as the answer.` }] } });
@@ -105,8 +106,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   useEffect(() => {
     if (phase !== "idle" && phase !== "failed") return;
     setMicOn(settings.microphoneEnabled); setCameraOn(settings.cameraEnabled && liveCapabilities(settings.model).camera);
-    setSpeakerOn(settings.responseModality === "audio"); setStaySilent(settings.staySilent && liveCapabilities(settings.model).provider !== "gpt-live");
-    setCocktailParty(settings.cocktailParty && liveCapabilities(settings.model).camera); setSafetyOn(settings.safetyCheck && liveCapabilities(settings.model).camera);
+    setSpeakerOn(settings.responseModality === "audio"); setStaySilent(settings.staySilent && liveCapabilities(settings.model).behaviorModes);
+    setCocktailParty(settings.cocktailParty && liveCapabilities(settings.model).behaviorModes); setSafetyOn(settings.safetyCheck && liveCapabilities(settings.model).behaviorModes);
   }, [phase, settings.microphoneEnabled, settings.cameraEnabled, settings.responseModality, settings.staySilent, settings.cocktailParty, settings.safetyCheck, settings.model]);
   const [speaking, setSpeaking] = useState(false);
   const [bridgeOffline, setBridgeOffline] = useState(false);
@@ -205,7 +206,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }
 
   const transmitRealtime = useCallback((event: unknown, duringStartup = false) => {
-    if (gptRef.current) return false;
+    if (gptRef.current || streamRef.current) return false;
     if (!readyRef.current && !duringStartup) return false;
     const dc = dcRef.current;
     if (!dc || dc.readyState !== "open") return false;
@@ -233,7 +234,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }, [transmitRealtime]);
 
   injectTasksRef.current = (announce = true) => {
-    if (gptRef.current) return;
+    if (gptRef.current || streamRef.current) return;
     if (!readyRef.current) return;
     for (const task of tasksRef.current.values()) {
       if (task.ownerSession !== liveSessionKeyRef.current || task.validity === "superseded" || ["played", "displayed"].includes(task.delivery ?? "") || submittingTasksRef.current.has(task.id)) continue;
@@ -254,6 +255,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   useEffect(() => { if (phase === "connected") injectTasksRef.current(); }, [phase]);
 
   const teardown = useCallback(() => {
+    if (streamRef.current) { gptClosingRef.current = streamRef.current.close(); streamRef.current = null; }
     if (gptRef.current) { gptClosingRef.current = gptRef.current.close(); gptRef.current = null; }
     setActiveModel(null);
     compactionRef.current?.dispose();
@@ -357,7 +359,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const start = useCallback(async () => {
     if (startingRef.current || closing) return;
     const isGpt = liveCapabilities(settings.model).provider === "gpt-live";
-    const cameraOn = !isGpt && cameraOnRef.current;
+    const isStream = !["gpt-live", "openai-realtime"].includes(liveCapabilities(settings.model).provider);
+    const cameraOn = liveCapabilities(settings.model).camera && cameraOnRef.current;
     const blocked = micOn || cameraOn ? mediaUnavailableReason() : null;
     if (blocked) { setError(blocked); setPhase("failed"); push("warning", blocked); return; }
 
@@ -444,8 +447,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         push("system", "Hawk backend unreachable — running without memory/tools.");
       }
 
-      instructionsRef.current = isGpt ? gptLivePrompt(bootContext, settings.backendBridge, settings.backendRuntime) : buildRealtimePrompt(bootContext);
-      const instructions = instructionsRef.current + (!isGpt && cocktailParty ? COCKTAIL_INSTRUCTIONS : "");
+      instructionsRef.current = isStream ? streamPrompt(bootContext, settings.backendBridge, settings.backendRuntime) : isGpt ? gptLivePrompt(bootContext, settings.backendBridge, settings.backendRuntime) : buildRealtimePrompt(bootContext);
+      const instructions = instructionsRef.current + (!isGpt && !isStream && cocktailParty ? COCKTAIL_INSTRUCTIONS : "");
       // Realtime tools: backend bridge + shared person tools. The browser attaches
       // frames privately when a person tool needs the current camera image.
       const tools = [
@@ -456,7 +459,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       if (attempt !== attemptRef.current) return;
 
       // 2) Mint a realtime client secret (BYOK-aware), using the chosen model.
-      const broker = isGpt ? { model: settings.model } : (await rpc("live.openaiClientSecret", {
+      const broker = isGpt || isStream ? { model: settings.model } : (await rpc("live.openaiClientSecret", {
         ...byokParam(),
         model: settings.model,
         instructions,
@@ -466,9 +469,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       })) as BrokerResponse;
       if (broker.ok === false) throw new Error(broker.error ?? "Realtime broker failed");
       const token = clientSecretValue(broker);
-      if (!isGpt && !token) throw new Error("Realtime broker did not return a client secret");
+      if (!isGpt && !isStream && !token) throw new Error("Realtime broker did not return a client secret");
       if (attempt !== attemptRef.current) return;
-      archive.record("context.initial", { model: broker.model ?? settings.model, instructions, tools: isGpt ? [] : tools,
+      archive.record("context.initial", { model: broker.model ?? settings.model, instructions, tools: isGpt ? [] : isStream ? tools.slice(0, settings.backendBridge ? 2 : 0) : tools,
         reasoningEffort: settings.reasoningEffort, restoredMessageCount: priorTurns.length, memoryRevision });
 
       // 3) Capture mic/camera (camera position from settings).
@@ -481,6 +484,35 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       if (attempt !== attemptRef.current) { media.getTracks().forEach(t => t.stop()); return; }
       mediaRef.current = media;
       if (videoElRef.current) videoElRef.current.srcObject = media;
+
+      if (isStream) {
+        const provider = new GatewayStreamProvider({ ownerSession: sessionKey, rpc, subscribe,
+          caption: caption => {
+            if (attempt !== attemptRef.current) return;
+            const entry: TranscriptEntry = { id: caption.id, kind: caption.role, text: caption.text, at: new Date().toLocaleTimeString() };
+            setTranscript(cur => (cur.some(t => t.id === entry.id) ? cur.map(t => t.id === entry.id ? entry : t) : [...cur, entry]).slice(-200));
+            if (caption.role === "assistant") flashSpeaking();
+            if (caption.role === "user" && caption.final) void useSessionStore.getState().maybeAutoTitle(sessionKey, caption.text);
+          },
+          record: (type, data) => archive.record(type, data), warning: message => push("warning", message),
+          onError: message => {
+            if (attempt !== attemptRef.current || streamRef.current !== provider) return;
+            setError(message); push("warning", message); setPhase("failed"); teardown();
+          },
+        });
+        streamRef.current = provider;
+        setPhase("restoring");
+        await provider.connect(media, { model: settings.model, instructions, history: priorTurns,
+          voice: settings.geminiVoice, runtime: settings.backendRuntime, bridge: settings.backendBridge,
+          ...(loadGeminiKey() ? { gemini_api_key: loadGeminiKey() } : {}),
+        }, micOn, speakerOn);
+        if (attempt !== attemptRef.current || streamRef.current !== provider) return;
+        readyRef.current = true; startingRef.current = false;
+        archive.record("connection.connected", { model: settings.model });
+        setPhase("connected"); push("system", `Connected to ${settings.model} with ${priorTurns.length} prior context messages.`);
+        if (cameraOn && cadenceFps(settings) > 0) startFrameLoop(Math.min(1, cadenceFps(settings)));
+        return;
+      }
 
       // 4) WebRTC peer connection to OpenAI Realtime.
       const { pc, dc, sender, dispose } = createMediaConnection(media, stream => {
@@ -631,6 +663,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     attemptRef.current++;
     const archive = cameraArchiveRef.current;
     if (gptRef.current) await gptRef.current.close();
+    if (streamRef.current) await streamRef.current.close();
     archive?.record("connection.ended", { reason: "user_stop" });
     if (archive?.liveSessionId) clearLiveRecording(liveSessionKeyRef.current, archive.liveSessionId);
     teardown();
@@ -682,7 +715,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const frameId = crypto.randomUUID();
     const itemId = frameId.replace(/-/g, "");
     const capturedAt = new Date().toISOString();
-    const sent = sendRealtime({
+    const sent = streamRef.current ? streamRef.current.image(image) : sendRealtime({
       type: "conversation.item.create",
       event_id: frameId,
       item: { id: itemId, type: "message", role: "user", content: [{ type: "input_image", image_url: image }] },
@@ -699,6 +732,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const sendText = useCallback((text: string) => {
     const t = text.trim();
     if (!t || !readyRef.current) return;
+    if (streamRef.current) { streamRef.current.text(t); return; }
     if (gptRef.current) {
       push("user", t);
       void gptRef.current.text(t).catch(e => push("warning", String(e)));
@@ -1001,12 +1035,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Before Start these only save preferences. During Live a previously disabled
   // input is acquired on demand; the negotiated audio sender can accept it.
   async function toggleInput(kind: "audio" | "video") {
-    if (kind === "video" && isGpt) return;
+    if (kind === "video" && !capabilities.camera) return;
     if (startingRef.current || inputBusyRef.current) return;
     const current = kind === "audio" ? micOnRef.current : cameraOnRef.current;
     const next = !current;
-    const pc = pcRef.current, media = mediaRef.current;
-    if (readyRef.current && pc && media) {
+    const pc = pcRef.current, stream = streamRef.current, media = mediaRef.current;
+    if (readyRef.current && (pc || stream) && media) {
       inputBusyRef.current = true;
       let acquired: MediaStream | undefined;
       try {
@@ -1014,10 +1048,11 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         if (next && !tracks.length) {
           acquired = await getUserMediaSafe({ audio: kind === "audio", video: kind === "video"
             ? { facingMode: settings.cameraPosition === "back" ? "environment" : "user" } : false });
-          if (pcRef.current !== pc || !readyRef.current) { acquired.getTracks().forEach(t => t.stop()); return; }
+          if (pcRef.current !== pc || streamRef.current !== stream || !readyRef.current) { acquired.getTracks().forEach(t => t.stop()); return; }
           if (kind === "audio") await audioSenderRef.current?.replaceTrack(acquired.getAudioTracks()[0]);
-          if (pcRef.current !== pc || !readyRef.current) { acquired.getTracks().forEach(t => t.stop()); return; }
+          if (pcRef.current !== pc || streamRef.current !== stream || !readyRef.current) { acquired.getTracks().forEach(t => t.stop()); return; }
           acquired.getTracks().forEach(t => media.addTrack(t));
+          if (kind === "audio" && stream) await stream.attach(media);
         }
         (kind === "audio" ? media.getAudioTracks() : media.getVideoTracks()).forEach(t => { t.enabled = next; });
         if (kind === "video") {
@@ -1030,7 +1065,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         return;
       } finally { if (pcRef.current === pc) inputBusyRef.current = false; }
     }
-    if (kind === "audio") gptRef.current?.mic(next);
+    if (kind === "audio") { gptRef.current?.mic(next); streamRef.current?.mic(next); }
     if (kind === "audio") { micOnRef.current = next; setMicOn(next); settings.set("microphoneEnabled", next); }
     else { cameraOnRef.current = next; setCameraOn(next); settings.set("cameraEnabled", next); }
   }
@@ -1040,6 +1075,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const next = !speakerOn;
     setSpeakerOn(next); replyModeRef.current = next ? "audio" : "text";
     settings.set("responseModality", replyModeRef.current);
+    streamRef.current?.speaker(next);
     if (audioElRef.current) audioElRef.current.muted = !next || (gptRef.current?.awaitingUser ?? false);
     sendRealtime({ type: "session.update", session: { type: "realtime", output_modalities: [replyModeRef.current] } });
   };
@@ -1084,7 +1120,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // (create_response) to the LIVE session so toggling works mid-conversation —
   // not just at connect time. On release, recap what was heard (#671).
   const toggleStaySilent = () => {
-    if (isGpt) return;
+    if (!capabilities.behaviorModes) return;
     const next = !staySilent;
     setStaySilent(next); settings.set("staySilent", next);
     if (!readyRef.current) return;
@@ -1118,7 +1154,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Cocktail Party: instruct the realtime model to recognize & recall people
   // from the face database on demand. Pushed live via instructions update.
   const toggleCocktailParty = () => {
-    if (isGpt) return;
+    if (!capabilities.behaviorModes) return;
     const next = !cocktailParty;
     setCocktailParty(next); settings.set("cocktailParty", next);
     if (!readyRef.current) return;
@@ -1149,7 +1185,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }, [rpc, sendRealtime]);
 
   const toggleSafety = () => {
-    if (isGpt) return;
+    if (!capabilities.behaviorModes) return;
     const next = !safetyOn;
     setSafetyOn(next); settings.set("safetyCheck", next);
     if (readyRef.current) push(next ? "warning" : "system", next ? "Safety Check on — silently watching for hazards." : "Safety Check off.");

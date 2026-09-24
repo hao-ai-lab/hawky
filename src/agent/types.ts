@@ -525,6 +525,7 @@ export interface HawkyConfig {
     anthropic: string;
     brave_search: string;
     openai: string;
+    gemini?: string;
   };
   /** Anthropic API base URL (default: https://api.anthropic.com). Override for proxies. */
   api_base_url: string;

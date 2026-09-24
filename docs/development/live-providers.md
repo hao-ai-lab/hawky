@@ -143,3 +143,33 @@ Primary protocol references:
 [delegation](https://developers.openai.com/api/docs/guides/live-delegation),
 [server controls](https://developers.openai.com/api/docs/guides/voice-server-controls),
 [session context](https://developers.openai.com/api/docs/guides/live-conversations).
+
+## Gemini Live
+
+Select `gemini-3.8-live` in Live settings. A separate browser Gemini key is
+optional; the gateway also accepts `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
+`api_keys.gemini` in its private config. No OpenAI key is used for this path.
+The browser sends 16 kHz PCM16 and JPEG frames through authenticated gateway
+RPC; only the originating connection receives output audio. Keys stay off the
+provider event stream. Gemini returns 24 kHz PCM, input/output transcripts and
+native function calls. Its model setup omits unsupported thinking fields.
+
+`live.stream.*` owns lifecycle and authentication; `src/live/providers/gemini.ts`
+owns Gemini JSON. `GatewayStreamProvider` and `PcmMedia` own browser lifecycle,
+capture, bounded playback and interruption. Backend task tools are shared with
+Realtime. Completed jobs wait for generation and playback to drain before an
+announcement; reconnect loads task state quietly. Tool-call cancellation from
+speech interruption suppresses an obsolete tool response without cancelling an
+already accepted durable task. This adapter records injection, not a claim that
+a particular task result has been heard.
+
+Provider disconnects surface an error and allow Start to restore saved text and
+memory. Automatic hidden-state resumption is not implemented. Gemini's sliding
+window compression stays provider-owned. Face tools, Stay silent and manual
+Realtime item compaction remain disabled. Native iOS is unchanged.
+
+Checks: `bun test ./tests/test-live-stream.ts`; browser fixtures in
+`web-ios/tests/gateway-stream.test.tsx`. Paid synthetic probe:
+`bun scripts/probes/gemini-live.ts`. The probe verifies real session setup,
+spoken output and seeded-history recall, without using a physical microphone.
+Protocol: https://ai.google.dev/gemini-api/docs/live-api/capabilities
