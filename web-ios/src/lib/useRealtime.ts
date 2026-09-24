@@ -255,7 +255,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   useEffect(() => { if (phase === "connected") injectTasksRef.current(); }, [phase]);
 
   const teardown = useCallback(() => {
-    if (streamRef.current) { gptClosingRef.current = streamRef.current.close(); streamRef.current = null; }
+    if (streamRef.current) { const stream = streamRef.current; streamRef.current = null; gptClosingRef.current = stream.close(); }
     if (gptRef.current) { gptClosingRef.current = gptRef.current.close(); gptRef.current = null; }
     setActiveModel(null);
     compactionRef.current?.dispose();

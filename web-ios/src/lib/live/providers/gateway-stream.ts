@@ -22,6 +22,8 @@ export class GatewayStreamProvider {
   private heartbeat?: ReturnType<typeof setInterval>;
   private unsubscribe: () => void;
   private inFlight = 0;
+  private playbackReceipts: Extract<StreamInput, { type: "playback" }>[] = [];
+  private playbackInFlight = 0;
   private captureProblem = "";
   private closePromise?: Promise<void>;
   constructor(private o: {
@@ -59,7 +61,8 @@ export class GatewayStreamProvider {
     this.media.mic(mic);
     this.heartbeat = setInterval(() => {
       const health = this.media.health();
-      this.o.record("media.health", { ...health, inFlight: this.inFlight });
+      this.o.record("media.health", { ...health, inFlight: this.inFlight,
+        playbackReceiptsPending: this.playbackReceipts.length + this.playbackInFlight });
       const problem = !health.micEnabled ? "" : !health.track ? "Microphone track is missing."
         : health.track.readyState === "ended" ? "Microphone track has ended."
         : health.track.muted ? "The browser has muted microphone capture."
@@ -80,17 +83,38 @@ export class GatewayStreamProvider {
     }, 5000);
   }
   private fail(message: string) {
-    // Record before onError tears down the connection.
-    this.o.record("provider.error", { message }); this.o.onError(message);
+    if (this.stopped) return;
+    this.o.record("provider.error", { message });
+    // Stop callbacks before notifying the UI, which may also call close().
+    void this.close();
+    this.o.onError(message);
   }
   private scope() { return { id: this.id, ownerSession: this.o.ownerSession }; }
   private input(input: StreamInput) {
     if (!this.ready || this.stopped) return;
+    if (input.type === "playback") {
+      // Interrupting one answer can acknowledge dozens of chunks at once.
+      // These tiny receipts must not trip the realtime media backlog limit.
+      if (this.playbackReceipts.length + this.playbackInFlight >= 1024) {
+        this.fail("Gateway playback acknowledgements are falling behind. Reconnect to continue."); return;
+      }
+      this.playbackReceipts.push(input); this.flushPlaybackReceipts(); return;
+    }
     // Don't accumulate unbounded audio on a slow/disconnected gateway.
     if (this.inFlight >= 20) { this.fail("Gateway media connection is falling behind. Reconnect to continue."); return; }
     this.inFlight++;
     void this.o.rpc("live.stream.input", { ...this.scope(), input })
       .catch(e => { if (!this.stopped) this.fail(String(e)); }).finally(() => this.inFlight--);
+  }
+  private flushPlaybackReceipts() {
+    // Bound RPC concurrency without delaying microphone packets behind receipts.
+    while (!this.stopped && this.playbackInFlight < 4 && this.playbackReceipts.length) {
+      const input = this.playbackReceipts.shift()!;
+      this.playbackInFlight++;
+      void this.o.rpc("live.stream.input", { ...this.scope(), input })
+        .catch(e => { if (!this.stopped) this.fail(String(e)); })
+        .finally(() => { this.playbackInFlight--; this.flushPlaybackReceipts(); });
+    }
   }
   text(text: string) { this.input({ type: "text", text }); }
   image(data: string) { this.input({ type: "image", data: data.replace(/^data:image\/jpeg;base64,/, ""), at: Date.now() }); return this.ready && !this.stopped; }
@@ -99,8 +123,13 @@ export class GatewayStreamProvider {
   speaker(enabled: boolean) { this.media.speaker(enabled); }
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    this.media.close(); this.stopped = true; this.ready = false; clearInterval(this.heartbeat); this.unsubscribe();
-    return this.closePromise = this.remoteClose();
+    this.stopped = true; this.ready = false;
+    // Install the promise and terminal state before media teardown calls back.
+    // Remote close releases its playback fence; shutdown needs no receipts.
+    this.closePromise = Promise.resolve().then(() => this.remoteClose());
+    this.playbackReceipts.length = 0;
+    clearInterval(this.heartbeat); this.unsubscribe(); this.media.close();
+    return this.closePromise;
   }
   private async remoteClose() { if (this.created) await this.o.rpc("live.stream.close", this.scope()).catch(() => {}); }
 }

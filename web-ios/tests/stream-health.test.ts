@@ -6,11 +6,20 @@ class Node {
   connect() {} disconnect() {}
 }
 class Context {
+  static current: Context;
   state = "running"; currentTime = 0; destination = {};
+  outputs: Output[] = [];
+  constructor() { Context.current = this; }
   audioWorklet = { addModule: async () => {} };
   createGain() { return new Node(); }
   createMediaStreamSource() { return new Node(); }
-  async resume() {} async close() {}
+  createBuffer(_channels: number, length: number, rate: number) { return { duration: length / rate, copyToChannel() {} }; }
+  createBufferSource() { const source = new Output(); this.outputs.push(source); return source; }
+  async resume() {} close = vi.fn(async () => { this.state = "closed"; });
+}
+class Output extends Node {
+  buffer: unknown; onended: (() => void) | null = null;
+  start() {} stop = vi.fn();
 }
 class Capture extends Node {
   static current: Capture;
@@ -23,7 +32,7 @@ afterEach(async () => { await connection?.close(); connection = undefined; vi.us
 async function fixture() {
   vi.useFakeTimers(); vi.stubGlobal("AudioContext", Context); vi.stubGlobal("AudioWorkletNode", Capture);
   const record = vi.fn(), warning = vi.fn(), onError = vi.fn(); let listener!: (event: any) => void;
-  const rpc = vi.fn(async (method: string) => method === "live.stream.heartbeat" ? { diagnostics: { provider: "gemini", input: { audioPackets: 1 } } } : {});
+  const rpc = vi.fn(async (method: string, _params?: any) => method === "live.stream.heartbeat" ? { diagnostics: { provider: "gemini", input: { audioPackets: 1 } } } : {});
   connection = new GatewayStreamProvider({ ownerSession: "web:test", rpc, record, warning, onError,
     caption() {}, subscribe: fn => { listener = fn; return () => {}; } });
   const track = { enabled: true, muted: false, readyState: "live" };
@@ -58,12 +67,104 @@ it("reports browser-muted tracks but never treats an intentional mic-off as a ca
   connection!.mic(false); f.warning.mockClear();
   await vi.advanceTimersByTimeAsync(20000); expect(f.warning).not.toHaveBeenCalled();
 });
-it("archives provider and worklet errors before notifying the UI", async () => {
+it.each(["provider", "worklet"])("archives the first %s error before notifying the UI and ignores later errors", async kind => {
   const f = await fixture();
   f.onError.mockImplementation(message => expect(f.record).toHaveBeenCalledWith("provider.error", { message }));
-  f.emit({ type: "error", message: "Quota exhausted" });
+  if (kind === "provider") f.emit({ type: "error", message: "Quota exhausted" });
   Capture.current.onprocessorerror!();
-  expect(f.onError).toHaveBeenCalledWith("Quota exhausted");
-  expect(f.onError).toHaveBeenCalledWith(expect.stringContaining("audio processing stopped"));
+  f.emit({ type: "error", message: "Another error" });
+  expect(f.onError).toHaveBeenCalledOnce();
+  expect(f.onError).toHaveBeenCalledWith(kind === "provider" ? "Quota exhausted" : expect.stringContaining("audio processing stopped"));
   expect(JSON.stringify(f.record.mock.calls)).not.toContain("data");
+});
+
+function queueSpeech(emit: (event: any) => void, count = 60) {
+  // Joy TTS splits a spoken answer into many small PCM chunks.
+  const data = btoa("\0".repeat(12000));
+  for (let i = 0; i < count; i++) emit({ type: "audio", id: `chunk-${i}`, data, rate: 24000 });
+}
+const receipts = (rpc: ReturnType<typeof vi.fn>) => rpc.mock.calls
+  .filter(([method, p]) => method === "live.stream.input" && p.input.type === "playback")
+  .map(([, p]) => p.input);
+
+it.each(["interrupt", "mute", "finished"])("drains a burst of playback receipts on %s without failing the media connection", async action => {
+  const f = await fixture(); queueSpeech(f.emit);
+  if (action === "interrupt") f.emit({ type: "interrupt" });
+  else if (action === "mute") connection!.speaker(false);
+  else for (const output of Context.current.outputs) output.onended?.();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(receipts(f.rpc)).toEqual(Array.from({ length: 60 }, (_, i) => ({ type: "playback", id: `chunk-${i}`, played: action === "finished" })));
+  connection!.text("Still connected");
+  expect(f.rpc).toHaveBeenCalledWith("live.stream.input", expect.objectContaining({ input: { type: "text", text: "Still connected" } }));
+});
+
+it("Stop with queued speech closes once without sending interruption receipts or errors", async () => {
+  const f = await fixture(); queueSpeech(f.emit);
+  f.onError.mockImplementation(() => { void connection!.close(); });
+  const closing = connection!.close(); expect(connection!.close()).toBe(closing);
+  await closing;
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(receipts(f.rpc)).toHaveLength(0);
+  expect(Context.current.close).toHaveBeenCalledOnce();
+  expect(Context.current.outputs.every(output => output.stop.mock.calls.length === 1)).toBe(true);
+  expect(f.rpc.mock.calls.filter(([method]) => method === "live.stream.close")).toHaveLength(1);
+});
+
+it("a genuinely stalled gateway fails once and releases playback and capture without recursion", async () => {
+  const f = await fixture(); queueSpeech(f.emit); await vi.advanceTimersByTimeAsync(0);
+  const base = f.rpc.getMockImplementation()!;
+  const pending: (() => void)[] = [];
+  f.rpc.mockImplementation((method: string) => method === "live.stream.input"
+    ? new Promise(resolve => pending.push(() => resolve({}))) : base(method));
+  f.onError.mockImplementation(() => { void connection!.close(); });
+  for (let i = 0; i < 25; i++) Capture.current.port.onmessage({ data: new ArrayBuffer(3200) });
+  pending.forEach(resolve => resolve()); await vi.advanceTimersByTimeAsync(0);
+  expect(f.onError).toHaveBeenCalledOnce();
+  expect(f.onError).toHaveBeenCalledWith(expect.stringContaining("falling behind"));
+  expect(Context.current.close).toHaveBeenCalledOnce();
+  expect(receipts(f.rpc)).toHaveLength(0);
+  const count = f.rpc.mock.calls.length;
+  Capture.current.port.onmessage({ data: new ArrayBuffer(3200) });
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(f.rpc).toHaveBeenCalledTimes(count);
+});
+
+it("slow playback acknowledgements stay bounded without blocking microphone or typed input", async () => {
+  const f = await fixture(); await vi.advanceTimersByTimeAsync(0);
+  const base = f.rpc.getMockImplementation()!;
+  const pending: (() => void)[] = [];
+  let active = 0, peak = 0;
+  f.rpc.mockImplementation((method: string, params: any) => {
+    if (method !== "live.stream.input" || params.input.type !== "playback") return base(method, params);
+    active++; peak = Math.max(peak, active);
+    return new Promise(resolve => pending.push(() => { active--; resolve({}); }));
+  });
+  queueSpeech(f.emit); f.emit({ type: "interrupt" });
+  expect(receipts(f.rpc)).toHaveLength(4);
+  Capture.current.port.onmessage({ data: new ArrayBuffer(3200) });
+  connection!.text("Next question");
+  expect(f.rpc).toHaveBeenCalledWith("live.stream.input", expect.objectContaining({ input: expect.objectContaining({ type: "audio" }) }));
+  expect(f.rpc).toHaveBeenCalledWith("live.stream.input", expect.objectContaining({ input: { type: "text", text: "Next question" } }));
+  for (let i = 0; i < 15; i++) {
+    pending.splice(0).forEach(resolve => resolve()); await vi.advanceTimersByTimeAsync(0);
+  }
+  expect(peak).toBe(4); expect(active).toBe(0);
+  expect(receipts(f.rpc)).toHaveLength(60);
+  expect(new Set(receipts(f.rpc).map(receipt => receipt.id)).size).toBe(60);
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
+it("closing with receipts in flight discards the queue and ignores late RPC failures", async () => {
+  const f = await fixture(); await vi.advanceTimersByTimeAsync(0);
+  const base = f.rpc.getMockImplementation()!;
+  const pending: ((reason: Error) => void)[] = [];
+  f.rpc.mockImplementation((method: string, params: any) => method === "live.stream.input" && params.input.type === "playback"
+    ? new Promise((_, reject) => pending.push(reject)) : base(method, params));
+  queueSpeech(f.emit); f.emit({ type: "interrupt" });
+  await connection!.close();
+  pending.forEach(reject => reject(new Error("Socket closed"))); await vi.advanceTimersByTimeAsync(0);
+  expect(receipts(f.rpc)).toHaveLength(4);
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(Context.current.close).toHaveBeenCalledOnce();
 });

@@ -91,10 +91,14 @@ export class PcmMedia {
     } catch { this.o.error("Provider returned invalid PCM audio"); }
   }
   interrupt() {
-    for (const [id, source] of this.sources) { source.onended = null; source.stop(); source.disconnect(); this.o.played(id, false); }
+    const sources = [...this.sources];
     this.sources.clear(); this.next = this.context.currentTime;
+    // A receipt callback may close or interrupt again. Detach all sources first.
+    for (const [, source] of sources) { source.onended = null; source.stop(); source.disconnect(); }
+    for (const [id] of sources) this.o.played(id, false);
   }
   close() {
+    if (this.stopped) return;
     this.stopped = true; this.interrupt(); this.source?.disconnect(); this.capture?.disconnect(); this.sink?.disconnect();
     void this.context.close().catch(() => {});
   }
