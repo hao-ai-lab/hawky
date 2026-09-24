@@ -10,16 +10,18 @@ vi.mock("../src/lib/media", () => ({ mediaUnavailableReason: () => null,
   getUserMediaSafe: async () => ({ getAudioTracks: () => [media.audio], getVideoTracks: () => [], getTracks: () => [media.audio] }) }));
 let history: (key: string) => Promise<unknown>;
 let archiveMessages: Array<{ role: string; text: string }> | undefined;
+let memoryPacket: unknown;
 let rpc: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   vi.useFakeTimers(); localStorage.clear(); Peer.all = []; Peer.autoAcknowledge = true;
-  media.audio.enabled = true; media.audio.stop.mockClear(); archiveMessages = undefined;
+  media.audio.enabled = true; media.audio.stop.mockClear(); archiveMessages = undefined; memoryPacket = { mode: "history", reason: "missing" };
   vi.stubGlobal("RTCPeerConnection", Peer);
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => "answer" })));
   useLiveSettings.getState().reset(); useLiveSettings.getState().set("visualCadence", "off");
   history = async () => ({ messages: [{ role: "user", content: "My meeting is at three." }, { role: "assistant", content: "Three o'clock." }] });
   rpc = vi.fn(async (method: string, params: any) => {
     if (method === "session.history") return history(params.sessionKey);
+    if (method === "memory.resume") return memoryPacket;
     if (method === "frontend.boot_context") return { context: "Test workspace context." };
     if (method === "live.openaiClientSecret") return { client_secret: "test-secret" };
     if (method === "realtime.archive.start") return { closed: false, messages: archiveMessages };
@@ -181,4 +183,43 @@ it("keeps the existing 30-message replay limit explicit while displaying more hi
   expect(messages(Peer.all[0])[0]).toBe("Fact 10");
   expect(hook.result.current.transcript.filter(e => e.kind === "user")).toHaveLength(40);
   expect(events().find(e => e.type === "context.initial").data.restoredMessageCount).toBe(30);
+});
+
+it("quietly restores saved memory followed by the exact tail while keeping the visible transcript", async () => {
+  memoryPacket = { mode: "summary", revision: 3, summary: "Meeting at three.", messages: [{ role: "user", text: "Correction: four." }] };
+  const hook = renderHook(() => useRealtime({ sessionKey: "web:memory" }));
+  await act(async () => { await hook.result.current.start(); Peer.all[0].channel.open(); });
+  const restored = messages(Peer.all[0]);
+  expect(restored).toHaveLength(2); expect(restored[0]).toContain("Historical session memory");
+  expect(restored[0]).toContain("Meeting at three."); expect(restored[1]).toBe("Correction: four.");
+  expect(hook.result.current.transcript.some(e => e.text === "My meeting is at three.")).toBe(true);
+  expect(hook.result.current.transcript.some(e => e.text.startsWith("Historical session memory"))).toBe(false);
+  expect(Peer.all[0].channel.sent.some(e => e.type === "response.create")).toBe(false);
+  expect(events().find(e => e.type === "context.initial").data.memoryRevision).toBe(3);
+});
+
+it("requires updating an oversized tail instead of reconnecting with silently missing turns", async () => {
+  memoryPacket = { mode: "needs_update", note: "Click Update session memory, then Start." };
+  const hook = renderHook(() => useRealtime({ sessionKey: "web:backlog" }));
+  await act(async () => { await hook.result.current.start(); });
+  expect(hook.result.current.phase).toBe("failed"); expect(Peer.all).toHaveLength(0);
+  expect(hook.result.current.error).toContain("Update session memory");
+});
+
+it("flushes in-flight and newer turns before fetching the resume snapshot", async () => {
+  const original = rpc.getMockImplementation()!;
+  let saved!: () => void;
+  rpc.mockImplementation(async (method: string, params: any) => {
+    if (method === "session.appendMessages") await new Promise<void>(resolve => { saved = resolve; });
+    return original(method, params);
+  });
+  const hook = renderHook(() => useRealtime({ sessionKey: "web:flush" }));
+  await act(async () => { await hook.result.current.start(); Peer.all[0].channel.open(); });
+  await act(async () => { hook.result.current.sendText("Fresh fact."); await vi.advanceTimersByTimeAsync(1200); });
+  await stop(hook);
+  let restarting!: Promise<void>;
+  await act(async () => { restarting = hook.result.current.start(); });
+  expect(rpc.mock.calls.filter(c => c[0] === "memory.resume")).toHaveLength(1);
+  await act(async () => { saved(); await restarting; });
+  expect(rpc.mock.calls.filter(c => c[0] === "memory.resume")).toHaveLength(2);
 });

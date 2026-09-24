@@ -1,6 +1,6 @@
 # Try manual context compaction
 
-In web Live, connect and click **Compact now** in the header, beside Live
+In web Live, connect and click **Compact live context** in the header, beside Live
 settings. It uses the connected realtime model and its existing credentials;
 there is no separate compaction API key. This first implementation is OpenAI
 Realtime only and must be triggered manually.
@@ -10,7 +10,7 @@ Realtime only and must be triggered manually.
 1. Show an object to the camera and say a distinctive fact, such as “My locker
    code is PINE-73.” Move the object out of view and exchange several more turns
    so the original evidence is older than the last four messages/newest image.
-2. Click **Compact now**. Inspect the generated summary, image/item counts,
+2. Click **Compact live context**. Inspect the generated summary, image/item counts,
    completion status, and elapsed time. The summary should never be spoken or
    appear as an assistant transcript bubble.
 3. Ask for the code and what was visible earlier. Compare the answer with the
@@ -70,10 +70,12 @@ The visible transcript and raw archive are untouched. Diagnostics record
 Counts describe tracked message items, not exact tokens or total context size.
 Compaction does not rewrite identity, soul, tools, or backend task state.
 
-**Connection-local experiment:** no durable checkpoint loading, automatic token
-threshold, archive-to-summary job, or global/daily memory consolidation is
-implemented here. Reconnect still replays the existing recent text history (up
-to 30 messages); it does not restore this summary or its visual knowledge. Gemini,
+**Connection-local experiment:** this operation does not save its visual summary
+for reconnect or run at an automatic token threshold. Separately,
+[rolling session memory](rolling-session-memory.md) saves text summaries and
+restores them with uncovered turns on reconnect. **Update session memory** runs
+that backend operation even with Live stopped. When no valid session memory is
+available, reconnect uses the previous recent-history path. Gemini,
 GPT-Live-specific protocols, Venus, and JoyAI remain follow-ups.
 
 ## Code and verification

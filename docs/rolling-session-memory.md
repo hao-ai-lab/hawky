@@ -82,6 +82,14 @@ continues from saved progress; unchanged transcripts make no model call.
 
 ## Inspect or run manually
 
+In web Live, **Update session memory** works before, during, or after a Live
+connection, provided the gateway is connected and the conversation has text.
+It first flushes pending transcript saves, then processes up to eight chunks.
+The panel shows the saved summary, revision, daily file, and any error. If a
+backlog remains, another click continues it. Switching conversations hides the
+old result and stops further requests for it; a backend request already sent can
+still finish safely for its original session.
+
 Using the existing gateway WebSocket RPC transport:
 
 ```json
@@ -100,6 +108,21 @@ with no new text returns `skipped: true`. `memory.snapshot` reads daily/global
 files for the existing Memory UI. These snippets show RPC method and params;
 the normal transport still supplies its request envelope and authentication.
 
+On Start, web Live also calls `memory.resume` with the same `session_key`.
+This read-only RPC validates the checkpoint against one transcript snapshot and
+returns the summary plus every uncovered text turn. It neither calls a model nor
+advances memory progress. A summary still being generated does not block resume:
+the previously committed summary and its uncovered tail remain usable.
+
+The frontend installs the summary before the tail using the existing acknowledged,
+silent startup sequence. Microphone input stays disabled until restoration is
+accepted, and no response is requested. The visible transcript is unchanged.
+If the uncovered tail exceeds 24,000 characters or 100 messages, startup asks for
+an update instead of dropping unsummarized turns. Missing/stale memory uses the
+existing recent-history path. Crash-recovered recording turns are compared with
+persisted recent turns; if they are not covered, the existing recording-recovery
+path is retained with a visible warning rather than discarding those turns.
+
 ## Test it
 
 Restart the gateway with this build. In web Live, say “I prefer green tea.” End
@@ -108,6 +131,10 @@ The daily file should have one session entry. Resume the same conversation and
 say “Correction: I prefer black tea.” After another eligible update the same
 entry should reflect the correction. Its revision should increase; reconnecting
 without new turns should not add another entry. A busy backlog can take longer.
+
+For an immediate check, use **Update session memory** with Live stopped, inspect
+the panel, then Start. The status should report a restored memory revision. Hawk
+should wait for you to speak. Ask about an earlier fact, then correct it and repeat.
 
 Fixture checks, from the repository root:
 
@@ -135,10 +162,11 @@ factuality guarantee; inspect the recorded summaries as well.
 ## Boundaries
 
 This version summarizes **text only**. It does not preserve image understanding,
-swap the active realtime context, or replace the frontend's Compact now button.
-Reconnect still uses the existing history/boot-context path; that boot context
-already reads recent daily logs within its character budget. Direct restoration
-of a session summary plus an uncovered transcript tail remains separate work.
+swap the active realtime context, or replace **Compact live context**. Reconnect
+restores validated session text memory plus its uncovered tail; the boot context
+also reads recent daily logs within its existing character budget. The separate
+live image summary is not restored. When no valid session summary is available,
+the previous recent-history/recording recovery behavior remains.
 
 Daily entries for earlier days remain historical; later corrections appear in
 the rolling session summary and the newer day's entry. Multiple gateway processes
@@ -151,3 +179,17 @@ Implementation: `src/memory/session-memory.ts` owns checkpoints/projection;
 `src/prompts/registry.ts` owns `memory.distill.daily.system`;
 `src/gateway/memory-methods.ts` exposes inspection/manual runs; `src/index.ts`
 starts and stops scheduling.
+
+`src/memory/session-resume.ts` builds the resume packet;
+`web-ios/src/lib/session-memory.ts` handles manual updates and packet selection;
+`web-ios/src/lib/useRealtime.ts` flushes transcript writes and installs the packet
+through `realtime-startup.ts`. Browser regression coverage is in
+`web-ios/tests/realtime-resume.test.tsx` and `session-memory.test.tsx`.
+
+Browser verification (September 24, 2026 UTC): with Live stopped, Update session
+memory saved revision 1; repeating it returned up-to-date at the same revision.
+A real `gpt-realtime-2` connection with mic/camera disabled acknowledged that
+summary and zero uncovered turns, and generated no opening reply. The test
+connection was ended afterward. All 183 web tests and 23 focused backend/RPC
+tests passed, as did the backend typecheck and both builds. This does not test
+microphone recognition, long audio sessions, or image-memory restoration.

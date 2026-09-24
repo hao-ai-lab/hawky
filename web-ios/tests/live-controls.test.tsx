@@ -43,3 +43,24 @@ it("keeps the reading position when new transcript content arrives, until Jump t
   expect(scroll.scrollTop).toBe(2000);
   expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
 });
+
+it("updates saved memory with Live stopped and exposes errors without starting media", async () => {
+  let fail = false;
+  const rpc = vi.fn(async (method: string) => {
+    if (method === "session.history") return { messages: [{ role: "user", content: "I like green tea." }] };
+    if (method === "memory.distill") return fail ? { ok: false, note: "Missing API key" }
+      : { ok: true, revision: 2, session_memory: "Prefers green tea.", file: "memory/2026-09-23.md" };
+    return {};
+  });
+  useSocketStore.setState({ rpc });
+  await act(async () => { render(<LiveScreen onFullscreenChange={() => {}} />); });
+  expect(screen.getByRole("button", { name: "Compact live context" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Update session memory" })).toBeEnabled();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update session memory" })); });
+  expect(screen.getByText("Prefers green tea.")).toBeInTheDocument();
+  expect(rpc).toHaveBeenCalledWith("memory.distill", { session_key: "web:controls", scope: "daily" });
+  expect(rpc.mock.calls.some(c => c[0] === "live.openaiClientSecret")).toBe(false);
+  fail = true;
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Update session memory" })); });
+  expect(screen.getByRole("alert")).toHaveTextContent("Missing API key");
+});

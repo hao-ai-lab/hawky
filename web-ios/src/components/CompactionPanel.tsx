@@ -11,7 +11,7 @@ export function CompactionPanel({ state, onClose }: { state: CompactionState; on
       <strong role="status" aria-live="polite">{labels[state.phase]}</strong>
       <button aria-label="Hide compaction details" onClick={onClose} className="rounded px-2 py-1 text-white/60 hover:bg-white/10">Hide</button>
     </div>
-    <p className="mt-1 text-xs text-white/50">Current connection only. Recent turns and the newest image stay; your transcript stays intact. Reconnecting still uses the original history.</p>
+    <p className="mt-1 text-xs text-white/50">Current connection only. Recent turns and the newest image stay; your transcript stays intact. Reconnect uses saved session memory when available; this live image summary is not saved.</p>
     <div className="mt-2 max-h-[28vh] overflow-y-auto overscroll-contain break-words" tabIndex={0}>
       {!!state.selected && <p className="text-xs text-white/60">
         {state.selected} older items selected · {state.images} images · {state.deleted} removed from model context

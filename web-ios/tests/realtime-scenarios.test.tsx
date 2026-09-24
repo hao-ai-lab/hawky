@@ -329,7 +329,7 @@ it("keeps private compaction text and lifecycle out of the spoken conversation",
 
 it("the Live button starts compaction and exposes completion without altering the conversation", async () => {
   await act(async () => { render(<LiveScreen onFullscreenChange={() => {}} />); });
-  expect(screen.getByRole("button", { name: "Compact now" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Compact live context" })).toBeDisabled();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Start session|Resume session/ })); });
   const channel = Peer.all[0].channel;
   await act(async () => { channel.open(); });
@@ -337,7 +337,7 @@ it("the Live button starts compaction and exposes completion without altering th
     for (let n = 0; n < 6; n++) channel.receive({ type: "conversation.item.added", item: {
       id: `ui-${n}`, type: "message", role: "user", content: [{ type: "input_text", text: `Fact ${n}` }],
     } });
-    fireEvent.click(screen.getByRole("button", { name: "Compact now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Compact live context" }));
   });
   expect(screen.getByRole("button", { name: "Compacting…" })).toBeDisabled();
   const { metadata } = channel.sent.find(e => e.type === "response.create").response;
@@ -351,7 +351,7 @@ it("the Live button starts compaction and exposes completion without altering th
   expect(screen.getByText("Context compacted")).toBeInTheDocument();
   expect(screen.getByText("Installed summary")).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Conversation" })).not.toHaveTextContent("Inspect this summary.");
-  expect(screen.getByRole("button", { name: "Compact now" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Compact live context" })).toBeEnabled();
 });
 
 it("rejects conversational advice without inserting, deleting, or speaking it", async () => {

@@ -21,6 +21,7 @@ import { useSessionStore } from "../lib/session-store";
 import { DelegationBubble } from "../components/DelegationBubble";
 import { LiveSettingsDialog } from "../components/LiveSettingsDialog";
 import { CompactionPanel } from "../components/CompactionPanel";
+import { SessionMemoryPanel } from "../components/SessionMemoryPanel";
 import { compactionBusy } from "../lib/realtime-compaction";
 import { Icon, type IconName } from "../components/Icon";
 import { Logo } from "../components/Logo";
@@ -47,7 +48,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const rt = previewMode ? { ...realRt, ...previewOverrides(previewMode) } : realRt;
   const {
     phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
-    canStart, resumable, videoElRef, audioElRef, start, stop, sendText, compaction, compactNow,
+    canStart, resumable, videoElRef, audioElRef, start, stop, sendText, compaction, compactNow, sessionMemory, updateSessionMemory,
     toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
   } = rt;
 
@@ -73,6 +74,8 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [compactionOpen, setCompactionOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  useEffect(() => { setMemoryOpen(false); setCompactionOpen(false); }, [activeKey]);
   useEffect(() => onFullscreenChange(pipFull), [pipFull, onFullscreenChange]);
   // On mobile Safari the keyboard overlays bottom-anchored chrome; lift the
   // floating controls to sit just above it when it's open.
@@ -91,7 +94,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
       <audio ref={audioElRef} autoPlay />
 
       {/* Header — the Hawk pill opens the session menu (New / History / Status) */}
-      <header className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3 md:px-6">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3 md:px-6">
         <button onClick={() => setMenuOpen(true)}
           className="pressable flex items-center gap-2 rounded-pill px-2 py-1 hover:bg-white/5" aria-label="Session menu">
           <Logo size={22} textClass="text-[15px]" />
@@ -99,13 +102,21 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           <PhasePill phase={phase} />
           <Icon name="chevronDown" className="h-3.5 w-3.5 text-white/40" />
         </button>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <button onClick={() => { setCompactionOpen(true); compactNow(); }}
             disabled={!isConnected || compactionBusy(compaction)}
-            title="Summarize older messages and images in this connection"
+            title={isConnected ? "Summarize older messages and images in this connection" : "Start Live to compact its active context"}
             className="pressable rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
-            {compactionBusy(compaction) ? "Compacting…" : "Compact now"}
+            {compactionBusy(compaction) ? "Compacting…" : "Compact live context"}
           </button>
+          <button onClick={() => { setMemoryOpen(true); void updateSessionMemory(); }}
+            disabled={gatewayStatus !== "connected" || historyLoading || sessionMemory.phase === "updating" || !transcript.some(e => e.kind === "user" || e.kind === "assistant")}
+            title="Update saved session and daily memory, even with Live stopped"
+            className="pressable rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
+            {sessionMemory.phase === "updating" ? "Updating memory…" : "Update session memory"}
+          </button>
+          {!memoryOpen && sessionMemory.phase !== "idle" && <button onClick={() => setMemoryOpen(true)}
+            className="text-xs text-white/60" aria-label="Show session memory">Memory details</button>}
           {!compactionOpen && compaction.phase !== "idle" && <button onClick={() => setCompactionOpen(true)}
             className="text-xs text-white/60" aria-label="Show compaction details">Details</button>}
           <button onClick={() => setSettingsOpen(true)} aria-label="Live settings" title="Live settings"
@@ -135,6 +146,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
         </div>
       </header>
       {compactionOpen && <CompactionPanel state={compaction} onClose={() => setCompactionOpen(false)} />}
+      {memoryOpen && <SessionMemoryPanel state={sessionMemory} onClose={() => setMemoryOpen(false)} />}
 
       {/* Banners */}
       {(bridgeOffline || (phase === "failed" && error) || gatewayStatus !== "connected") && (

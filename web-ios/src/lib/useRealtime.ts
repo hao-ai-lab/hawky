@@ -24,6 +24,7 @@ import type { DelegationTask } from "../../../src/gateway/delegation-types";
 import { RealtimeResponses } from "./realtime-responses";
 import { RealtimeStartup } from "./realtime-startup";
 import { RealtimeCompaction, initialCompaction, type CompactionState } from "./realtime-compaction";
+import { restoredMemory, useSessionMemory } from "./session-memory";
 import { buildRealtimePrompt } from "./realtime-prompt";
 import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
 import {
@@ -489,7 +490,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Persist Live conversation turns to the backend session (so they show in
   // session.list message count + reload via session.history). Batched + flushed
   // shortly after, to avoid an RPC per word. Only user/assistant turns.
-  const pendingTurnsRef = useRef<Array<{ role: "user" | "assistant"; text: string; timestamp: string }>>([]);
+  const pendingTurnsRef = useRef<Array<{ sessionKey: string; role: "user" | "assistant"; text: string; timestamp: string }>>([]);
+  const flushInFlightRef = useRef<Promise<boolean> | null>(null);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const persistTurn = useCallback((role: "user" | "assistant", text: string, identity?: { responseId: string; itemId?: string; contentIndex: number }) => {
     const t = text.trim();
@@ -497,7 +499,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     // Auto-title the session from its first user message (ChatGPT-style).
     cameraArchiveRef.current?.record("message.completed", { role, text: t, ...identity });
     if (role === "user") void useSessionStore.getState().maybeAutoTitle(liveSessionKeyRef.current, t);
-    pendingTurnsRef.current.push({ role, text: t, timestamp: new Date().toISOString() });
+    pendingTurnsRef.current.push({ sessionKey: liveSessionKeyRef.current, role, text: t, timestamp: new Date().toISOString() });
     if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
     flushTimerRef.current = setTimeout(() => { void flushTurns(); }, 1200);
   }, []);
@@ -510,6 +512,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     // the size so a huge image can't bloat the session (it still shows live).
     const image = imageData && imageData.length <= 600_000 ? imageData : undefined;
     pendingTurnsRef.current.push({
+      sessionKey: liveSessionKeyRef.current,
       role: "assistant",
       text: `${TOOL_MARKER}${JSON.stringify({ label, status, detail, ms, image, imageTitle: image ? imageTitle : undefined, delegation })}`,
       timestamp: new Date().toISOString(),
@@ -517,19 +520,29 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
     flushTimerRef.current = setTimeout(() => { void flushTurns(); }, 1200);
   }, []);
-  const flushTurns = useCallback(async () => {
-    const batch = pendingTurnsRef.current;
-    if (batch.length === 0) return;
-    pendingTurnsRef.current = [];
-    try {
-      await rpc("session.appendMessages", { sessionKey: liveSessionKeyRef.current, messages: batch });
-      // Refresh the session list so the message count updates in History.
-      void useSessionStore.getState().fetchSessions();
-    } catch {
-      // Re-queue on failure so nothing is lost.
-      pendingTurnsRef.current.unshift(...batch);
-    }
+  const flushTurns = useCallback(async (): Promise<boolean> => {
+    const previous = flushInFlightRef.current ?? Promise.resolve(true);
+    const job = previous.then(async (saved) => {
+      if (!saved) return false;
+      while (pendingTurnsRef.current.length) {
+        const key = pendingTurnsRef.current[0].sessionKey;
+        const boundary = pendingTurnsRef.current.findIndex(turn => turn.sessionKey !== key);
+        const batch = pendingTurnsRef.current.splice(0, boundary < 0 ? pendingTurnsRef.current.length : boundary);
+        try {
+          await rpc("session.appendMessages", { sessionKey: key, messages: batch.map(({ sessionKey: _, ...turn }) => turn) });
+          void useSessionStore.getState().fetchSessions();
+        } catch {
+          pendingTurnsRef.current.unshift(...batch);
+          return false;
+        }
+      }
+      return true;
+    });
+    flushInFlightRef.current = job;
+    try { return await job; }
+    finally { if (flushInFlightRef.current === job) flushInFlightRef.current = null; }
   }, [rpc]);
+  const { state: sessionMemory, update: updateSessionMemory } = useSessionMemory(sessionKey, rpc, flushTurns);
 
   // Provider state changes synchronously in event handlers. React receives
   // immutable snapshots; replaying a render cannot persist a turn twice.
@@ -728,6 +741,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       await loadHistory(sessionKey);
       if (attempt !== attemptRef.current) return;
       if (transcriptSessionRef.current !== sessionKey) throw new Error("Selected conversation changed while loading. Tap Start to retry.");
+      const saved = await flushTurns();
+      if (attempt !== attemptRef.current) return;
       let priorTurns = transcriptRef.current
         .filter((e) => (e.kind === "user" || e.kind === "assistant") && e.text.trim())
         .map((e) => ({ role: e.kind as "user" | "assistant", text: e.text.trim() }))
@@ -740,6 +755,18 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       }
       const continuingInThisPage = cameraArchiveRef.current?.liveSessionId === recording.liveSessionId;
       if (recording.resumed && !continuingInThisPage && recording.messages?.length) priorTurns = recording.messages;
+      let memoryRevision: number | undefined;
+      if (saved) {
+        let packet: Parameters<typeof restoredMemory>[0] | undefined;
+        try { packet = await rpc("memory.resume", { session_key: sessionKey }) as Parameters<typeof restoredMemory>[0]; }
+        catch { push("warning", "Session memory unavailable; restoring recent conversation history."); }
+        if (attempt !== attemptRef.current) return;
+        if (packet) {
+          const restored = restoredMemory(packet, recording.resumed && !continuingInThisPage ? recording.messages : undefined);
+          if (restored.warning) push("warning", restored.warning);
+          if (restored.turns) { priorTurns = restored.turns; memoryRevision = restored.revision; }
+        }
+      } else push("warning", "Recent turns could not be saved; restoring this page's conversation history.");
       if (!continuingInThisPage) connectionArchivesRef.current = [];
       const archive = new CameraArchive(rpc, sessionKey, crypto.randomUUID(),
         message => push("warning", message), recording.liveSessionId);
@@ -802,7 +829,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       if (!token) throw new Error("Realtime broker did not return a client secret");
       if (attempt !== attemptRef.current) return;
       archive.record("context.initial", { model: broker.model ?? settings.model, instructions, tools,
-        reasoningEffort: settings.reasoningEffort, restoredMessageCount: priorTurns.length });
+        reasoningEffort: settings.reasoningEffort, restoredMessageCount: priorTurns.length, memoryRevision });
 
       // 3) Capture mic/camera (camera position from settings).
       const media = micOn || cameraOn ? await getUserMediaSafe({
@@ -905,7 +932,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
             startingRef.current = false;
             media.getAudioTracks().forEach(t => { t.enabled = micOn; });
             setPhase("connected");
-            if (priorTurns.length > 0) push("system", `Resumed with ${priorTurns.length} prior messages of context.`);
+            if (memoryRevision !== undefined) push("system", `Restored session memory (revision ${memoryRevision}) and ${priorTurns.length - 1} newer messages.`);
+            else if (priorTurns.length > 0) push("system", `Resumed with ${priorTurns.length} prior messages of context.`);
             push("system", `Connected to ${broker.model ?? settings.model}.`);
             if (cameraOn && cadenceFps(settings) > 0) startFrameLoop(cadenceFps(settings));
           },
@@ -948,7 +976,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rpc, sessionKey, micOn, cameraOn, speakerOn, staySilent, cocktailParty, settings, sendRealtime, teardown, closing, loadHistory]);
+  }, [rpc, sessionKey, micOn, cameraOn, speakerOn, staySilent, cocktailParty, settings, sendRealtime, teardown, closing, loadHistory, flushTurns]);
   startRef.current = start;
 
   const stop = useCallback(async () => {
@@ -1467,7 +1495,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
 
   return {
     // state
-    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart, compaction,
+    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart, compaction, sessionMemory, updateSessionMemory,
     resumable: hasLiveRecording(sessionKey),
     // refs (bind to <video>/<audio> in the screen)
     videoElRef, audioElRef,
