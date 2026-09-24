@@ -57,6 +57,19 @@ The two model probes ask "What is your name?" and "What time is my meeting?"
 after restoring a correction from three to four. Passing only establishes these
 two text cases. It does not test WebRTC, audio/VAD, vision, tools, or proactiveness.
 
+For the first **image/text summarization while audio is generated** experiment:
+
+```sh
+bun test prompt_test/realtime-summary-probe.test.ts
+bun run prompt_test/realtime-summary-probe.ts --runs 3 --output /tmp/summary-probe.json
+```
+
+This separate, paid WebSocket probe uses `OPENAI_API_KEY` and synthetic evidence.
+It compares baseline/concurrent responses and checks summary isolation, image
+changes, corrected facts, and continued audio generation. It does not install
+compacted context in the app. See [the probe design and provider boundary](../docs/realtime-summary-probe.md)
+for configuration, limitations, and why other providers need their own adapters.
+
 ## Step 4: live browser checks
 
 Use one browser tab per conversation. Use the updated gateway and reload the

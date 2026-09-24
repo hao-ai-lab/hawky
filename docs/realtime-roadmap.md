@@ -53,6 +53,13 @@ Primary files: `web-ios/src/components/LiveSettingsPanel.tsx`,
 
 ### 2. Prioritize conversation summarization, compaction, and titles
 
+First experiment: [realtime summary capability probe](realtime-summary-probe.md).
+Use a provider-independent snapshot/checkpoint contract. Prefer the active model
+only after verifying its background-summary capability; otherwise use an
+explicitly configured summarizer. OpenAI credentials are not a universal
+prerequisite, and native context compression is not necessarily an exportable
+memory summary. The probe does not implement the production pipeline below.
+
 - First capture a short-session baseline and provider usage, then run a 20-30
   minute mixed conversation to track context growth, latency, corrections, and
   pending tasks. Longer or deliberately context-heavy cases must exercise the
