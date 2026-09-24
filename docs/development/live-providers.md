@@ -290,8 +290,9 @@ Source protocol: https://github.com/inclusionAI/Realtime-Venus/tree/main/demos/m
 Select `joyai-vl-interaction`. This is the upstream **stateful webinfer adapter**,
 not a direct vLLM port: JPEGs and text go to `/v1/chat/completions`, with a unique
 `x-streaming-session` per connection. Requests are regular JSON, not SSE. The
-gateway serializes inference, coalesces pending images to the newest frame and
-limits cadence to one request per second. A fresh user cue is required before
+gateway serializes inference and coalesces pending images to the newest frame.
+Visual inference runs at most once per second independently of speech synthesis
+and playback; a new user cue can bypass that cadence. A fresh user cue is required before
 camera frames trigger any inference. Stop resets only that upstream connection.
 
 Private gateway `config.json` example (merge into the existing config):
@@ -325,16 +326,37 @@ use typed cues; the UI reports that microphone audio is unused. This is utteranc
 cueing, not token-by-token streaming recognition. Without TTS, captions continue
 and the UI explicitly reports text-only replies. No implicit paid OpenAI fallback.
 
-The adapter parses `</silence>`, `</response>` and both upstream delegation marker
-variants. It dispatches through Hawk's existing task service with serial execution;
+The adapter consumes normalized response content, including silence, plain text,
+response wrappers and both upstream delegation marker variants. Explicit raw
+delegations are preserved when upstream normalization omits later lines, but
+malformed delegation markup never executes a task. Invalid output produces a
+recoverable warning and a format diagnostic instead of closing the connection.
+Complete reasoning blocks are removed before display, speech or tool parsing;
+incomplete blocks are rejected rather than spoken. Fresh user cues are explicitly
+distinguished from passive frame updates so corrections can receive a reply even
+when the image has not changed.
+Repeated inference failures back off and do not flood the transcript.
+It dispatches through Hawk's existing task service with serial execution;
 natural-language markers do not carry native parallel/follow-up fields. Repeated
 frame responses cannot repeat an identical delegation for the same user turn.
-Fresh speech interrupts TTS and prevents an older inference from speaking or
-starting a stale task. Backend notifications wait for inference and playback to
-drain. Task completion and audio playback remain distinct.
+Fresh speech interrupts TTS, cancels the active HTTP request and prevents an older
+inference from speaking or starting a stale task. This is client-side cancellation:
+the upstream API has no generation-cancel endpoint and may finish an already
+running GPU request before accepting the next one for that session. Hawk does not
+reset visual memory to interrupt a turn. New cues are sent once to the visual
+session, rather than repeated as fresh instructions on every frame.
+
+Speech has a separate queue: explicit replies and backend updates take priority,
+and only the newest unsaid visual observation is retained. Inference continues
+while that queue drains. New user input clears stale queued speech. A backend
+result can be generated during playback and spoken after the current reply.
+Task completion, generated text and acknowledged audio playback remain distinct.
 
 Joy's own visual summaries remain inside its model-hosted connection. Diagnostic
 events retain timing and summary counts, not the full private visual descriptions.
+`provider.health` also reports inference/cancellation counts, pending cues, ASR
+state and the speech queue; rejected-output diagnostics contain types and lengths,
+not raw model text or media.
 Hawk restores its saved text/session memory on reconnect; transferring Joy visual
 memory into Hawk's durable archive is deferred. Local RMS endpointing and optional
 ASR/TTS add latency and need microphone testing before claiming voice quality.
@@ -390,7 +412,13 @@ Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interacti
   deployment was restored on September 24 after an earlier experiment had stopped
   it. Real probes through Hawk's adapter passed a typed red-image question and
   synthetic speech through ASR → JoyAI → TTS, with complete PCM output and session
-  cleanup. Model, summary, ASR and TTS endpoints were healthy. Physical microphone
-  behavior, long-session summaries and live delegation quality remain unverified.
+  cleanup. A subsequent interruption check with the full Hawk prompt verified
+  inference during held playback, cancellation during generation, synthetic
+  Chinese speech through ASR followed by a Chinese answer and PCM, and quiet
+  reconnect through the gateway. 29 targeted provider/gateway tests and 22 browser
+  transport/playback tests passed, as did TypeScript and the web build. These
+  probes used generated color images and synthetic speech, not physical devices.
+  Physical microphone behavior, long-session summaries and live delegation
+  quality remain unverified.
 - Native iOS, durable visual-memory transfer and per-task model/effort selection
   are outside this batch. Existing backend model configuration is unchanged.
