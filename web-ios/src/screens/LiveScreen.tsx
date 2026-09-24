@@ -77,7 +77,18 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [compactionOpen, setCompactionOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
-  useEffect(() => { setMemoryOpen(false); setCompactionOpen(false); }, [activeKey]);
+  const [memoryActionsOpen, setMemoryActionsOpen] = useState(false);
+  const memoryActionsRef = useRef<HTMLDivElement>(null);
+  const memoryButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!memoryActionsOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!memoryActionsRef.current?.contains(event.target as Node)) setMemoryActionsOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [memoryActionsOpen]);
+  useEffect(() => { setMemoryOpen(false); setCompactionOpen(false); setMemoryActionsOpen(false); }, [activeKey]);
   useEffect(() => onFullscreenChange(pipFull), [pipFull, onFullscreenChange]);
   // On mobile Safari the keyboard overlays bottom-anchored chrome; lift the
   // floating controls to sit just above it when it's open.
@@ -107,22 +118,48 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
         <div className="flex flex-wrap items-center gap-2">
           {isConnected && activeModel !== selectedModel && <button onClick={() => void reconnect()}
             className="rounded-lg border border-accent/40 px-3 py-2 text-xs text-accent">Switch to {selectedModel}</button>}
-          <button onClick={() => { setCompactionOpen(true); compactNow(); }}
-            disabled={!capabilities.manualCompaction || !isConnected || compactionBusy(compaction)}
-            title={!capabilities.manualCompaction ? "This provider manages live context automatically" : isConnected ? "Summarize older messages and images in this connection" : "Start Live to compact its active context"}
-            className="pressable rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
-            {compactionBusy(compaction) ? "Compacting…" : "Compact live context"}
-          </button>
-          <button onClick={() => { setMemoryOpen(true); void updateSessionMemory(); }}
-            disabled={gatewayStatus !== "connected" || historyLoading || sessionMemory.phase === "updating" || !transcript.some(e => e.kind === "user" || e.kind === "assistant")}
-            title="Update saved session and daily memory, even with Live stopped"
-            className="pressable rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
-            {sessionMemory.phase === "updating" ? "Updating memory…" : "Update session memory"}
-          </button>
-          {!memoryOpen && sessionMemory.phase !== "idle" && <button onClick={() => setMemoryOpen(true)}
-            className="text-xs text-white/60" aria-label="Show session memory">Memory details</button>}
-          {!compactionOpen && compaction.phase !== "idle" && <button onClick={() => setCompactionOpen(true)}
-            className="text-xs text-white/60" aria-label="Show compaction details">Details</button>}
+          <div ref={memoryActionsRef} className="relative"
+            onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setMemoryActionsOpen(false); }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setMemoryActionsOpen(false);
+                memoryButtonRef.current?.focus();
+              }
+            }}>
+            <button ref={memoryButtonRef} onClick={() => setMemoryActionsOpen(open => !open)}
+              aria-expanded={memoryActionsOpen} aria-controls="live-memory-actions"
+              className="pressable flex items-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs text-white/80 hover:bg-white/10">
+              Memory <Icon name="chevronDown" className="h-3.5 w-3.5" />
+            </button>
+            {memoryActionsOpen && <div id="live-memory-actions" aria-label="Memory actions"
+              className="absolute right-0 top-full z-50 mt-2 w-56 max-w-[calc(100vw-2rem)] rounded-xl border border-white/15 bg-paper p-1 shadow-xl">
+              <button onClick={() => {
+                setMemoryActionsOpen(false);
+                memoryButtonRef.current?.focus();
+                if (isConnected && capabilities.manualCompaction) {
+                  setCompactionOpen(true);
+                  compactNow();
+                } else {
+                  setMemoryOpen(true);
+                  void updateSessionMemory();
+                }
+              }}
+                disabled={isConnected && capabilities.manualCompaction ? compactionBusy(compaction)
+                  : gatewayStatus !== "connected" || historyLoading || sessionMemory.phase === "updating" || !transcript.some(e => e.kind === "user" || e.kind === "assistant")}
+                title={isConnected && capabilities.manualCompaction ? "Summarize older messages and images in this connection" : "Update saved session and daily memory"}
+                className="block w-full rounded-lg px-3 py-2 text-left text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
+                {isConnected && capabilities.manualCompaction
+                  ? (compactionBusy(compaction) ? "Compacting…" : "Compact live context")
+                  : (sessionMemory.phase === "updating" ? "Updating memory…" : "Update session memory")}
+              </button>
+              <button onClick={() => {
+                setMemoryActionsOpen(false);
+                memoryButtonRef.current?.focus();
+                setMemoryOpen(true);
+                setCompactionOpen(compaction.phase !== "idle");
+              }} className="block w-full rounded-lg px-3 py-2 text-left text-xs text-white/80 hover:bg-white/10">Memory details</button>
+            </div>}
+          </div>
           <button onClick={() => setSettingsOpen(true)} aria-label="Live settings" title="Live settings"
             className="pressable grid h-11 w-11 place-items-center rounded-full text-white/70 hover:bg-white/10 hover:text-white">
             <Icon name="settings" className="h-5 w-5" />

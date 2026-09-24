@@ -329,7 +329,8 @@ it("keeps private compaction text and lifecycle out of the spoken conversation",
 
 it("the Live button starts compaction and exposes completion without altering the conversation", async () => {
   await act(async () => { render(<LiveScreen onFullscreenChange={() => {}} />); });
-  expect(screen.getByRole("button", { name: "Compact live context" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Memory" }));
+  expect(screen.queryByRole("button", { name: "Compact live context" })).toBeNull();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Start session|Resume session/ })); });
   const channel = Peer.all[0].channel;
   await act(async () => { channel.open(); });
@@ -339,7 +340,9 @@ it("the Live button starts compaction and exposes completion without altering th
     } });
     fireEvent.click(screen.getByRole("button", { name: "Compact live context" }));
   });
+  fireEvent.click(screen.getByRole("button", { name: "Memory" }));
   expect(screen.getByRole("button", { name: "Compacting…" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Update session memory" })).toBeNull();
   const { metadata } = channel.sent.find(e => e.type === "response.create").response;
   await act(async () => {
     channel.receive({ type: "response.done", response: { id: "ui-summary", metadata, status: "completed",
