@@ -70,6 +70,11 @@ changes, corrected facts, and continued audio generation. It does not install
 compacted context in the app. See [the probe design and provider boundary](../docs/realtime-summary-probe.md)
 for configuration, limitations, and why other providers need their own adapters.
 
+For the **manual Compact now button**, see [the browser test steps and implementation](../docs/realtime-manual-compaction.md).
+The separate paid `bun run prompt_test/realtime-compaction-smoke.ts` check uses the
+actual browser compactor in a synthetic WebSocket session, installs its summary,
+deletes covered items, and checks visual recall and a newer correction afterward.
+
 ## Step 4: live browser checks
 
 Use one browser tab per conversation. Use the updated gateway and reload the

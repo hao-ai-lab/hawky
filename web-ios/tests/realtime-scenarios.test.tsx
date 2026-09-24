@@ -1,11 +1,12 @@
 /** Scenario contracts with a fake provider/real hook. These do not judge model speech. */
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TestPeer as Peer } from "./helpers/realtime-peer";
 import { useRealtime } from "../src/lib/useRealtime";
 import { useSocketStore } from "../src/lib/socket-store";
 import { useLiveSettings } from "../src/lib/live-settings";
 import { buildRealtimePrompt } from "../src/lib/realtime-prompt";
+import { LiveScreen } from "../src/screens/LiveScreen";
 
 vi.mock("../src/lib/media", () => ({ mediaUnavailableReason: () => null,
   getUserMediaSafe: async () => ({ getAudioTracks: () => [], getVideoTracks: () => [], getTracks: () => [] }) }));
@@ -288,4 +289,61 @@ it("holds fresh completions until the user speaks and current playback finishes,
   });
   expect(rpc.mock.calls.filter(c => c[0] === "delegation.delivery" && c[1].state === "played").map(c => c[1].id)).toEqual(["a", "b"]);
   expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
+});
+
+it("keeps private compaction text and lifecycle out of the spoken conversation", async () => {
+  const s = await session();
+  await act(async () => {
+    for (let n = 0; n < 6; n++) s.channel.receive({ type: "conversation.item.added", item: {
+      id: `old-${n}`, type: "message", role: "user", content: [{ type: "input_text", text: `Fact ${n}` }],
+    } });
+    s.result.current.compactNow();
+  });
+  const request = s.channel.sent.find(e => e.type === "response.create");
+  expect(request.response).toMatchObject({ output_modalities: ["text"], conversation: "none", tool_choice: "none" });
+  const { metadata } = request.response;
+  await act(async () => {
+    s.channel.receive({ type: "response.created", response: { id: "summary", metadata } });
+    s.channel.receive({ type: "response.output_text.delta", response_id: "summary", item_id: "summary-output", delta: "Private facts" });
+    s.channel.receive({ type: "response.done", response: { id: "summary", metadata, status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Private facts" }] }] } });
+  });
+  for (let n = 0; n < 2; n++) await act(async () => {
+    const deletion = s.channel.sent.at(-1);
+    expect(deletion.type).toBe("conversation.item.delete");
+    s.channel.receive({ type: "conversation.item.deleted", item_id: deletion.item_id });
+  });
+  expect(s.result.current.compaction).toMatchObject({ phase: "complete", deleted: 2, summary: "Private facts" });
+  expect(s.result.current.transcript.some(e => e.text.includes("Private facts"))).toBe(false);
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
+  // The ordinary speech coordinator was never occupied by the private response.
+  await act(async () => { s.result.current.sendText("Continue"); await vi.advanceTimersByTimeAsync(300); });
+  expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(2);
+});
+
+it("the Live button starts compaction and exposes completion without altering the conversation", async () => {
+  await act(async () => { render(<LiveScreen onFullscreenChange={() => {}} />); });
+  expect(screen.getByRole("button", { name: "Compact now" })).toBeDisabled();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Start session|Resume session/ })); });
+  const channel = Peer.all[0].channel;
+  await act(async () => { channel.open(); });
+  await act(async () => {
+    for (let n = 0; n < 6; n++) channel.receive({ type: "conversation.item.added", item: {
+      id: `ui-${n}`, type: "message", role: "user", content: [{ type: "input_text", text: `Fact ${n}` }],
+    } });
+    fireEvent.click(screen.getByRole("button", { name: "Compact now" }));
+  });
+  expect(screen.getByRole("button", { name: "Compacting…" })).toBeDisabled();
+  const { metadata } = channel.sent.find(e => e.type === "response.create").response;
+  await act(async () => {
+    channel.receive({ type: "response.done", response: { id: "ui-summary", metadata, status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Inspect this summary." }] }] } });
+  });
+  for (let n = 0; n < 2; n++) await act(async () => {
+    channel.receive({ type: "conversation.item.deleted", item_id: channel.sent.at(-1).item_id });
+  });
+  expect(screen.getByText("Context compacted")).toBeInTheDocument();
+  expect(screen.getByText("Installed summary")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Conversation" })).not.toHaveTextContent("Inspect this summary.");
+  expect(screen.getByRole("button", { name: "Compact now" })).toBeEnabled();
 });

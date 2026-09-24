@@ -54,6 +54,8 @@ Primary files: `web-ios/src/components/LiveSettingsPanel.tsx`,
 ### 2. Prioritize conversation summarization, compaction, and titles
 
 First experiment: [realtime summary capability probe](realtime-summary-probe.md).
+Available now: [manual Compact now button](realtime-manual-compaction.md) for the
+current OpenAI Realtime web connection; durable checkpoint recovery remains open.
 Use a provider-independent snapshot/checkpoint contract. Prefer the active model
 only after verifying its background-summary capability; otherwise use an
 explicitly configured summarizer. OpenAI credentials are not a universal

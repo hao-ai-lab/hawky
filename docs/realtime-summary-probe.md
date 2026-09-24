@@ -4,6 +4,10 @@ This is the first experiment for conversation compaction, not a production
 compaction implementation. It runs against a separate provider session and does
 not modify the user's live call, gateway, saved history, or prompts.
 
+The subsequent [manual Compact now experiment](realtime-manual-compaction.md)
+now installs a plain-text summary in the current web connection. It is separate
+from this strict-JSON probe and does not implement durable checkpoint recovery.
+
 ## Provider-independent boundary
 
 Hawk should own the conversation event log and versioned summary checkpoints.
@@ -106,11 +110,10 @@ long-session accuracy, stop/resume recovery, or another provider's behavior.
 Audio arrival gaps are transport observations, not audible playback gaps. Three
 pairs are a capability smoke test, not a statistically reliable latency benchmark.
 
-Before connecting this to the browser, route all summary events by response ID
-before the speech coordinator and transcript handler in `useRealtime.ts`. The
-current handler treats generated text as conversational output. Never let a
-summary become a transcript bubble or let its lifecycle alter speech delivery.
-Context installation/deletion and durable checkpoint commit are subsequent work.
+The manual browser integration now routes summary events by response ID before
+the speech coordinator and transcript handler in `useRealtime.ts`, and implements
+acknowledged context installation/deletion. Durable checkpoint commit and restore
+remain subsequent work.
 
 Sources:
 

@@ -23,6 +23,7 @@ import { openLiveRecording, clearLiveRecording, hasLiveRecording } from "./live-
 import type { DelegationTask } from "../../../src/gateway/delegation-types";
 import { RealtimeResponses } from "./realtime-responses";
 import { RealtimeStartup } from "./realtime-startup";
+import { RealtimeCompaction, initialCompaction, type CompactionState } from "./realtime-compaction";
 import { buildRealtimePrompt } from "./realtime-prompt";
 import { RealtimeTranscript, type AssistantText } from "./realtime-transcript";
 import {
@@ -345,6 +346,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const settings = useLiveSettings();
 
   const [phase, setPhase] = useState<LivePhase>("idle");
+  const [compaction, setCompaction] = useState<CompactionState>(initialCompaction);
+  const compactionRef = useRef<RealtimeCompaction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   // Mirror of transcript for reading the latest value inside callbacks (start()
@@ -566,7 +569,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     // made while it was waiting for another response to finish.
     const wire = outgoing.type === "response.create"
       ? { ...outgoing, response: { ...(event as any).response, output_modalities: [replyModeRef.current] } } : event;
-    dc.send(JSON.stringify(wire));
+    dc.send(JSON.stringify(compactionRef.current?.prepare(wire) ?? wire));
     if (outgoing.type === "session.update") cameraArchiveRef.current?.record("context.updated", { session: outgoing.session });
     return true;
   }, []);
@@ -605,6 +608,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   useEffect(() => { if (phase === "connected") injectTasksRef.current(); }, [phase]);
 
   const teardown = useCallback(() => {
+    compactionRef.current?.dispose();
+    compactionRef.current = null;
     injectedTasksRef.current.clear();
     quietTasksRef.current.clear();
     submittingTasksRef.current.clear();
@@ -868,6 +873,24 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         if (settings.maxTokensMode === "custom") session.max_response_output_tokens = settings.maxTokens;
         setPhase("restoring");
         push("system", "Restoring conversation…");
+        setCompaction(initialCompaction);
+        compactionRef.current = new RealtimeCompaction({
+          // Private text-only generations bypass the spoken-response queue.
+          send: event => {
+            if (pcRef.current !== pc || dc.readyState !== "open") return false;
+            dc.send(JSON.stringify(event)); return true;
+          },
+          isBusy: () => responsesRef.current!.isBusy(),
+          lock: value => responsesRef.current!.setContextUpdating(value),
+          turnDetection: () => {
+            const current = useLiveSettings.getState();
+            return buildTurnDetection(current, staySilentRef.current, current.bargeIn !== "let_finish");
+          },
+          userReply: () => { responsesRef.current!.userTurn(); responsesRef.current!.request({}, "compaction-user-turn"); },
+          change: setCompaction,
+          record: (type, data) => archive.record(type, data),
+          fatal: message => { setError(message); setPhase("failed"); teardown(); },
+        });
         const startup = new RealtimeStartup({
           session,
           turnDetection: buildTurnDetection(settings, staySilent, interrupt),
@@ -1005,6 +1028,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const ev = safeJSON(raw);
     if (!ev) return;
     archive?.observe(ev);
+    if (compactionRef.current?.observe(ev)) return;
     const startup = startupRef.current;
     startup?.observe(ev);
     if (startup && !readyRef.current) return;
@@ -1443,12 +1467,13 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
 
   return {
     // state
-    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart,
+    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart, compaction,
     resumable: hasLiveRecording(sessionKey),
     // refs (bind to <video>/<audio> in the screen)
     videoElRef, audioElRef,
     // actions
     start, stop, sendText, sendCameraFrame,
+    compactNow: () => { if (readyRef.current) void compactionRef.current?.compact(); },
     toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
     // test-only: drive the realtime event handler directly
     __handleMessage: handleMessage,

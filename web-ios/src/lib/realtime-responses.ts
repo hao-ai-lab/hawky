@@ -16,6 +16,7 @@ export class RealtimeResponses {
   private playing = false;
   private silent = false;
   private awaitingUser = false;
+  private contextUpdating = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private serial = 0;
   private retryUntil = 0;
@@ -29,6 +30,8 @@ export class RealtimeResponses {
     this.schedule();
   }
   setSilent(value: boolean) { this.silent = value; this.schedule(); }
+  setContextUpdating(value: boolean) { this.contextUpdating = value; this.schedule(); }
+  isBusy() { return !!(this.userSpeaking || this.playing || this.active.size || this.requested || Date.now() < this.retryUntil); }
   waitForUser() { this.awaitingUser = true; }
   userTurn() { this.awaitingUser = false; this.schedule(); }
   invalidateTask(id: string) {
@@ -53,7 +56,7 @@ export class RealtimeResponses {
     this.timer = setTimeout(() => { this.timer = undefined; this.flush(); }, Math.max(80, this.retryUntil - Date.now()));
   }
   private flush() {
-    if (this.awaitingUser || this.silent || this.userSpeaking || this.playing || this.active.size || this.requested || !this.pending.length) return;
+    if (this.contextUpdating || this.awaitingUser || this.silent || this.isBusy() || !this.pending.length) return;
     const intents = this.pending.splice(0, 3);
     const eventId = `hawk-response-${++this.serial}`;
     const instructions = intents.map(i => i.reply.instructions).filter(Boolean).join("\n");
@@ -117,6 +120,6 @@ export class RealtimeResponses {
   reset() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined; this.pending = []; this.requested = null; this.active.clear(); this.owned.clear(); this.invalidTasks.clear(); this.invalidResponses.clear(); this.playingResponse = undefined;
-    this.userSpeaking = false; this.playing = false; this.silent = false; this.awaitingUser = false; this.retryUntil = 0;
+    this.userSpeaking = false; this.playing = false; this.silent = false; this.awaitingUser = false; this.contextUpdating = false; this.retryUntil = 0;
   }
 }

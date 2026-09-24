@@ -20,6 +20,8 @@ import { useSocketStore } from "../lib/socket-store";
 import { useSessionStore } from "../lib/session-store";
 import { DelegationBubble } from "../components/DelegationBubble";
 import { LiveSettingsDialog } from "../components/LiveSettingsDialog";
+import { CompactionPanel } from "../components/CompactionPanel";
+import { compactionBusy } from "../lib/realtime-compaction";
 import { Icon, type IconName } from "../components/Icon";
 import { Logo } from "../components/Logo";
 import { SessionMenu } from "../components/SessionMenu";
@@ -45,7 +47,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const rt = previewMode ? { ...realRt, ...previewOverrides(previewMode) } : realRt;
   const {
     phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline,
-    canStart, resumable, videoElRef, audioElRef, start, stop, sendText,
+    canStart, resumable, videoElRef, audioElRef, start, stop, sendText, compaction, compactNow,
     toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
   } = rt;
 
@@ -70,6 +72,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
   const [pipFull, setPipFull] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [compactionOpen, setCompactionOpen] = useState(false);
   useEffect(() => onFullscreenChange(pipFull), [pipFull, onFullscreenChange]);
   // On mobile Safari the keyboard overlays bottom-anchored chrome; lift the
   // floating controls to sit just above it when it's open.
@@ -97,6 +100,14 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           <Icon name="chevronDown" className="h-3.5 w-3.5 text-white/40" />
         </button>
         <div className="flex items-center gap-3">
+          <button onClick={() => { setCompactionOpen(true); compactNow(); }}
+            disabled={!isConnected || compactionBusy(compaction)}
+            title="Summarize older messages and images in this connection"
+            className="pressable rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 disabled:opacity-40">
+            {compactionBusy(compaction) ? "Compacting…" : "Compact now"}
+          </button>
+          {!compactionOpen && compaction.phase !== "idle" && <button onClick={() => setCompactionOpen(true)}
+            className="text-xs text-white/60" aria-label="Show compaction details">Details</button>}
           <button onClick={() => setSettingsOpen(true)} aria-label="Live settings" title="Live settings"
             className="pressable grid h-11 w-11 place-items-center rounded-full text-white/70 hover:bg-white/10 hover:text-white">
             <Icon name="settings" className="h-5 w-5" />
@@ -123,6 +134,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
           )}
         </div>
       </header>
+      {compactionOpen && <CompactionPanel state={compaction} onClose={() => setCompactionOpen(false)} />}
 
       {/* Banners */}
       {(bridgeOffline || (phase === "failed" && error) || gatewayStatus !== "connected") && (

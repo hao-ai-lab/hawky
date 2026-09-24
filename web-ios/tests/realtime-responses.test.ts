@@ -94,3 +94,12 @@ it("a connection can wait for the first typed turn while retaining a fresh compl
   replies.request({ metadata: { task_id: "next" } });
   await tick(); expect(sent).toHaveLength(1);
 });
+
+it("holds explicit replies during context replacement and drains the queue afterward", async () => {
+  replies.setContextUpdating(true);
+  replies.request({ metadata: { task_id: "completed-during-compaction" } });
+  await tick(); expect(sent).toHaveLength(0);
+  replies.setContextUpdating(false);
+  await tick(); expect(sent).toHaveLength(1);
+  expect(sent[0].response.metadata.task_ids).toBe("completed-during-compaction");
+});
