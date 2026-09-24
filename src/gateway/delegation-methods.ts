@@ -30,6 +30,7 @@ export function delegationBrief(task: DelegationTask) {
 
 export function registerDelegationMethods(server: GatewayServer, execute: DelegationExecutor,
   options: { cancel?: (task: DelegationTask) => void; input?: (task: DelegationTask) => DelegationTask["input"]; respond?: (task: DelegationTask, response: any) => void } = {}) {
+  const listeners = new Set<(conn: GatewayConnection, task: DelegationTask) => void>();
   const queue = new DelegationQueue(2);
   let store: DelegationStore | undefined;
   const db = () => store ??= new DelegationStore(join(getSessionsDir(), "delegations"));
@@ -44,6 +45,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
   function publish(conn: GatewayConnection, task: DelegationTask, type: string, data?: unknown) {
     db().event(owner(conn), task, type, data);
     server.broadcastToSession(task.ownerSession, "delegation.updated", { task });
+    for (const listener of listeners) { try { listener(conn, structuredClone(task)); } catch { /* observers never break execution */ } }
   }
   function recover(conn: GatewayConnection, task: DelegationTask) {
     if (!terminal(task) && !active.has(keyOf(conn, task.id))) {
@@ -94,16 +96,17 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     options.respond(task, p); task.input = undefined; task.status = "running";
     publish(conn, task, "input.resolved"); return task;
   });
-  server.registerMethod("delegation.delivery", (conn, raw) => {
+  const delivery = (conn: GatewayConnection, raw: any) => {
     const p = raw as any, task = lookup(conn, p);
-    if (!["generated", "played", "displayed", "interrupted"].includes(p.state)) throw new MethodError("INVALID_REQUEST", "Invalid delivery state");
+    if (!["injected", "generated", "played", "displayed", "interrupted"].includes(p.state)) throw new MethodError("INVALID_REQUEST", "Invalid delivery state");
     if (task.validity === "superseded") return task;
     if (["played", "displayed", "interrupted"].includes(task.delivery ?? "") && task.deliveryResponseId === p.responseId) return task;
     // Delivery belongs to a response, and cannot change execution state.
     task.delivery = p.state; task.deliveryResponseId = String(p.responseId ?? "");
     publish(conn, task, `delivery.${p.state}`, { responseId: task.deliveryResponseId });
     return task;
-  });
+  };
+  server.registerMethod("delegation.delivery", delivery);
   function submit(conn: GatewayConnection, raw: any): { task: DelegationTask; promise: Promise<DelegationTask> } {
     const p = raw, ownerSession = scope(p);
     if (typeof p.message !== "string" || !p.message.trim() || p.message.length > 32_000)
@@ -206,7 +209,7 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
   }
   server.registerMethod("delegation.run", (conn, p) => submit(conn, p).promise);
   server.registerMethod("delegation.submit", (conn, p) => structuredClone(submit(conn, p).task));
-  server.registerMethod("delegation.revise", (conn, raw) => {
+  const revise = (conn: GatewayConnection, raw: any) => {
     const p = raw as any, old = lookup(conn, p);
     if (typeof p.message !== "string" || !p.message.trim() || p.message.length > 32_000)
       throw new MethodError("INVALID_REQUEST", "A correction is required");
@@ -214,8 +217,19 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
       runtime: old.runtime, context: old.context, constraints: old.constraints, execution: old.readOnly ? "read_only" : "serial", supersedes: old.id });
     old.validity = "superseded"; publish(conn, old, "superseded", { replacement: result.task.id }); cancel(conn, old);
     return structuredClone(result.task);
-  });
+  };
+  server.registerMethod("delegation.revise", revise);
+  return {
+    submit, lookup, revise, delivery,
+    cancel: (conn: GatewayConnection, p: any) => cancel(conn, lookup(conn, p)),
+    list: (conn: GatewayConnection, ownerSession: string) => db().list(owner(conn), ownerSession)
+      .map(t => recover(conn, active.get(keyOf(conn, t.id))?.task ?? t)),
+    subscribe(listener: (conn: GatewayConnection, task: DelegationTask) => void) {
+      listeners.add(listener); return () => { listeners.delete(listener); };
+    },
+  };
 }
+export type DelegationService = ReturnType<typeof registerDelegationMethods>;
 
 /** Cancellation must not wait for an unrelated prerequisite to finish. */
 function awaitDependency<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

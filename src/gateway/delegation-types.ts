@@ -25,7 +25,7 @@ export interface DelegationTask {
   brief?: string;
   supersedes?: string;
   validity?: "current" | "superseded";
-  delivery?: "pending" | "generated" | "played" | "displayed" | "interrupted";
+  delivery?: "pending" | "injected" | "generated" | "played" | "displayed" | "interrupted";
   deliveryResponseId?: string;
   input?: { id: string; kind: "permission" | "question"; prompt: string; detail?: unknown };
   cancelRequestedAt?: number;
