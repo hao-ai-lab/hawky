@@ -61,9 +61,12 @@ export interface LiveSettings {
   // Behavioral modes (input section)
   speakOnlyWhenSpokenTo: boolean;
   cocktailParty: boolean;
-  safetyCheck: boolean;           // iPhone-only pipeline (shown, noted)
+  safetyCheck: boolean;           // gateway hazard checks while camera is enabled
   visualDedup: boolean;
   // Inputs
+  microphoneEnabled: boolean;
+  cameraEnabled: boolean;
+  staySilent: boolean;
   visualCadence: (typeof VISUAL_CADENCE)[number];
   customFps: number;              // when cadence=custom
   cameraPosition: (typeof CAMERA_POSITION)[number];
@@ -100,6 +103,9 @@ export const DEFAULT_LIVE_SETTINGS: LiveSettings = {
   cocktailParty: false,
   safetyCheck: false,
   visualDedup: false,
+  microphoneEnabled: true,
+  cameraEnabled: true,
+  staySilent: false,
   visualCadence: "0.2",
   customFps: 1,
   cameraPosition: "front",

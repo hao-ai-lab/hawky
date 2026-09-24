@@ -1,0 +1,45 @@
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
+import { LiveScreen, Transcript } from "../src/screens/LiveScreen";
+import { SettingsScreen } from "../src/screens/SettingsScreen";
+import { useLiveSettings } from "../src/lib/live-settings";
+import { useSocketStore } from "../src/lib/socket-store";
+import { useSessionStore } from "../src/lib/session-store";
+beforeEach(() => {
+  localStorage.clear(); useLiveSettings.getState().reset();
+  useSessionStore.setState({ activeKey: "web:controls", sessions: [] });
+  useSocketStore.setState({ status: "connected", rpc: vi.fn(async () => ({})), eventListeners: new Set() });
+});
+afterEach(cleanup);
+it("opens all Live settings without leaving the conversation and shares saved values with Settings", async () => {
+  await act(async () => { render(<StrictMode><LiveScreen onFullscreenChange={() => {}} /></StrictMode>); });
+  expect(screen.getByRole("button", { name: "Mic" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Camera" }));
+  expect(screen.getByRole("button", { name: "Camera" })).toHaveAttribute("aria-pressed", "false");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Live settings" })); });
+  const dialog = screen.getByRole("dialog", { name: "Live settings" });
+  expect(within(dialog).getByRole("checkbox", { name: "Camera input" })).not.toBeChecked();
+  for (const name of ["Live · Provider", "Live · Hawk bridge", "Live · Turn detection"]) expect(within(dialog).getByText(name)).toBeInTheDocument();
+  fireEvent.change(within(dialog).getByRole("combobox", { name: "Voice" }), { target: { value: "cedar" } });
+  fireEvent.click(within(dialog).getByRole("checkbox", { name: "Microphone" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Close Live settings" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByRole("button", { name: "Mic" })).toHaveAttribute("aria-pressed", "false");
+  expect(screen.getByRole("button", { name: "Spoken replies" })).toHaveAttribute("aria-pressed", "true");
+  await act(async () => { render(<SettingsScreen />); });
+  fireEvent.click(screen.getByRole("button", { name: "Live" }));
+  expect(screen.getByRole("combobox", { name: "Voice" })).toHaveValue("cedar");
+});
+it("keeps the reading position when new transcript content arrives, until Jump to latest", () => {
+  const entry = { id: "a", kind: "assistant" as const, text: "First answer", at: "now" };
+  const v = render(<Transcript phase="connected" entries={[entry]} />);
+  const scroll = screen.getByRole("region", { name: "Conversation" });
+  Object.defineProperties(scroll, { scrollHeight: { value: 2000, configurable: true }, clientHeight: { value: 500, configurable: true } });
+  scroll.scrollTop = 500; fireEvent.scroll(scroll);
+  v.rerender(<Transcript phase="connected" entries={[entry, { ...entry, id: "b", text: "New answer" }]} />);
+  expect(scroll.scrollTop).toBe(500);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  expect(scroll.scrollTop).toBe(2000);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+});

@@ -1,7 +1,8 @@
 // Web-style form primitives (not iOS pill/grouped/sheet styling): cards with a
 // header, label/control rows, native-ish selects, sliders, checkboxes, inputs,
 // and buttons. Used by Settings + Notifications.
-import type { ReactNode } from "react";
+import { createContext, useContext, useId, type ReactNode } from "react";
+const RowLabel = createContext<string | undefined>(undefined);
 
 export function Section({ title, footer, children }: { title?: string; footer?: string; children: ReactNode }) {
   return (
@@ -18,14 +19,15 @@ export function Row({ label, detail, children, onClick }: {
   label: string; detail?: string; children?: ReactNode; onClick?: () => void;
 }) {
   const Comp = onClick ? "button" : "div";
+  const labelId = useId();
   return (
     <Comp onClick={onClick}
-      className={`flex w-full items-center justify-between gap-4 px-4 py-3 text-left ${onClick ? "transition-colors hover:bg-white/5" : ""}`}>
+      className={`flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left ${onClick ? "transition-colors hover:bg-white/5" : ""}`}>
       <div className="min-w-0">
-        <div className="text-sm text-white">{label}</div>
+        <div id={labelId} className="text-sm text-white">{label}</div>
         {detail && <div className="mt-0.5 text-xs text-white/45">{detail}</div>}
       </div>
-      {children && <div className="shrink-0">{children}</div>}
+      {children && <RowLabel.Provider value={labelId}><div className="max-w-full shrink-0">{children}</div></RowLabel.Provider>}
     </Comp>
   );
 }
@@ -42,12 +44,13 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 }
 
 export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  const labelId = useContext(RowLabel);
   // Web-style checkbox switch.
   return (
-    <label className="inline-flex cursor-pointer items-center">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="peer sr-only" />
-      <span className="relative h-5 w-9 rounded-full bg-white/20 transition-colors peer-checked:bg-accent peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
-        <span className="absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4" />
+    <label className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-end">
+      <input aria-labelledby={labelId} type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="peer sr-only" />
+      <span className="relative h-5 w-9 rounded-full bg-white/20 transition-colors peer-checked:bg-accent peer-checked:[&>span]:translate-x-4 peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
+        <span className="absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform" />
       </span>
     </label>
   );
@@ -57,9 +60,10 @@ export function Select({ value, onChange, options }: {
   value: string; onChange: (v: string) => void; options: readonly string[] | { value: string; label: string }[];
 }) {
   const opts = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
+  const labelId = useContext(RowLabel);
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)}
-      className="rounded-md border border-white/15 bg-black/30 px-2.5 py-1.5 text-sm text-white outline-none focus:border-accent focus:ring-1 focus:ring-accent">
+    <select aria-labelledby={labelId} value={value} onChange={(e) => onChange(e.target.value)}
+      className="min-h-11 max-w-full rounded-md border border-white/15 bg-black/30 px-2.5 py-1.5 text-sm text-white outline-none focus:border-accent focus:ring-1 focus:ring-accent">
       {opts.map((o) => <option key={o.value} value={o.value} className="bg-canvas">{o.label}</option>)}
     </select>
   );
@@ -68,9 +72,10 @@ export function Select({ value, onChange, options }: {
 export function Slider({ value, onChange, min, max, step, suffix }: {
   value: number; onChange: (v: number) => void; min: number; max: number; step: number; suffix?: string;
 }) {
+  const labelId = useContext(RowLabel);
   return (
     <div className="flex items-center gap-2">
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))}
+      <input aria-labelledby={labelId} type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))}
         className="h-1 w-32 cursor-pointer appearance-none rounded-full bg-white/20 accent-accent" />
       <span className="w-12 text-right font-mono text-xs text-white/60">{value}{suffix}</span>
     </div>

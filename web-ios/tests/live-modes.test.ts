@@ -42,25 +42,24 @@ describe("Live modes", () => {
     ]);
   });
 
-  it("toggling Stay Silent flips state and emits a system marker in the transcript", () => {
+  it("pre-session Stay Silent changes preference without creating transcript activity", () => {
     const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
     act(() => result.current.toggleStaySilent());
     expect(result.current.staySilent).toBe(true);
-    expect(result.current.transcript.some((e) => e.kind === "system" && /Stay Silent on/i.test(e.text))).toBe(true);
+    expect(useLiveSettings.getState().staySilent).toBe(true);
+    expect(result.current.transcript).toEqual([]);
     act(() => result.current.toggleStaySilent());
     expect(result.current.staySilent).toBe(false);
   });
 
-  it("releasing Stay Silent announces it is summarizing what happened (#671)", () => {
-    // On release the model should recap what was said while it listened. We can't
-    // open a real data channel in jsdom to observe the forced response.create, but
-    // the user-facing marker that drives the recap turn must appear.
+  it("pre-session Stay Silent release does not recap an unstarted conversation", () => {
+    // Preflight selections must not trigger the connected-session recap flow.
     vi.useFakeTimers();
     const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
     act(() => result.current.toggleStaySilent());          // on
-    act(() => result.current.toggleStaySilent());          // off → recap
+    act(() => result.current.toggleStaySilent());          // off, still idle
     expect(result.current.staySilent).toBe(false);
-    expect(result.current.transcript.some((e) => /summarizing what happened/i.test(e.text))).toBe(true);
+    expect(result.current.transcript.some((e) => /summarizing what happened/i.test(e.text))).toBe(false);
     // The recap is fired after a settle window; advancing timers must not throw.
     act(() => vi.advanceTimersByTime(1300));
     expect(result.current.error).toBeNull();
@@ -79,21 +78,25 @@ describe("Live modes", () => {
     expect(result.current.transcript.some((e) => /cancellation failed/i.test(e.text))).toBe(false);
   });
 
-  it("toggling Cocktail Party flips state + uses on-demand recognition copy", () => {
+  it("pre-session Cocktail Party saves its selection without contacting a model", () => {
     const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
     act(() => result.current.toggleCocktailParty());
     expect(result.current.cocktailParty).toBe(true);
-    expect(result.current.transcript.some((e) => /recognizing people on request/i.test(e.text))).toBe(true);
+    expect(useLiveSettings.getState().cocktailParty).toBe(true);
+    expect(result.current.transcript).toEqual([]);
     expect(result.current.transcript.some((e) => /greet/i.test(e.text))).toBe(false);
     expect(result.current.transcript.some((e) => /face_identify/i.test(e.text))).toBe(false);
   });
 
-  it("toggling Safety Check on shows a warning and starts watching; off stops", () => {
+  it("pre-session Safety Check saves its selection without starting monitoring", () => {
     vi.useFakeTimers();
     const { result } = renderHook(() => useRealtime({ sessionKey: "web:ios" }));
     act(() => result.current.toggleSafety());
     expect(result.current.safetyOn).toBe(true);
-    expect(result.current.transcript.some((e) => e.kind === "warning" && /Safety Check on/i.test(e.text))).toBe(true);
+    expect(useLiveSettings.getState().safetyCheck).toBe(true);
+    act(() => vi.advanceTimersByTime(5000));
+    expect(rpcCalls.some(c => c.method === "tool.invoke")).toBe(false);
+    expect(result.current.transcript).toEqual([]);
     act(() => result.current.toggleSafety());
     expect(result.current.safetyOn).toBe(false);
     vi.useRealTimers();

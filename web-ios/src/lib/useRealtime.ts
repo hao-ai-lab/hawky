@@ -30,6 +30,8 @@ import {
   type PersonModelToolName,
 } from "../../../src/identity/person/tool-contract";
 
+const COCKTAIL_INSTRUCTIONS = "\n\nCOCKTAIL PARTY MODE: People may appear on camera. Stay silent about the camera feed unless the user asks or introduces someone. If the user asks who someone is, call identify_person, then answer once with the matched name plus relevant facts/recaps. If identify_person returns an identity candidate and the user explicitly verifies the person's name, call confirm_identity_candidate with that candidate_id and name; if the user says it is wrong or should not be remembered, call reject_identity_candidate. If someone new introduces themselves and you have a person id, call update_person_profile to remember their name and add stated facts or a one-line recap. Use list_people or recall_person when the user asks what you know about people. Do not proactively greet known people just because a face appears.";
+
 const isFinishedTask = (task: DelegationTask) => ["completed", "failed", "cancelled", "interrupted"].includes(task.status);
 
 export type LivePhase = "idle" | "connecting" | "restoring" | "connected" | "paused" | "failed";
@@ -401,11 +403,22 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   }, [subscribe, sessionKey, rpc, gatewayStatus]);
   const startupRef = useRef<RealtimeStartup | null>(null);
   const readyRef = useRef(false);
-  const [micOn, setMicOn] = useState(true);
-  const [cameraOn, setCameraOn] = useState(true);
-  const [staySilent, setStaySilent] = useState(false);
-  const [cocktailParty, setCocktailParty] = useState(false);
-  const [safetyOn, setSafetyOn] = useState(false);
+  const [micOn, setMicOn] = useState(settings.microphoneEnabled);
+  const [cameraOn, setCameraOn] = useState(settings.cameraEnabled);
+  const [speakerOn, setSpeakerOn] = useState(settings.responseModality === "audio");
+  const replyModeRef = useRef(settings.responseModality);
+  const [staySilent, setStaySilent] = useState(settings.staySilent);
+  const [cocktailParty, setCocktailParty] = useState(settings.cocktailParty);
+  const [safetyOn, setSafetyOn] = useState(settings.safetyCheck);
+  const micOnRef = useRef(micOn), cameraOnRef = useRef(cameraOn);
+  micOnRef.current = micOn; cameraOnRef.current = cameraOn;
+  replyModeRef.current = speakerOn ? "audio" : "text";
+  useEffect(() => {
+    if (phase !== "idle" && phase !== "failed") return;
+    setMicOn(settings.microphoneEnabled); setCameraOn(settings.cameraEnabled);
+    setSpeakerOn(settings.responseModality === "audio"); setStaySilent(settings.staySilent);
+    setCocktailParty(settings.cocktailParty); setSafetyOn(settings.safetyCheck);
+  }, [phase, settings.microphoneEnabled, settings.cameraEnabled, settings.responseModality, settings.staySilent, settings.cocktailParty, settings.safetyCheck]);
   const [speaking, setSpeaking] = useState(false);
   const [bridgeOffline, setBridgeOffline] = useState(false);
   // Artifacts (charts) are derived from `transcript` — no separate state.
@@ -430,8 +443,14 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const mediaRef = useRef<MediaStream | null>(null);
+  const audioSenderRef = useRef<RTCRtpSender | null>(null);
+  const inputBusyRef = useRef(false);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    if (videoElRef.current && mediaRef.current) videoElRef.current.srcObject = mediaRef.current;
+    if (audioElRef.current) audioElRef.current.muted = !speakerOn;
+  }, [cameraOn, phase, speakerOn]);
   const frameTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -542,8 +561,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     if (!readyRef.current && !duringStartup) return false;
     const dc = dcRef.current;
     if (!dc || dc.readyState !== "open") return false;
-    dc.send(JSON.stringify(event));
     const outgoing = event as { type?: string; session?: unknown };
+    // A queued announcement follows the current reply mode, including changes
+    // made while it was waiting for another response to finish.
+    const wire = outgoing.type === "response.create"
+      ? { ...outgoing, response: { ...(event as any).response, output_modalities: [replyModeRef.current] } } : event;
+    dc.send(JSON.stringify(wire));
     if (outgoing.type === "session.update") cameraArchiveRef.current?.record("context.updated", { session: outgoing.session });
     return true;
   }, []);
@@ -575,7 +598,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         cameraArchiveRef.current?.record("task.context_restored", { taskId: task.id, status: task.status, delivery: task.delivery });
         continue;
       }
-      sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"],
+      sendRealtime({ type: "response.create", response: { output_modalities: [replyModeRef.current],
         tool_choice: "none", metadata: { task_id: task.id }, instructions: "Answer using current backend task status. Briefly report newly finished work at an appropriate gap. Do not repeat results already conveyed or call completed work pending." } });
     }
   };
@@ -599,11 +622,11 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     const pc = pcRef.current; pcRef.current = null; pc?.close();
     mediaRef.current?.getTracks().forEach((t) => t.stop());
     mediaRef.current = null;
+    audioSenderRef.current = null;
+    inputBusyRef.current = false;
     if (videoElRef.current) videoElRef.current.srcObject = null;
     if (audioElRef.current) audioElRef.current.srcObject = null;
     setSpeaking(false);
-    setSafetyOn(false);
-    setStaySilent(false);
     staySilentRef.current = false;
     silenceTranscriptRef.current = [];
     silenceFrameCountRef.current = 0;
@@ -679,12 +702,14 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
 
   const start = useCallback(async () => {
     if (startingRef.current || closing) return;
-    const blocked = mediaUnavailableReason();
+    const blocked = micOn || cameraOn ? mediaUnavailableReason() : null;
     if (blocked) { setError(blocked); setPhase("failed"); push("warning", blocked); return; }
 
     const attempt = ++attemptRef.current;
     teardown();
     responsesRef.current?.waitForUser();
+    staySilentRef.current = staySilent;
+    responsesRef.current?.setSilent(staySilent);
     startingRef.current = true;
     setPhase("connecting");
     setError(null);
@@ -733,7 +758,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
           mode: "realtime-web",
           capabilities: [
             micOn ? "audio_input" : "audio_input_off",
-            micOn ? "audio_output" : "text_output",
+            speakerOn ? "audio_output" : "text_output",
             cameraOn ? "visual_input" : "visual_off",
             "backend_session_bridge",
           ],
@@ -747,8 +772,8 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         push("system", "Hawk backend unreachable — running without memory/tools.");
       }
 
-      const instructions = buildRealtimePrompt(bootContext);
-      instructionsRef.current = instructions;
+      instructionsRef.current = buildRealtimePrompt(bootContext);
+      const instructions = instructionsRef.current + (cocktailParty ? COCKTAIL_INSTRUCTIONS : "");
       // Realtime tools: backend bridge + shared person tools. The browser attaches
       // frames privately when a person tool needs the current camera image.
       const tools = [
@@ -775,12 +800,12 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         reasoningEffort: settings.reasoningEffort, restoredMessageCount: priorTurns.length });
 
       // 3) Capture mic/camera (camera position from settings).
-      const media = await getUserMediaSafe({
+      const media = micOn || cameraOn ? await getUserMediaSafe({
         audio: micOn,
         video: cameraOn
           ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: settings.cameraPosition === "back" ? "environment" : "user" }
           : false,
-      });
+      }) : new MediaStream();
       if (attempt !== attemptRef.current) { media.getTracks().forEach(t => t.stop()); return; }
       mediaRef.current = media;
       if (videoElRef.current) videoElRef.current.srcObject = media;
@@ -794,7 +819,9 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
           void audioElRef.current.play().catch(() => {});
         }
       };
-      media.getAudioTracks().forEach((t) => { t.enabled = false; pc.addTrack(t, media); });
+      const audioTrack = media.getAudioTracks()[0];
+      if (audioTrack) { audioTrack.enabled = false; audioSenderRef.current = pc.addTrack(audioTrack, media); }
+      else audioSenderRef.current = pc.addTransceiver("audio", { direction: "sendrecv" }).sender;
 
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
@@ -820,7 +847,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
         if (pcRef.current !== pc) return;
         reconnectCountRef.current = 0;
         archive.record("connection.connected", { model: broker.model ?? settings.model });
-        const wantAudio = micOn && settings.responseModality === "audio";
+        const wantAudio = replyModeRef.current === "audio";
         const interrupt = settings.bargeIn !== "let_finish";
         const session: Record<string, unknown> = {
           type: "realtime",
@@ -898,7 +925,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rpc, sessionKey, micOn, cameraOn, staySilent, settings, sendRealtime, teardown, closing, loadHistory]);
+  }, [rpc, sessionKey, micOn, cameraOn, speakerOn, staySilent, cocktailParty, settings, sendRealtime, teardown, closing, loadHistory]);
   startRef.current = start;
 
   const stop = useCallback(async () => {
@@ -968,7 +995,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
       item: { type: "message", role: "user", content: [{ type: "input_text", text: t }] },
     });
     responsesRef.current?.userTurn();
-    sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"] } });
+    sendRealtime({ type: "response.create", response: { output_modalities: [replyModeRef.current] } });
     push("user", t);
     persistTurn("user", t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1250,27 +1277,54 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     // A successful submission is asynchronous: only completion (or a new user
     // turn) wakes the model. Do not create an acknowledgement -> status loop.
     if (delegation) return;
-    sendRealtime({ type: "response.create", response: { output_modalities: [micOn ? "audio" : "text"],
+    sendRealtime({ type: "response.create", response: { output_modalities: [replyModeRef.current],
       ...(name === "session_task_control" ? { tool_choice: "none",
         instructions: "Answer the user's request using the returned task state. If work is still running, say so briefly and wait for its automatic completion update. Do not check status again." } : {}) } });
   }
 
-  // --- Live toggles that take effect mid-session ---
-  const toggleMic = useCallback(() => {
-    setMicOn((on) => {
-      const next = !on;
-      mediaRef.current?.getAudioTracks().forEach((t) => (t.enabled = readyRef.current && next));
-      return next;
-    });
-  }, []);
-
-  const toggleCamera = useCallback(() => {
-    setCameraOn((on) => {
-      const next = !on;
-      mediaRef.current?.getVideoTracks().forEach((t) => (t.enabled = next));
-      return next;
-    });
-  }, []);
+  // Before Start these only save preferences. During Live a previously disabled
+  // input is acquired on demand; the negotiated audio sender can accept it.
+  async function toggleInput(kind: "audio" | "video") {
+    if (startingRef.current || inputBusyRef.current) return;
+    const current = kind === "audio" ? micOnRef.current : cameraOnRef.current;
+    const next = !current;
+    const pc = pcRef.current, media = mediaRef.current;
+    if (readyRef.current && pc && media) {
+      inputBusyRef.current = true;
+      let acquired: MediaStream | undefined;
+      try {
+        const tracks = kind === "audio" ? media.getAudioTracks() : media.getVideoTracks();
+        if (next && !tracks.length) {
+          acquired = await getUserMediaSafe({ audio: kind === "audio", video: kind === "video"
+            ? { facingMode: settings.cameraPosition === "back" ? "environment" : "user" } : false });
+          if (pcRef.current !== pc || !readyRef.current) { acquired.getTracks().forEach(t => t.stop()); return; }
+          if (kind === "audio") await audioSenderRef.current?.replaceTrack(acquired.getAudioTracks()[0]);
+          if (pcRef.current !== pc || !readyRef.current) { acquired.getTracks().forEach(t => t.stop()); return; }
+          acquired.getTracks().forEach(t => media.addTrack(t));
+        }
+        (kind === "audio" ? media.getAudioTracks() : media.getVideoTracks()).forEach(t => { t.enabled = next; });
+        if (kind === "video") {
+          if (next && cadenceFps(settings) > 0) startFrameLoop(cadenceFps(settings));
+          else if (frameTimerRef.current) { clearInterval(frameTimerRef.current); frameTimerRef.current = null; }
+        }
+      } catch (e) {
+        acquired?.getTracks().forEach(t => t.stop());
+        if (pcRef.current === pc) push("warning", `Could not enable ${kind === "audio" ? "microphone" : "camera"}: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      } finally { if (pcRef.current === pc) inputBusyRef.current = false; }
+    }
+    if (kind === "audio") { micOnRef.current = next; setMicOn(next); settings.set("microphoneEnabled", next); }
+    else { cameraOnRef.current = next; setCameraOn(next); settings.set("cameraEnabled", next); }
+  }
+  const toggleMic = () => { void toggleInput("audio"); };
+  const toggleCamera = () => { void toggleInput("video"); };
+  const toggleSpeaker = () => {
+    const next = !speakerOn;
+    setSpeakerOn(next); replyModeRef.current = next ? "audio" : "text";
+    settings.set("responseModality", replyModeRef.current);
+    if (audioElRef.current) audioElRef.current.muted = !next;
+    sendRealtime({ type: "session.update", session: { type: "realtime", output_modalities: [replyModeRef.current] } });
+  };
 
   // Build the recap context handed back to the model on Stay Silent release.
   // Mirrors the iOS captureSilenceWindowRecap payload.
@@ -1300,7 +1354,7 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     sendRealtime({
       type: "response.create",
       response: {
-        output_modalities: [micOn ? "audio" : "text"],
+        output_modalities: [replyModeRef.current],
         instructions:
           "Give a natural one-sentence-to-paragraph recap of what was just discussed while you were silent. " +
           "Lead with the key point, mention any follow-ups, and skip technical details. If no speech was captured, say so briefly.",
@@ -1311,54 +1365,46 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
   // Stay Silent: the model LISTENS without replying. Re-sends turn_detection
   // (create_response) to the LIVE session so toggling works mid-conversation —
   // not just at connect time. On release, recap what was heard (#671).
-  const toggleStaySilent = useCallback(() => {
-    setStaySilent((prev) => {
-      const next = !prev;
-      const interrupt = settings.bargeIn !== "let_finish";
-      staySilentRef.current = next;
-      responsesRef.current?.setSilent(next);
-      sendRealtime({
-        type: "session.update",
-        session: { type: "realtime", audio: { input: { turn_detection: buildTurnDetection(settings, next, interrupt) } } },
-      });
-      if (next) {
-        // Entering silence: start a fresh capture window and cancel any IN-FLIGHT
-        // response so the model goes quiet immediately. Only cancel when one is
-        // actually active — otherwise the Realtime API errors with
-        // "Cancellation failed: no active response found".
-        silenceTranscriptRef.current = [];
-        silenceFrameCountRef.current = 0;
-        if (activeResponseRef.current) {
-          sendRealtime({ type: "response.cancel" });
-          activeResponseRef.current = false;
-        }
-        push("system", "Stay Silent on — listening without replying.");
-      } else {
-        // Leaving silence: settle for trailing speech/transcription, then recap.
-        push("system", "Stay Silent off — summarizing what happened.");
-        setTimeout(() => requestSilenceReleaseSummary(), 1200);
-      }
-      return next;
+  const toggleStaySilent = () => {
+    const next = !staySilent;
+    setStaySilent(next); settings.set("staySilent", next);
+    if (!readyRef.current) return;
+    const interrupt = settings.bargeIn !== "let_finish";
+    staySilentRef.current = next;
+    responsesRef.current?.setSilent(next);
+    sendRealtime({
+      type: "session.update",
+      session: { type: "realtime", audio: { input: { turn_detection: buildTurnDetection(settings, next, interrupt) } } },
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings, sendRealtime, micOn]);
+    if (next) {
+      // Entering silence: start a fresh capture window and cancel any IN-FLIGHT
+      // response so the model goes quiet immediately. Only cancel when one is
+      // actually active — otherwise the Realtime API errors with
+      // "Cancellation failed: no active response found".
+      silenceTranscriptRef.current = [];
+      silenceFrameCountRef.current = 0;
+      if (activeResponseRef.current) {
+        sendRealtime({ type: "response.cancel" });
+        activeResponseRef.current = false;
+      }
+      push("system", "Stay Silent on — listening without replying.");
+    } else {
+      // Leaving silence: settle for trailing speech/transcription, then recap.
+      push("system", "Stay Silent off — summarizing what happened.");
+      const connection = dcRef.current;
+      setTimeout(() => { if (readyRef.current && dcRef.current === connection && !staySilentRef.current) requestSilenceReleaseSummary(); }, 1200);
+    }
+  };
 
   // Cocktail Party: instruct the realtime model to recognize & recall people
   // from the face database on demand. Pushed live via instructions update.
-  const toggleCocktailParty = useCallback(() => {
-    setCocktailParty((prev) => {
-      const next = !prev;
-      const extra = next
-        ? "\n\nCOCKTAIL PARTY MODE: People may appear on camera. Stay silent about the camera feed unless the user asks or introduces someone. If the user asks who someone is, call identify_person, then answer once with the matched name plus relevant facts/recaps. If identify_person returns an identity candidate and the user explicitly verifies the person's name, call confirm_identity_candidate with that candidate_id and name; if the user says it is wrong or should not be remembered, call reject_identity_candidate. If someone new introduces themselves and you have a person id, call update_person_profile to remember their name and add stated facts or a one-line recap. Use list_people or recall_person when the user asks what you know about people. Do not proactively greet known people just because a face appears."
-        : "";
-      sendRealtime({
-        type: "session.update",
-        session: { type: "realtime", instructions: instructionsRef.current + extra },
-      });
-      push("system", next ? "Cocktail Party on — recognizing people on request." : "Cocktail Party off.");
-      return next;
-    });
-  }, [sendRealtime]);
+  const toggleCocktailParty = () => {
+    const next = !cocktailParty;
+    setCocktailParty(next); settings.set("cocktailParty", next);
+    if (!readyRef.current) return;
+    sendRealtime({ type: "session.update", session: { type: "realtime", instructions: instructionsRef.current + (next ? COCKTAIL_INSTRUCTIONS : "") } });
+    push("system", next ? "Cocktail Party on — recognizing people on request." : "Cocktail Party off.");
+  };
 
   // Safety Check: a SILENT off-model hazard watch (like iOS). Samples camera
   // frames every few seconds, calls assess_hazard (DeepFace), and on a real
@@ -1382,30 +1428,28 @@ export function useRealtime({ sessionKey }: UseRealtimeOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rpc, sendRealtime]);
 
-  const toggleSafety = useCallback(() => {
-    setSafetyOn((prev) => {
-      const next = !prev;
-      if (safetyTimerRef.current) { clearInterval(safetyTimerRef.current); safetyTimerRef.current = null; }
-      if (next) {
-        lastHazardRef.current = "";
-        push("warning", "Safety Check on — silently watching for hazards.");
-        safetyTimerRef.current = setInterval(() => { void runHazardCheck(); }, 4000);
-      } else {
-        push("system", "Safety Check off.");
-      }
-      return next;
-    });
-  }, [runHazardCheck]);
+  const toggleSafety = () => {
+    const next = !safetyOn;
+    setSafetyOn(next); settings.set("safetyCheck", next);
+    if (readyRef.current) push(next ? "warning" : "system", next ? "Safety Check on — silently watching for hazards." : "Safety Check off.");
+  };
+  useEffect(() => {
+    if (phase !== "connected" || !safetyOn || !cameraOn) return;
+    lastHazardRef.current = "";
+    const timer = setInterval(() => { void runHazardCheck(); }, 4000);
+    safetyTimerRef.current = timer;
+    return () => { clearInterval(timer); if (safetyTimerRef.current === timer) safetyTimerRef.current = null; };
+  }, [phase, safetyOn, cameraOn, runHazardCheck]);
 
   return {
     // state
-    phase, error, transcript, historyLoading, micOn, cameraOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart,
+    phase, error, transcript, historyLoading, micOn, cameraOn, speakerOn, staySilent, cocktailParty, safetyOn, speaking, bridgeOffline, canStart,
     resumable: hasLiveRecording(sessionKey),
     // refs (bind to <video>/<audio> in the screen)
     videoElRef, audioElRef,
     // actions
     start, stop, sendText, sendCameraFrame,
-    toggleMic, toggleCamera, toggleStaySilent, toggleCocktailParty, toggleSafety,
+    toggleMic, toggleCamera, toggleSpeaker, toggleStaySilent, toggleCocktailParty, toggleSafety,
     // test-only: drive the realtime event handler directly
     __handleMessage: handleMessage,
   };

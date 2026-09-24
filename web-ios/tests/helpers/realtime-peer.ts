@@ -22,12 +22,21 @@ export class TestPeer extends EventTarget {
   static autoAcknowledge = true;
   connectionState = "new";
   channel = new TestChannel();
+  senders: Array<{ track: MediaStreamTrack | null; replaceTrack: (track: MediaStreamTrack | null) => Promise<void> }> = [];
+  transceivers: Array<{ kind: string; direction?: string }> = [];
   ontrack = null;
   constructor() { super(); TestPeer.all.push(this); }
   createDataChannel() { return this.channel; }
   async createOffer() { return { sdp: "offer" }; }
   async setLocalDescription() {}
   async setRemoteDescription() {}
-  addTrack() {}
+  addTrack(track: MediaStreamTrack | null) {
+    const sender = { track, replaceTrack: async (next: MediaStreamTrack | null) => { sender.track = next; } };
+    this.senders.push(sender); return sender;
+  }
+  addTransceiver(kind: string, options?: { direction: string }) {
+    this.transceivers.push({ kind, direction: options?.direction });
+    return { sender: this.addTrack(null) };
+  }
   close() { this.connectionState = "closed"; }
 }
