@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RealtimeCompaction, type CompactionState } from "../src/lib/realtime-compaction";
+import { summaryJson, summaryOutput } from "./fixtures/compaction-summary";
+import { observedBadSummary } from "../../prompt_test/fixtures/compaction-cases";
 let sent: any[], c: RealtimeCompaction, state: CompactionState, busy: boolean;
 let lock: ReturnType<typeof vi.fn>, fatal: ReturnType<typeof vi.fn>, userReply: ReturnType<typeof vi.fn>;
 let detection: Record<string, unknown> | null;
@@ -14,11 +16,11 @@ beforeEach(() => {
 });
 afterEach(() => { c.dispose(); vi.useRealTimers(); });
 const tick = () => vi.advanceTimersByTimeAsync(0);
-function finish(status = "completed", text = "Earlier facts and image observations.") {
+function finish(status = "completed", text = summaryJson(), plainReply = false) {
   const metadata = sent.find(e => e.type === "response.create").response.metadata;
   expect(c.observe({ type: "response.created", response: { id: "private", metadata } })).toBe(true);
   c.observe({ type: "response.done", response: { id: "private", metadata, status,
-    output: [{ type: "message", content: [{ type: "output_text", text }] }] } });
+    output: [plainReply ? { type: "message", content: [{ type: "output_text", text }] } : summaryOutput(text)] } });
 }
 async function ackDetection() {
   c.observe({ type: "session.updated", session: sent.at(-1).session }); await tick();
@@ -37,8 +39,11 @@ async function deleteAll() {
 it("summarizes a frozen snapshot, installs before deletion, preserves new items and stays silent", async () => {
   const work = c.compact();
   const request = sent[0].response;
-  expect(request).toMatchObject({ conversation: "none", output_modalities: ["text"], tool_choice: "none" });
-  expect(request.input.map((i: any) => i.id)).toEqual(["a", "b", "old-image"]);
+  expect(request).toMatchObject({ conversation: "none", output_modalities: ["text"], tool_choice: { type: "function", name: "report_history_summary" } });
+  expect(request.tools.map((tool: any) => tool.name)).toEqual(["report_history_summary"]);
+  expect(request.input.filter((i: any) => i.type === "item_reference").map((i: any) => i.id))
+    .toEqual(["a", "b", "c", "d", "e", "f", "old-image", "new-image"]);
+  expect(request.input.at(-1).content[0].text).toContain("Do not continue the conversation");
   c.observe(message("late-correction")); c.observe(message("late-image", true));
   finish(); await tick();
   expect(sent.filter(e => e.type === "conversation.item.delete")).toEqual([]);
@@ -67,6 +72,15 @@ it("waits for audible speech, and for a response racing the quiet acknowledgemen
 it("rejects incomplete summaries without touching context or turn detection", async () => {
   const work = c.compact(); finish("incomplete"); await work;
   expect(state!.phase).toBe("failed"); expect(sent).toHaveLength(1); expect(lock).not.toHaveBeenCalled();
+});
+it("rejects the observed advice response before replacing any historical context", async () => {
+  const work = c.compact();
+  finish("completed", observedBadSummary, true);
+  await tick();
+  expect(state!).toMatchObject({ phase: "failed", deleted: 0 });
+  expect(sent.map(e => e.type)).toEqual(["response.create"]);
+  expect(lock).not.toHaveBeenCalled();
+  c.dispose(); await work;
 });
 it("retains original context when the summary insertion fails", async () => {
   const work = c.compact(); finish(); await tick(); await ackDetection();
@@ -97,6 +111,14 @@ it("does not delete source items changed while summarizing", async () => {
   expect(state!.error).toContain("Source context changed");
   expect(sent.some(e => e.type === "conversation.item.delete")).toBe(false);
 });
+it("aborts when a retained clarification changes while summarizing", async () => {
+  const work = c.compact();
+  c.observe({ type: "conversation.item.input_audio_transcription.completed", item_id: "f" });
+  finish(); await tick(); await ackDetection(); await ackDetection(); await work;
+  expect(state!).toMatchObject({ phase: "failed", deleted: 0 });
+  expect(state!.error).toContain("Source context changed");
+  expect(sent.some(e => e.type === "conversation.item.create")).toBe(false);
+});
 it("times out before deleting unacknowledged summary context", async () => {
   const work = c.compact(); finish(); await tick(); await ackDetection();
   await vi.advanceTimersByTimeAsync(15_001); await ackDetection(); await work;
@@ -123,6 +145,7 @@ it("recompacts the previous summary ahead of newer source material", async () =>
   await deleteAll(); await ackDetection(); await work;
   c.observe(message("g")); c.observe(message("h"));
   work = c.compact();
-  expect(sent.at(-1).response.input.map((i: any) => i.id)).toEqual([previous.item.id, "c", "d"]);
+  expect(sent.at(-1).response.input.filter((i: any) => i.type === "item_reference").map((i: any) => i.id))
+    .toEqual([previous.item.id, "c", "d", "e", "f", "new-image", "g", "h"]);
   c.dispose(); await work;
 });

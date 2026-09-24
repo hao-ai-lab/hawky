@@ -1,6 +1,7 @@
 /** Scenario contracts with a fake provider/real hook. These do not judge model speech. */
 import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { summaryJson, summaryOutput } from "./fixtures/compaction-summary";
 import { TestPeer as Peer } from "./helpers/realtime-peer";
 import { useRealtime } from "../src/lib/useRealtime";
 import { useSocketStore } from "../src/lib/socket-store";
@@ -300,21 +301,26 @@ it("keeps private compaction text and lifecycle out of the spoken conversation",
     s.result.current.compactNow();
   });
   const request = s.channel.sent.find(e => e.type === "response.create");
-  expect(request.response).toMatchObject({ output_modalities: ["text"], conversation: "none", tool_choice: "none" });
+  expect(request.response).toMatchObject({ output_modalities: ["text"], conversation: "none", tool_choice: { type: "function", name: "report_history_summary" } });
   const { metadata } = request.response;
   await act(async () => {
     s.channel.receive({ type: "response.created", response: { id: "summary", metadata } });
+    s.channel.receive({ type: "response.output_item.added", response_id: "summary", item: { id: "summary-output", ...summaryOutput() } });
+    s.channel.receive({ type: "response.function_call_arguments.done", response_id: "summary", item_id: "summary-output", name: "report_history_summary", call_id: "private-call", arguments: summaryJson("Private facts") });
     s.channel.receive({ type: "response.output_text.delta", response_id: "summary", item_id: "summary-output", delta: "Private facts" });
     s.channel.receive({ type: "response.done", response: { id: "summary", metadata, status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text", text: "Private facts" }] }] } });
+      output: [{ type: "message", content: [{ type: "output_text", text: "I am compiling a private record." }] }, summaryOutput(summaryJson("Private facts"))] } });
   });
   for (let n = 0; n < 2; n++) await act(async () => {
     const deletion = s.channel.sent.at(-1);
     expect(deletion.type).toBe("conversation.item.delete");
     s.channel.receive({ type: "conversation.item.deleted", item_id: deletion.item_id });
   });
-  expect(s.result.current.compaction).toMatchObject({ phase: "complete", deleted: 2, summary: "Private facts" });
+  expect(s.result.current.compaction).toMatchObject({ phase: "complete", deleted: 2, summary: "Facts:\n- Private facts" });
   expect(s.result.current.transcript.some(e => e.text.includes("Private facts"))).toBe(false);
+  expect(s.result.current.transcript.some(e => e.text.includes("compiling a private record"))).toBe(false);
+  expect(s.result.current.transcript.some(e => e.kind === "tool")).toBe(false);
+  expect(s.channel.sent.some(e => e.item?.type === "function_call_output")).toBe(false);
   expect(s.channel.sent.filter(e => e.type === "response.create")).toHaveLength(1);
   // The ordinary speech coordinator was never occupied by the private response.
   await act(async () => { s.result.current.sendText("Continue"); await vi.advanceTimersByTimeAsync(300); });
@@ -337,7 +343,7 @@ it("the Live button starts compaction and exposes completion without altering th
   const { metadata } = channel.sent.find(e => e.type === "response.create").response;
   await act(async () => {
     channel.receive({ type: "response.done", response: { id: "ui-summary", metadata, status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text", text: "Inspect this summary." }] }] } });
+      output: [summaryOutput(summaryJson("Inspect this summary."))] } });
   });
   for (let n = 0; n < 2; n++) await act(async () => {
     channel.receive({ type: "conversation.item.deleted", item_id: channel.sent.at(-1).item_id });
@@ -346,4 +352,24 @@ it("the Live button starts compaction and exposes completion without altering th
   expect(screen.getByText("Installed summary")).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Conversation" })).not.toHaveTextContent("Inspect this summary.");
   expect(screen.getByRole("button", { name: "Compact now" })).toBeEnabled();
+});
+
+it("rejects conversational advice without inserting, deleting, or speaking it", async () => {
+  const s = await session();
+  await act(async () => {
+    for (let n = 0; n < 6; n++) s.channel.receive({ type: "conversation.item.added", item: {
+      id: `reject-${n}`, type: "message", role: "user", content: [{ type: "input_text", text: `Fact ${n}` }],
+    } });
+    s.result.current.compactNow();
+  });
+  const count = s.channel.sent.length;
+  const { metadata } = s.channel.sent.find(e => e.type === "response.create").response;
+  await act(async () => {
+    s.channel.receive({ type: "response.done", response: { id: "bad-summary", metadata, status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "Thanks for sharing. You should call a clinician." }] }] } });
+  });
+  expect(s.result.current.compaction).toMatchObject({ phase: "failed", deleted: 0 });
+  expect(s.result.current.compaction.error).toContain("Original context retained");
+  expect(s.channel.sent).toHaveLength(count);
+  expect(s.result.current.transcript.some(e => e.text.includes("clinician"))).toBe(false);
 });

@@ -75,6 +75,13 @@ The separate paid `bun run prompt_test/realtime-compaction-smoke.ts` check uses 
 actual browser compactor in a synthetic WebSocket session, installs its summary,
 deletes covered items, and checks visual recall and a newer correction afterward.
 
+For **summary quality**, run `bun test prompt_test/realtime-compaction-quality.test.ts`
+offline, then `bun run prompt_test/realtime-compaction-quality.ts --runs 2 --output /tmp/quality.json`
+with `OPENAI_API_KEY` configured (paid). Five cases check mixed topics, misheard
+speech/corrections, pending/failed tasks, quoted instructions, and changing images.
+Both installed summaries and recall after deletion are checked. See the
+[quality suite and its limits](../docs/realtime-manual-compaction.md#summary-quality-regression-suite).
+
 ## Step 4: live browser checks
 
 Use one browser tab per conversation. Use the updated gateway and reload the
