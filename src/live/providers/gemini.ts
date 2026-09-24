@@ -10,6 +10,11 @@ export function geminiSetup(o: StreamOptions) {
       voiceConfig: { prebuiltVoiceConfig: { voiceName: o.voice || "Kore" } },
     } },
     inputAudioTranscription: {}, outputAudioTranscription: {},
+    realtimeInputConfig: {
+      automaticActivityDetection: { disabled: false, startOfSpeechSensitivity: "START_SENSITIVITY_HIGH",
+        endOfSpeechSensitivity: "END_SENSITIVITY_HIGH", prefixPaddingMs: 300, silenceDurationMs: 500 },
+      turnCoverage: "TURN_INCLUDES_ALL_INPUT",
+    },
     contextWindowCompression: { slidingWindow: {} },
     ...(o.bridge ? { tools: [{ functionDeclarations: [BACKEND_TOOL, BACKEND_CONTROL_TOOL].map(({ type: _, ...tool }) => {
       const { additionalProperties: __, ...parameters } = tool.parameters;
@@ -32,6 +37,7 @@ export class GeminiLiveAdapter implements StreamAdapter {
   private captions = new Map<string, { id: string; text: string }>();
   private setupTimer?: ReturnType<typeof setTimeout>;
   private startReject?: (error: Error) => void;
+  private image?: { data: string; at: number };
   constructor(private o: StreamOptions, private key: string,
     private socketFactory = (url: string) => new WebSocket(url)) {}
   async start() {
@@ -126,14 +132,22 @@ export class GeminiLiveAdapter implements StreamAdapter {
   input(i: StreamInput) {
     if (!this.ready || this.stopped) return;
     if (i.type === "audio") this.send({ realtimeInput: { audio: { data: i.data, mimeType: "audio/pcm;rate=16000" } } });
-    if (i.type === "image") this.send({ realtimeInput: { video: { data: i.data, mimeType: "image/jpeg" } } });
+    if (i.type === "image") {
+      this.image = { data: i.data, at: i.at };
+      this.send({ realtimeInput: { video: { data: i.data, mimeType: "image/jpeg" } } });
+    }
     if (i.type === "mic" && !i.enabled) this.send({ realtimeInput: { audioStreamEnd: true } });
     if (i.type === "text") {
       this.interacted = true; this.caption("user", i.text, true);
       // Include pending results in the next fresh user turn without a competing
       // automatic response. This also releases updates held across reconnect.
       const notes = this.pending.splice(0).join("\n");
-      this.send({ clientContent: { turns: [{ role: "user", parts: [{ text: notes ? `${notes}\n\nUser: ${i.text}` : i.text }] }], turnComplete: true } });
+      // Explicit text turns and realtime media have different ordering. Attach
+      // the current frame to the same turn, so a typed camera question cannot
+      // race a separately queued video packet (especially with Mic off).
+      const parts: object[] = [{ text: notes ? `${notes}\n\nUser: ${i.text}` : i.text }];
+      if (this.image && Date.now() - this.image.at < 6000) parts.unshift({ inlineData: { mimeType: "image/jpeg", data: this.image.data } });
+      this.send({ clientContent: { turns: [{ role: "user", parts }], turnComplete: true } });
       this.generating = true;
     }
     if (i.type === "playback") { this.playback.delete(i.id); this.drain(); }
@@ -151,7 +165,7 @@ export class GeminiLiveAdapter implements StreamAdapter {
     if (this.stopped) return;
     this.caption("user", "", true); this.caption("assistant", "", true);
     clearTimeout(this.setupTimer); this.startReject?.(new Error("Gemini connection stopped")); this.startReject = undefined;
-    this.stopped = true; this.ready = false; this.pending = []; this.playback.clear();
+    this.stopped = true; this.ready = false; this.pending = []; this.playback.clear(); this.image = undefined;
     this.ws?.close();
   }
 }

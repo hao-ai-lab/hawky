@@ -22,6 +22,8 @@ test("Gemini uses native setup and restores text without generating or passing O
   const setup = f.socket.sent[0].setup;
   expect(setup.model).toBe("models/gemini-3.8-live");
   expect(setup.generationConfig.thinkingConfig).toBeUndefined();
+  expect(setup.realtimeInputConfig.automaticActivityDetection.disabled).toBe(false);
+  expect(setup.realtimeInputConfig.turnCoverage).toBe("TURN_INCLUDES_ALL_INPUT");
   expect(setup.tools[0].functionDeclarations[0].name).toBe("session_send_message");
   expect(f.socket.sent[1].clientContent.turnComplete).toBe(false);
   f.socket.receive({ serverContent: { outputTranscription: { text: "old answer" }, modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: "AAAA" } }] }, turnComplete: true } });
@@ -55,6 +57,15 @@ test("mic flush and images use documented native fields", async () => {
   f.adapter.input({ type: "image", data: "AAAA", at: 1 });
   expect(f.socket.sent.at(-1)).toEqual({ realtimeInput: { video: { data: "AAAA", mimeType: "image/jpeg" } } });
   expect(geminiSetup({ ...f.options, bridge: false }).setup.tools).toBeUndefined();
+});
+test("typed camera questions pin a fresh image to the same turn, never a stale image", async () => {
+  const f = await fixture();
+  f.adapter.input({ type: "image", data: "AAAA", at: Date.now() });
+  f.adapter.input({ type: "text", text: "What color?" });
+  expect(f.socket.sent.at(-1).clientContent.turns[0].parts).toEqual([{ inlineData: { mimeType: "image/jpeg", data: "AAAA" } }, { text: "What color?" }]);
+  f.adapter.input({ type: "image", data: "AAAA", at: Date.now() - 10000 });
+  f.adapter.input({ type: "text", text: "What now?" });
+  expect(f.socket.sent.at(-1).clientContent.turns[0].parts).toEqual([{ text: "What now?" }]);
 });
 test("media validation rejects unsupported commands, oversized packets, and partial PCM", () => {
   expect(() => validateStreamInput({ type: "audio", data: "AA==" })).toThrow();
