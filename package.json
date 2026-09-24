@@ -2,7 +2,8 @@
   "name": "hawky",
   "version": "0.1.0",
   "type": "module",
-  "description": "A personal assistant built on a powerful coding agent core",
+  "description": "A realtime agent that sees, hears, remembers, and keeps working after you hang up",
+  "license": "Apache-2.0",
   "main": "dist/index.js",
   "bin": {
     "hawky": "dist/index.js"
