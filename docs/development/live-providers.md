@@ -135,8 +135,8 @@ Manual checks, about 10–15 minutes:
 
 GPT-Live is audio-only. Camera/person tools, Stay silent and manual Realtime
 compaction are unavailable for it; their preferences remain saved for Realtime.
-Backend session memory is still available. Visual memory and Gemini/Joy/Venus
-adapters remain separate work. Native iOS has not been changed. Claude CLI is
+Backend session memory is still available. Durable visual memory remains separate
+work. Native iOS has not been changed. Claude CLI is
 wired through the existing service but has not been exercised live in this batch.
 
 Primary protocol references:
@@ -160,8 +160,8 @@ capture, bounded playback and interruption. Backend task tools are shared with
 Realtime. Completed jobs wait for generation and playback to drain before an
 announcement; reconnect loads task state quietly. Tool-call cancellation from
 speech interruption suppresses an obsolete tool response without cancelling an
-already accepted durable task. This adapter records injection, not a claim that
-a particular task result has been heard.
+already accepted durable task. Provider diagnostics record context delivery;
+task cards do not claim that a particular task result has been heard.
 
 Provider disconnects surface an error and allow Start to restore saved text and
 memory. Automatic hidden-state resumption is not implemented. Gemini's sliding
@@ -173,3 +173,46 @@ Checks: `bun test ./tests/test-live-stream.ts`; browser fixtures in
 `bun scripts/probes/gemini-live.ts`. The probe verifies real session setup,
 spoken output and seeded-history recall, without using a physical microphone.
 Protocol: https://ai.google.dev/gemini-api/docs/live-api/capabilities
+
+## Self-hosted Realtime-Venus
+
+Select `realtime-venus-omni`. This integration uses the upstream
+`realtime-venus-harness/2` ServingPort, not the demo's WebSocket agent. Hawk owns
+backend tasks. Because ServingPort returns raw token IDs, run the small decoding
+bridge with the **same checkpoint tokenizer** as the model:
+
+```sh
+uv venv services/venus/.venv
+uv pip install --python services/venus/.venv/bin/python -r services/venus/requirements.txt
+services/venus/.venv/bin/python services/venus/bridge.py --upstream http://127.0.0.1:8031 --tokenizer /path/to/checkpoint/tokenizer.json
+```
+
+Point the gateway's `HAWKY_VENUS_URL` at that bridge (default
+`http://127.0.0.1:8033`). Alternatively set private gateway config
+`live_providers.venus.url`. An optional `HAWKY_VENUS_API_KEY` on both processes
+enables bridge bearer authentication (`live_providers.venus.api_key` also works
+on the gateway). These operator settings cannot be changed through browser RPC.
+Use loopback or an authenticated TLS tunnel when the model is remote.
+
+The bridge checks protocol token IDs and decodes incremental Unicode without
+dropping reserved tokens. Hawk hides `<delegate>` spans, dispatches one validated
+task per turn and returns sanitized `<backend>` feedback. Partial/private tokens
+cannot become spoken task instructions. Delegations use the shared serial worker;
+this native marker contains no structured concurrency/follow-up fields.
+
+Venus receives one-second PCM chunks and JPEG frames. With Mic off, zero PCM
+keeps its streaming clock advancing. Saved history and instructions are installed
+with fresh user input; upstream prefill starts generation, so reconnect alone
+must not install a speaking prefill. Backend completions wait for a model turn
+boundary and playback drain. Only a contiguous prefix of actually played audio
+is acknowledged. Stop closes only this connection's model session.
+
+Current protocol limits: one active model session, no input ASR transcript,
+no immediate external barge-in operation, server-selected voice, and no manual
+context deletion. Typed messages and assistant captions are archived; microphone
+speech history cannot be restored unless a separate ASR is added. Model-hosted
+memory is not transferred on reconnect. Native iOS is unchanged.
+
+Fixtures: `bun test ./tests/test-venus-live.ts` and
+`services/venus/.venv/bin/python -m unittest discover -s services/venus -v`.
+Source protocol: https://github.com/inclusionAI/Realtime-Venus/tree/main/demos/model

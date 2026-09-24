@@ -14,7 +14,7 @@ import { MethodError } from "./methods.js";
 
 // Fields that are NEVER exposed or settable via the web panel
 const FORBIDDEN_KEYS = new Set([
-  "api_keys", "api_base_url", "gateway_port", "gateway",
+  "live_providers", "api_keys", "api_base_url", "gateway_port", "gateway",
   "mcp_servers", "concurrency", "compaction",
   "logging", "setup_completed_at", "workspace_dir",
   "channels", // tokens must be set in config.json directly, not via web

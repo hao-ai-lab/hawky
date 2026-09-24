@@ -1,3 +1,4 @@
+import { VenusAdapter } from "../live/providers/venus.js";
 import { loadConfig } from "../storage/config.js";
 import { GeminiLiveAdapter } from "../live/providers/gemini.js";
 import type { StreamAdapter, StreamEvent, StreamInput, StreamOptions } from "../live/stream-contracts.js";
@@ -16,7 +17,7 @@ export function validateStreamCreate(p: any) {
   if (!p || typeof p.id !== "string" || !/^[\w-]{8,80}$/.test(p.id) ||
     typeof p.ownerSession !== "string" || !p.ownerSession.trim() || p.ownerSession.length > 200 ||
     !["native", "codex", "claude"].includes(p.runtime) ||
-    typeof p.model !== "string" || !/^(gemini-[\w.-]*live[\w.-]*)$/.test(p.model) ||
+    typeof p.model !== "string" || !/^(gemini-[\w.-]*live[\w.-]*|realtime-venus-omni)$/.test(p.model) ||
     typeof p.instructions !== "string" || p.instructions.length > 20000 ||
     !Array.isArray(p.history) || p.history.length > 110 ||
     p.history.some((t: any) => !t || !["user", "assistant"].includes(t.role) || typeof t.text !== "string") ||
@@ -63,8 +64,9 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
   server.registerMethod("live.stream.create", async (conn, raw) => {
     const p = raw as any; validateStreamCreate(p);
     if (active.has(p.id)) throw new MethodError("CONFLICT", "Connection ID already exists");
+    const isGemini = p.model.startsWith("gemini-");
     const key = p.gemini_api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || loadConfig().api_keys.gemini;
-    if (!factory && (typeof key !== "string" || !key.trim())) throw new MethodError("UNAVAILABLE", "Gemini Live needs a Gemini API key in Live settings or on the gateway.");
+    if (!factory && isGemini && (typeof key !== "string" || !key.trim())) throw new MethodError("UNAVAILABLE", "Gemini Live needs a Gemini API key in Live settings or on the gateway.");
     if (!p.gemini_api_key) enforceRealtimeMintQuota(`stream:${conn.deviceTokenId ?? "local"}:${conn.clientId}`);
     for (const s of active.values()) if (s.conn === conn && s.ownerSession === p.ownerSession) await s.close();
     let session: Session;
@@ -103,7 +105,10 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
       calls.set(id, result); return result;
     };
     const options: StreamOptions = { ...p, bridge: p.bridge === true, emit, tool };
-    const adapter = factory ? factory(options, p) : new GeminiLiveAdapter(options, key);
+    const adapter = factory ? factory(options, p) : isGemini ? new GeminiLiveAdapter(options, key) : new VenusAdapter(options, {
+      url: process.env.HAWKY_VENUS_URL || loadConfig().live_providers?.venus?.url || "http://127.0.0.1:8033",
+      apiKey: process.env.HAWKY_VENUS_API_KEY || loadConfig().live_providers?.venus?.api_key,
+    });
     session = { conn, ownerSession: p.ownerSession, adapter, closed: false, closing: false, seen: new Set(), completed: new Set(), history: [...p.history],
       lease: setTimeout(() => void session.close(), 45000),
       close: async () => { if (session.closed || session.closing) return; session.closing = true; clearTimeout(session.lease); await adapter.close(); session.closed = true; active.delete(p.id); },

@@ -12,6 +12,7 @@ import { create } from "zustand";
 export const REALTIME_MODELS = [
   "gpt-live-1",
   "gemini-3.8-live",
+  "realtime-venus-omni",
   "gemini-3.1-flash-live-preview",
   "gpt-realtime-2",
   "gpt-realtime-mini-2025-12-15",

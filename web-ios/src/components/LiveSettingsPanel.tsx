@@ -25,10 +25,11 @@ export function LiveSettingsPanel() {
       {gemini && <Section title="Gemini connection" footer="Uses your Gemini key or the gateway's GEMINI_API_KEY / GOOGLE_API_KEY. The key stays in this browser and is sent only to the gateway for Gemini connections. Audio, images, text and backend tools are supported; face tools and manual compaction are not yet available.">
         <Row label="Gemini API key"><input aria-label="Gemini API key" type="password" autoComplete="off" value={geminiKey} placeholder="Use gateway key" onChange={e => { setGeminiKey(e.target.value); saveGeminiKey(e.target.value); }} className="max-w-full rounded border border-white/15 bg-black/30 px-3 py-2" /></Row>
       </Section>}
+      {capabilities.provider === "venus" && <p className="mb-5 text-sm text-white/60">Self-hosted Venus uses the gateway’s configured decoding bridge. Native audio and camera input are supported. Speech transcripts from your microphone and immediate speech interruption are not provided by this protocol. Typed messages are supported. Voice is chosen on the model server.</p>}
       {gpt && <p className="mb-5 text-sm text-white/60">GPT-Live supports audio with continuous interruption and automatic context management. Camera, manual compaction, and Stay silent are unavailable. Typed messages go to your selected backend. Task interpretation uses gpt-5.4-mini with the same OpenAI key.</p>}
       <Section title="Live · Response">
         <Row label={!realtime ? "Speaker" : "Response modality"}>{sel("responseModality", [{ value: "audio", label: "Audio + text" }, { value: "text", label: !realtime ? "Muted (captions continue)" : "Text only" }])}</Row>
-        <Row label="Voice">{gemini ? sel("geminiVoice", ["Kore", "Puck", "Aoede", "Charon", "Fenrir"]) : sel("voice", gpt ? ["marin", "cedar"] : VOICES)}</Row>
+        {(gemini || realtime || gpt) && <Row label="Voice">{gemini ? sel("geminiVoice", ["Kore", "Puck", "Aoede", "Charon", "Fenrir"]) : sel("voice", gpt ? ["marin", "cedar"] : VOICES)}</Row>}
         {realtime && <>
         <Row label="Noise reduction">{sel("noiseReduction", [{ value: "none", label: "None" }, { value: "near_field", label: "Near field" }, { value: "far_field", label: "Far field" }] as const)}</Row>
         <Row label="User transcript" detail="Transcribe your speech"><Toggle checked={s.userTranscript} onChange={(v) => s.set("userTranscript", v)} /></Row>

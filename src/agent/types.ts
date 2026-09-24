@@ -520,6 +520,8 @@ export interface OpenAICompatibleProfile {
 }
 
 export interface HawkyConfig {
+  /** Self-hosted live endpoints are configured by the gateway operator, never client supplied. */
+  live_providers?: { venus?: { url: string; api_key?: string } };
   /** API keys for external services */
   api_keys: {
     anthropic: string;
