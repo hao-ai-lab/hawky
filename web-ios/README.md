@@ -57,6 +57,20 @@ bun run build   # tsc + vite → dist/  (served by the gateway, or any static ho
 bun run test    # vitest + jsdom smoke tests (mounts App, switches tabs, mocks the gateway)
 ```
 
+### Hosted free-preview notice
+
+For a deployment that provides model access to its users, build with
+`VITE_HAWKY_HOSTED_PREVIEW=true bun run build`, or put
+`VITE_HAWKY_HOSTED_PREVIEW=true` in that host's untracked `.env.production.local`.
+This enables a compact notice in the app and details in Live settings: Hawky
+provides API access, hosts JoyAI/Venus, and includes model access during a limited
+free preview. It also discloses Venus's current one-conversation capacity.
+
+The flag is off by default so local and other self-hosted installations do not
+promise free access. It is display-only: it does not configure credentials,
+enable providers, or change billing. Only enable it where the stated services
+are actually provided. Never put API keys in `VITE_` variables (they are public).
+
 ## Architecture
 
 - Reuses the proven gateway plumbing from `web/`: `ws-client`, `socket-store`,
