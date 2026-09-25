@@ -54,14 +54,14 @@ and video recording for searchable visual memory is planned but not complete yet
 
 <table>
   <tr>
-    <td align="center" width="33%"><a href="website/assets/demo-cocktail.mp4"><img src="website/assets/demo-cocktail.png" width="180" alt="Cocktail party demo" /></a><br /><b>Cocktail party</b><br />Picks out who's talking in a noisy room and quietly briefs you.</td>
+    <td align="center" width="33%"><a href="website/assets/demo-cocktail.mp4"><img src="website/assets/demo-cocktail.png" width="180" alt="Person identification demo" /></a><br /><b>Person identification</b><br />Recognizes who you're talking to and quietly briefs you.</td>
     <td align="center" width="33%"><a href="website/assets/demo-safety.mp4"><img src="website/assets/demo-safety.png" width="180" alt="Safety demo" /></a><br /><b>Safety</b><br />Watches your surroundings and warns you about hazards.</td>
-    <td align="center" width="33%"><a href="website/assets/demo-coding.mp4"><img src="website/assets/demo-coding.png" width="180" alt="Coding demo" /></a><br /><b>Coding</b><br />Ask out loud for a feature; the backend agent writes it while you keep moving.</td>
+    <td align="center" width="33%"><a href="website/assets/demo-reminder.mp4"><img src="website/assets/demo-reminder.png" width="180" alt="Reminder demo" /></a><br /><b>Reminders</b> · in progress<br />Notices commitments you make and reminds you at the right moment.</td>
   </tr>
   <tr>
-    <td align="center"><a href="website/assets/demo-reminder.mp4"><img src="website/assets/demo-reminder.png" width="180" alt="Reminder demo" /></a><br /><b>Reminders</b> · in progress<br />Notices commitments you make and reminds you at the right moment.</td>
-    <td align="center"><a href="website/assets/demo-silent.mp4"><img src="website/assets/demo-silent.png" width="180" alt="Silent mode demo" /></a><br /><b>Silent mode</b><br />Reads the scene and helps without speaking.</td>
-    <td align="center"><a href="website/assets/demo-memory.mp4"><img src="website/assets/demo-memory.png" width="180" alt="Visual memory demo" /></a><br /><b>Visual memory</b><br />"Where di I lost my key?"</td>
+    <td align="center"><a href="website/assets/demo-silent.mp4"><img src="website/assets/demo-silent.png" width="180" alt="Meeting mode demo" /></a><br /><b>Meeting mode</b> · in progress<br />Follows along and helps without speaking.</td>
+    <td align="center"><a href="website/assets/demo-memory.mp4"><img src="website/assets/demo-memory.png" width="180" alt="Visual memory demo" /></a><br /><b>Visual memory</b> · preview<br />"What did I just do?" answered from a record of your day.</td>
+    <td></td>
   </tr>
 </table>
 
