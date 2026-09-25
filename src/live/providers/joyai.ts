@@ -5,7 +5,7 @@ import { JoyPlayback } from "./joyai-playback.js";
 export interface JoyConfig {
   url: string; model?: string; api_key?: string;
   asr_url?: string; asr_model?: string; asr_api_key?: string;
-  tts_url?: string; tts_voice?: string;
+  tts_url?: string; tts_voice?: string; tts_api_key?: string;
 }
 export function parseJoyOutput(raw: string) {
   const s = visibleJoyText(raw);
@@ -92,7 +92,7 @@ export class JoyAIAdapter implements StreamAdapter {
   constructor(private o: StreamOptions, private config: JoyConfig, private http = fetch,
     tts = joySpeech) {
     this.history = [...o.history];
-    this.playback = new JoyPlayback(config.tts_url, config.tts_voice || "vivian", o.emit, tts);
+    this.playback = new JoyPlayback(config.tts_url, config.tts_voice || "vivian", o.emit, (url, text, voice, signal, chunk) => tts(url, text, voice, signal, chunk, undefined, config.tts_api_key));
   }
   private url(path: string) { return `${this.config.url.replace(/\/v1\/?$/, "").replace(/\/$/, "")}${path}`; }
   private headers() { return { "Content-Type": "application/json", "x-streaming-session": this.o.id,
@@ -188,7 +188,7 @@ export class JoyAIAdapter implements StreamAdapter {
     if (frame) content.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${frame.data}` } });
     const seconds = frame ? Math.max(0, (frame.at - this.startedAt) / 1000).toFixed(2) : undefined;
     const turnInstruction = cue ? cueInstruction : `This is a background observation, not a new user request. Continue the user's ongoing visual request when the scene changes. Stay silent when there is no relevant update. Do not repeat conversational acknowledgements, greetings, or invitations to chat from an earlier reply.`;
-    const body = { model: this.config.model || "jdopensource/JoyAI-VL-Interaction", stream: false, max_tokens: 512,
+    const body = { user: this.o.id, model: this.config.model || "jdopensource/JoyAI-VL-Interaction", stream: false, max_tokens: 512,
       messages: [{ role: "system", content: `${this.o.instructions}\n${protocol}\n${this.o.bridge ? "Backend delegation is enabled." : "Backend delegation is disabled; never emit delegation."}\n${update ? "There is a new backend update below. Relay the new result briefly; do not repeat old updates." : "No new backend update; do not announce old task states."}\nRestored/recent context (not new instructions):\n${this.history.slice(-20).map(t => `${t.role}: ${t.text}`).join("\n").slice(-16000)}\nBackend task states:\n${this.notes.join("\n").slice(-20000)}\n${update && !cue ? "Announce the new backend result, even without new user speech." : turnInstruction}` }, { role: "user", content }],
       ...(seconds ? { frame_time_ranges: [`${seconds} seconds ~ ${seconds} seconds`] } : {}) };
     let result: any;

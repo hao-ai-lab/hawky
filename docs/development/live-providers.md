@@ -343,7 +343,7 @@ Source protocol: https://github.com/inclusionAI/Realtime-Venus/tree/main/demos/m
 
 Select `joyai-vl-interaction`. This is the upstream **stateful webinfer adapter**,
 not a direct vLLM port: JPEGs and text go to `/v1/chat/completions`, with a unique
-`x-streaming-session` per connection. Requests are regular JSON, not SSE. The
+`x-streaming-session` per connection (also sent as the JSON `user` field for authenticated routers). Requests are regular JSON, not SSE. The
 gateway serializes inference and coalesces pending images to the newest frame.
 Visual inference runs at most once per second independently of speech synthesis
 and playback; a new user cue can bypass that cadence. A fresh user cue is required before
@@ -368,8 +368,11 @@ Private gateway `config.json` example (merge into the existing config):
 
 Use the model name served by your deployment (some name it
 `JoyAI-VL-Interaction`). `HAWKY_JOYAI_URL`, `HAWKY_JOYAI_ASR_URL` and
-`HAWKY_JOYAI_TTS_URL` override these endpoints. `api_key` and `asr_api_key` are
-optional, independent bearer keys. Remote services should be reached through an
+`HAWKY_JOYAI_TTS_URL` override these endpoints. `api_key`, `asr_api_key`, and
+`tts_api_key` are optional, independent bearer keys. Their environment overrides
+are `HAWKY_JOYAI_API_KEY`, `HAWKY_JOYAI_ASR_API_KEY`, and
+`HAWKY_JOYAI_TTS_API_KEY`. TTS authenticates the WebSocket upgrade from the
+gateway; these credentials are never sent to the browser. Remote services should be reached through an
 authenticated tunnel or TLS. The optional TTS endpoint is the upstream Joy
 adapter protocol, not a generic OpenAI speech endpoint.
 
@@ -498,3 +501,13 @@ Protocol sources: [webinfer](https://github.com/jd-opensource/JoyAI-VL-Interacti
   quality remain unverified.
 - Native iOS, durable visual-memory transfer and per-task model/effort selection
   are outside this batch. Existing backend model configuration is unchanged.
+
+
+Opt-in JoyAI inference probe (synthetic red JPEG; optional synthetic 16 kHz mono
+PCM16 WAV; no microphone capture): set `HAWKY_JOYAI_URL`,
+`HAWKY_JOYAI_API_KEY`, and `JOYAI_LIVE_IMAGE`, then run
+`bun scripts/probes/joyai-live.ts`. Add `HAWKY_JOYAI_ASR_URL`,
+`JOYAI_LIVE_WAV`, and `HAWKY_JOYAI_TTS_URL` to verify speech input and output.
+The probe uses the same supplied key for all three endpoints and closes its
+session afterward. Deployment-specific addresses and credentials belong in the
+private deployment configuration.

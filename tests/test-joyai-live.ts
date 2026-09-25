@@ -45,6 +45,7 @@ test("Joy restores quietly, isolates HTTP state, coalesces images and delegates 
     expect(inference).toBe(2); expect(tools).toHaveLength(1);
     const posts = requests.filter(r => r.url.endsWith("completions"));
     expect(posts[0].headers["x-streaming-session"]).toBe("joy-fixture");
+    expect(posts[0].body.user).toBe("joy-fixture");
     expect(posts[0].body.messages[0].content).toContain("turquoise");
     expect(posts[1].body.messages[1].content[0].text).toBe("");
     expect(posts[1].body.messages[1].content[1].image_url.url).toContain("AQAA");
@@ -410,4 +411,23 @@ test("duplicate suppression preserves visual changes, requested repetitions, and
     expect(events.filter(e => e.role === "assistant").map(e => e.text)).toEqual(spoken);
     expect(a.diagnostics().inference.suppressedReplies).toBe(0);
   } finally { await a.close(); }
+});
+
+// Exercise the real server-side WebSocket implementation, not just a mock factory.
+test("Joy TTS authenticates the WebSocket upgrade with its configured key", async () => {
+  let auth = "", chunks = 0;
+  const server = Bun.serve({ port: 0,
+    fetch(req, server) { auth = req.headers.get("authorization") || "";
+      if (server.upgrade(req)) return; return new Response("Upgrade required", { status: 400 }); },
+    websocket: { message(ws, message) {
+      if (JSON.parse(String(message)).type === "input_text.commit") {
+        ws.send(Buffer.alloc(48)); ws.send(JSON.stringify({ type: "response.done" }));
+      }
+    } },
+  });
+  try {
+    await joySpeech(`ws://127.0.0.1:${server.port}/tts`, "Hello", "vivian", new AbortController().signal,
+      () => { chunks++; }, undefined, "test-only-key");
+    expect(auth).toBe("Bearer test-only-key"); expect(chunks).toBe(1);
+  } finally { server.stop(true); }
 });
