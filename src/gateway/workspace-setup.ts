@@ -67,10 +67,43 @@ export class WorkspaceSetup {
 
 export function workspaceSetupPage() {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Setting up your workspace</title><style>body{font:18px system-ui;max-width:540px;margin:15vh auto;padding:24px;background:#101412;color:#eee}button,a{font:inherit;color:inherit}button{background:#344432;padding:12px;border:1px solid #678;border-radius:8px}</style>
-<h1>Setting up your workspace</h1><p id="status">Preparing your private files and backend assistant…</p><button id="retry" hidden>Retry setup</button> <a href="/auth/logout">Sign out</a>
+<title>Setting up your workspace</title><style>
+body{font:17px/1.5 system-ui;max-width:540px;margin:12vh auto;padding:24px;background:#101412;color:#eee}
+h1{font-size:32px;line-height:1.2;margin:0 0 20px}button,a{font:inherit;color:inherit}
+button{background:#344432;padding:12px;border:1px solid #678;border-radius:8px;cursor:pointer}
+progress{display:block;width:100%;height:10px;border:0;border-radius:8px;overflow:hidden;background:#303a32;accent-color:#dba446}
+progress::-webkit-progress-bar{background:#303a32}progress::-webkit-progress-value{background:#dba446}
+progress:indeterminate{background:linear-gradient(90deg,#303a32 25%,#dba446 50%,#303a32 75%);background-size:200% 100%;animation:working 2s linear infinite}
+progress:indeterminate::-webkit-progress-bar{background:transparent}
+@keyframes working{to{background-position:-200% 0}}
+@media(prefers-reduced-motion:reduce){progress:indeterminate{animation:none}}
+[hidden]{display:none!important}.detail{color:#adb8af;font-size:15px}ul{padding-left:22px}footer{display:flex;align-items:center;gap:20px;margin-top:28px}
+</style>
+<main><h1>Setting up your workspace</h1>
+<p id="status" role="status">Preparing your private workspace and assistant…</p>
+<progress id="progress" aria-label="Workspace setup in progress"></progress>
+<p id="elapsed" class="detail">Setup in progress · 0 seconds elapsed</p>
+<p class="detail">We’re preparing:</p><ul class="detail"><li>Your private files and conversation storage</li><li>Your included model access</li><li>Your backend assistant, checked before you enter</li></ul>
+<p class="detail">This page opens your workspace automatically when it’s ready. Refreshing won’t restart your setup.</p>
+<footer><button id="retry" hidden>Retry setup</button><a href="/auth/logout">Sign out</a></footer></main>
 <script>
-const text=document.getElementById('status'),button=document.getElementById('retry');
-async function poll(retry=false){try{const r=await fetch('/auth/workspace/status',{method:retry?'POST':'GET',credentials:'same-origin'});if(r.status===401){location.replace('/auth/login');return;}const s=await r.json();if(s.status==='ready'){const u=new URL(location.href).searchParams.get('return_url');location.replace(u&&new URL(u,location.origin).origin===location.origin&&!u.startsWith('/auth/workspace')?u:'/');return;}button.hidden=s.status!=='failed';text.textContent=s.status==='failed'?'Setup could not finish. Your account is saved. Retry to continue.':s.status==='disabled'?'This account is disabled.':'Preparing your private files and backend assistant…';if(s.status==='pending'||s.status==='provisioning')setTimeout(poll,2000);}catch{ text.textContent='Connection lost. Reconnecting…';setTimeout(poll,4000);}}
+const text=document.getElementById('status'),button=document.getElementById('retry'),bar=document.getElementById('progress'),elapsed=document.getElementById('elapsed');
+let started=Date.now(),active=true,phase='Setup in progress';
+function tick(){if(active)elapsed.textContent=phase+' · '+Math.floor((Date.now()-started)/1000)+' seconds elapsed';}
+setInterval(tick,1000);
+async function poll(retry=false){
+ if(retry){button.hidden=true;active=true;started=Date.now();phase='Retrying setup';bar.hidden=false;text.textContent='Retrying your workspace setup…';tick();}
+ try{
+  const r=await fetch('/auth/workspace/status',{method:retry?'POST':'GET',credentials:'same-origin'});
+  if(r.status===401){location.replace('/auth/login');return;}
+  if(!r.ok)throw new Error('Setup status unavailable');
+  const s=await r.json();
+  if(s.status==='ready'){active=false;bar.hidden=false;bar.value=1;bar.max=1;text.textContent='Your workspace is ready';elapsed.textContent='Opening your workspace…';const u=new URL(location.href).searchParams.get('return_url');location.replace(u&&new URL(u,location.origin).origin===location.origin&&!u.startsWith('/auth/workspace')?u:'/');return;}
+  active=s.status==='pending'||s.status==='provisioning';bar.hidden=!active;button.hidden=s.status!=='failed';
+  text.textContent=s.status==='failed'?'Setup could not finish. Your account is saved. Retry to continue.':s.status==='disabled'?'This account is disabled.':'Preparing your private workspace and assistant…';
+  phase='Setup in progress';
+  if(active){const since=Date.parse(s.updatedAt);if(Number.isFinite(since))started=since;tick();setTimeout(poll,2000);}else{elapsed.textContent=s.status==='failed'?'Setup paused':'Setup stopped';}
+ }catch{active=true;phase='Reconnecting';bar.hidden=false;text.textContent='Connection lost. Reconnecting…';tick();setTimeout(poll,4000);}
+}
 button.onclick=()=>poll(true);poll();</script></html>`;
 }
