@@ -392,11 +392,11 @@ a:focus-visible,button:focus-visible,
 }
 .demo:hover{border-color:var(--line-2);transform:translateY(-3px)}
 .demo__media{
-  position:relative;aspect-ratio:1284/2778;background:var(--bg);
+  position:relative;aspect-ratio:1284/2778;max-height:min(640px,72vh);background:var(--bg);
   border-bottom:1px solid var(--line);overflow:hidden;
   display:flex;align-items:center;justify-content:center;
 }
-.demo__media video{position:relative;z-index:0;width:100%;height:100%;object-fit:cover;
+.demo__media video{position:relative;z-index:0;width:100%;height:100%;object-fit:contain;
   filter:saturate(.9) brightness(.82);transition:filter .25s ease}
 /* clip/coding cells carry a designed dark poster — show it at full strength,
    and only dim the live video frames once playback starts */
