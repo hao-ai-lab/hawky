@@ -40,11 +40,10 @@ describe("login workspace routing", () => {
       stateDir,
       allowFirstUserRegistration: true,
       publicRegistration: true,
-      adminEmails: ["admin@example.com"],
+      registrationAllowlist: ["juc049@ucsd.edu"],
     });
-    const { user: admin } = auth.register("admin@example.com", "a long safe password");
-    const { user: pending } = auth.register("juc049@ucsd.edu", "a long safe password");
-    auth.approveUser(admin, pending.id, "user");
+    auth.register("admin@example.com", "a long safe password");
+    auth.register("juc049@ucsd.edu", "a long safe password");
 
     workspaceServer = Bun.serve({
       hostname: "127.0.0.1",
@@ -70,6 +69,8 @@ describe("login workspace routing", () => {
     }, null, 2));
 
     process.env.HAWKY_APP_AUTH = "1";
+    process.env.HAWKY_GOOGLE_CLIENT_ID = "test-client.apps.googleusercontent.com";
+    process.env.HAWKY_GOOGLE_CLIENT_SECRET = "test-secret";
     process.env.HAWKY_PUBLIC_REGISTRATION = "1";
     process.env.HAWKY_ADMIN_EMAILS = "admin@example.com";
     process.env.HAWKY_WORKSPACE_REGISTRY_FILE = registryPath;
@@ -89,6 +90,8 @@ describe("login workspace routing", () => {
     resetConfig();
     rmSync(configDir, { recursive: true, force: true });
     delete process.env.HAWKY_APP_AUTH;
+    delete process.env.HAWKY_GOOGLE_CLIENT_ID;
+    delete process.env.HAWKY_GOOGLE_CLIENT_SECRET;
     delete process.env.HAWKY_PUBLIC_REGISTRATION;
     delete process.env.HAWKY_ADMIN_EMAILS;
     delete process.env.HAWKY_WORKSPACE_REGISTRY_FILE;
@@ -106,6 +109,33 @@ describe("login workspace routing", () => {
 
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/");
+  });
+
+  test("public password sign-up stays closed until email verification exists", async () => {
+    const registration = await fetch(`http://localhost:${port}/auth/register`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { Host: CONTROL_HOST, "Content-Type": "application/x-www-form-urlencoded" },
+      body: formBody("new-user@example.com"),
+    });
+    expect(registration.status).toBe(400);
+    expect(await registration.text()).toContain("Registration is closed");
+  });
+
+  test("Google sign-in is offered and starts a protected authorization flow", async () => {
+    const login = await fetch(`http://localhost:${port}/auth/login`, { headers: { Host: CONTROL_HOST } });
+    expect(login.status).toBe(200);
+    expect(await login.text()).toContain("Continue with Google");
+
+    const start = await fetch(`http://localhost:${port}/auth/google/start?return_url=%2Fsessions`, {
+      redirect: "manual",
+      headers: { Host: CONTROL_HOST },
+    });
+    expect(start.status).toBe(303);
+    const authUrl = new URL(start.headers.get("location")!);
+    expect(authUrl.hostname).toBe("accounts.google.com");
+    expect(authUrl.searchParams.get("redirect_uri")).toBe("https://app.hawky.live/auth/google/callback");
+    expect(start.headers.get("set-cookie")).toContain("hawky_google_state=");
   });
 
   test("control host proxies already logged-in users to their workspace", async () => {
