@@ -1,3 +1,4 @@
+import { openAIEndpoint } from "../agent/openai-endpoint.js";
 import { loadConfig } from "../storage/config.js";
 import { getPrompt } from "../prompts/index.js";
 
@@ -94,7 +95,7 @@ export async function mintOpenAIRealtimeClientSecret(
 
   const request = buildRealtimeClientSecretRequest(params);
 
-  const upstream = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+  const upstream = await fetch(openAIEndpoint("realtime/client_secrets", keySelection.apiKey), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${keySelection.apiKey}`,

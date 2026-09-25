@@ -1,3 +1,4 @@
+import { openAIEndpoint } from "../agent/openai-endpoint.js";
 // =============================================================================
 // Embedding Provider
 //
@@ -47,7 +48,7 @@ export function createOpenAIEmbeddingProvider(apiKey: string): EmbeddingProvider
 
         let response: Response;
         try {
-          response = await fetch("https://api.openai.com/v1/embeddings", {
+          response = await fetch(openAIEndpoint("embeddings", apiKey), {
             method: "POST",
             headers: {
               "Content-Type": "application/json",

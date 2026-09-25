@@ -1,3 +1,4 @@
+import { openAIEndpoint } from "../agent/openai-endpoint.js";
 import type { ConversationTurn } from "./contracts.js";
 import type { DelegationTask } from "../gateway/delegation-types.js";
 export interface LiveAction { action: "submit" | "cancel" | "revise" | "status"; taskId: string; request: string; readOnly: boolean }
@@ -13,7 +14,7 @@ export function liveRoutingInput(snapshot: RoutingSnapshot) {
  * proposes task operations; the gateway validates IDs and enforces permissions.
  */
 export async function routeLiveDelegation(apiKey: string, snapshot: RoutingSnapshot, signal: AbortSignal): Promise<LiveRoute> {
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch(openAIEndpoint("responses", apiKey), {
     method: "POST", signal,
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: "gpt-5.4-mini", store: false, reasoning: { effort: "low" }, max_output_tokens: 1800,

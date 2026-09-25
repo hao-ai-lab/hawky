@@ -5,7 +5,7 @@ const originalFetch = globalThis.fetch, OriginalSocket = globalThis.WebSocket;
 class Socket extends EventTarget {
   static OPEN = 1; static all: Socket[] = [];
   readyState = 0; sent: any[] = [];
-  constructor() { super(); Socket.all.push(this); queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); }); }
+  constructor(public url: string) { super(); Socket.all.push(this); queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); }); }
   receive(e: object) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(e) })); }
   send(text: string) { const e = JSON.parse(text); this.sent.push(e); if (e.type === "session.close") queueMicrotask(() => this.receive({ type: "session.closed" })); }
   close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event("close")); }
@@ -51,4 +51,20 @@ test("typed requests are scoped, validated and acknowledged while interpretation
   await new Promise(r => setTimeout(r, 0));
   expect(f.saved.map(t => t.text)).toEqual(["Read the folder"]);
   expect(Socket.all[0].sent.some(e => e.type === "session.commentary.append" && e.content === "Which folder?")).toBe(true);
+});
+
+test("Hawk keys route session creation, sideband, and task interpretation to the same proxy", async () => {
+  const previous = process.env.HAWKY_OPENAI_BASE_URL;
+  process.env.HAWKY_OPENAI_BASE_URL = "https://router.example/v1";
+  try {
+    const f = fixture();
+    const live = await f.call("live.gpt.create", { ...config, byok_api_key: "sk-hawky-fixture-not-a-real-key-0000000000" });
+    expect(f.requests[0].url).toBe("https://router.example/v1/live/sessions");
+    expect(Socket.all[0].url).toBe("wss://router.example/v1/live/sessions/live_1/attach");
+    f.call("live.gpt.text", { id: live.id, ownerSession: config.ownerSession, text: "Read the folder" });
+    await new Promise(r => setTimeout(r, 0));
+    expect(f.requests[1].url).toBe("https://router.example/v1/responses");
+  } finally {
+    if (previous === undefined) delete process.env.HAWKY_OPENAI_BASE_URL; else process.env.HAWKY_OPENAI_BASE_URL = previous;
+  }
 });
