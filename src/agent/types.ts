@@ -525,7 +525,7 @@ export interface HawkyConfig {
     venus?: { url: string; api_key?: string };
     joyai?: { url: string; model?: string; api_key?: string;
       asr_url?: string; asr_model?: string; asr_api_key?: string;
-      tts_url?: string; tts_voice?: string };
+      tts_url?: string; tts_voice?: string; tts_api_key?: string };
   };
   /** API keys for external services */
   api_keys: {
