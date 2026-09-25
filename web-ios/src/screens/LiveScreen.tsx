@@ -21,6 +21,7 @@ import { useSocketStore } from "../lib/socket-store";
 import { useSessionStore } from "../lib/session-store";
 import { DelegationBubble } from "../components/DelegationBubble";
 import { LiveSettingsDialog } from "../components/LiveSettingsDialog";
+import { HostedPreviewNotice } from "../components/HostedPreviewNotice";
 import { CompactionPanel } from "../components/CompactionPanel";
 import { SessionMemoryPanel } from "../components/SessionMemoryPanel";
 import { compactionBusy } from "../lib/realtime-compaction";
@@ -107,15 +108,16 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
       <audio ref={audioElRef} autoPlay />
 
       {/* Header — the Hawk pill opens the session menu (New / History / Status) */}
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3 md:px-6">
+      <header className="relative z-40 flex flex-wrap items-center justify-between gap-1 border-b border-white/10 px-3 py-3 sm:gap-2 md:px-6">
         <button onClick={() => setMenuOpen(true)}
-          className="pressable flex items-center gap-2 rounded-pill px-2 py-1 hover:bg-white/5" aria-label="Session menu">
+          className="pressable flex items-center gap-1 rounded-pill px-1 py-1 hover:bg-white/5 sm:gap-2 sm:px-2" aria-label="Session menu">
           <Logo size={22} textClass="text-[15px]" />
           <span className="hidden max-w-[40vw] truncate text-xs text-white/40 sm:inline">· {sessionLabel}</span>
           <PhasePill phase={phase} />
           <Icon name="chevronDown" className="h-3.5 w-3.5 text-white/40" />
         </button>
-        <div className="flex flex-wrap items-center gap-2">
+        <HostedPreviewNotice compact />
+        <div className="flex flex-wrap items-center gap-1 sm:gap-2">
           {isConnected && activeModel !== selectedModel && <button onClick={() => void reconnect()}
             className="rounded-lg border border-accent/40 px-3 py-2 text-xs text-accent">Switch to {selectedModel}</button>}
           <div ref={memoryActionsRef} className="relative"
@@ -128,7 +130,7 @@ export function LiveScreen({ onFullscreenChange }: { onFullscreenChange: (v: boo
             }}>
             <button ref={memoryButtonRef} onClick={() => setMemoryActionsOpen(open => !open)}
               aria-expanded={memoryActionsOpen} aria-controls="live-memory-actions"
-              className="pressable flex items-center gap-2 rounded-lg border border-white/15 px-3 py-2 text-xs text-white/80 hover:bg-white/10">
+              className="pressable flex min-h-11 items-center gap-1 rounded-lg border border-white/15 px-2 py-2 text-xs text-white/80 hover:bg-white/10 sm:gap-2 sm:px-3">
               Memory <Icon name="chevronDown" className="h-3.5 w-3.5" />
             </button>
             {memoryActionsOpen && <div id="live-memory-actions" aria-label="Memory actions"
@@ -311,18 +313,39 @@ function ControlBar(p: {
   onToggleMic: () => void; onToggleCamera: () => void; onToggleSpeaker: () => void; onToggleSilent: () => void; onToggleCocktail: () => void; onToggleSafety: () => void;
 }) {
   const busy = p.phase === "connecting" || p.phase === "restoring";
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const enabledModes = p.behaviorModes && (p.staySilent || p.cocktailParty || p.safetyOn);
   return (
-    <div className="py-2.5">
+    <div className="py-2.5" onKeyDown={event => {
+      if (event.key === "Escape" && moreOpen) { setMoreOpen(false); moreButton.current?.focus(); }
+    }}>
       {!p.isConnected && <p className="mb-2 px-3 text-center text-xs text-white/60" aria-live="polite">
         Mic {p.micOn ? "on" : "off"} · Camera {p.cameraOn ? "on" : "off"} · {p.speakerOn ? "Spoken replies" : p.audioOnly ? "Speaker muted" : "Text replies"}{p.staySilent ? " · Stay silent" : ""}
       </p>}
+      {moreOpen && <div id="live-more-controls" role="group" aria-label="More live controls" className="mx-3 mb-3 rounded-xl border border-white/10 bg-black/10 p-2">
+        {!p.behaviorModes && <p className="mb-2 px-2 text-xs text-white/50">These modes aren’t available with this model.</p>}
+        <div className="grid grid-cols-3 gap-2">
+          {([
+            { label: "Stay silent", on: p.staySilent, icon: "ear", action: p.onToggleSilent },
+            { label: "Cocktail Party", on: p.cocktailParty, icon: "person2", action: p.onToggleCocktail },
+            { label: "Safety Check", on: p.safetyOn, icon: "warning", action: p.onToggleSafety },
+          ] as const).map(mode => <button key={mode.label} aria-pressed={mode.on} disabled={busy || !p.behaviorModes} onClick={mode.action}
+            className={`pressable flex min-h-14 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-xs disabled:opacity-40 ${mode.on && p.behaviorModes ? "bg-accent/20 text-accent" : "text-white/80 hover:bg-white/10"}`}>
+            <Icon name={mode.icon} className="h-5 w-5" />{mode.label}
+          </button>)}
+        </div>
+      </div>}
       <div className="flex flex-wrap items-center justify-center gap-1 px-1 sm:gap-2">
           <Ctrl disabled={busy} on={p.micOn} onIcon="mic" offIcon="micOff" label="Mic" onClick={p.onToggleMic} />
           <Ctrl disabled={busy || p.audioOnly} on={p.cameraOn} onIcon="video" offIcon="videoOff" label="Camera" onClick={p.onToggleCamera} />
           <Ctrl disabled={busy} on={p.speakerOn} onIcon="speaker" offIcon="speakerOff" label="Spoken replies" onClick={p.onToggleSpeaker} pulse={p.speaking} />
-          <Ctrl disabled={busy || !p.behaviorModes} on={p.staySilent} onIcon="earFill" offIcon="ear" label="Stay silent" onClick={p.onToggleSilent} />
-          <Ctrl disabled={busy || !p.behaviorModes} on={p.cocktailParty} onIcon="person2Fill" offIcon="person2" label="Cocktail Party" onClick={p.onToggleCocktail} />
-          <Ctrl disabled={busy || !p.behaviorModes} on={p.safetyOn} onIcon="warning" offIcon="warning" label="Safety Check" onClick={p.onToggleSafety} danger />
+          <button ref={moreButton} onClick={() => setMoreOpen(value => !value)} aria-label="More" aria-expanded={moreOpen} aria-controls="live-more-controls"
+            title={enabledModes ? "More controls · mode enabled" : "More controls"}
+            className={`pressable relative grid h-11 w-11 place-items-center rounded-full ${moreOpen ? "bg-white text-black" : "bg-white/10 text-white hover:bg-white/15"}`}>
+            <Icon name="more" className="h-5 w-5" />
+            {enabledModes && <span className="absolute right-0 top-0 h-2 w-2 rounded-full bg-accent" />}
+          </button>
       <PrimaryButton phase={p.phase} canStart={p.canStart} resumable={p.resumable} onStart={p.onStart} onStop={p.onStop} />
       </div>
     </div>

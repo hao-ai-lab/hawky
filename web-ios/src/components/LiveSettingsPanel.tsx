@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useSocketStore } from "../lib/socket-store";
 import { useLiveSettings, REALTIME_MODELS, VOICES, TRANSCRIBE_MODELS, SEMANTIC_EAGERNESS, REASONING_EFFORT, TOOL_CHOICE } from "../lib/live-settings";
 import { Section, Row, Select, Slider, Button, Toggle } from "./Form";
+import { HostedPreviewNotice } from "./HostedPreviewNotice";
 
 // Shared by Settings and the Live popup so both edit the same saved options.
 export function LiveSettingsPanel() {
@@ -18,6 +19,7 @@ export function LiveSettingsPanel() {
 
   return (
     <>
+      <HostedPreviewNotice />
       <Section title="Live · Provider" footer="Changing the model opens a new connection in this conversation. Saved memory, recent messages, and backend tasks stay with the conversation.">
         <Row label="Realtime model">{sel("model", REALTIME_MODELS)}</Row>
       </Section>
