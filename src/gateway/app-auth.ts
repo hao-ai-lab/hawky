@@ -20,7 +20,7 @@ interface StoredUser {
   email: string;
   role?: AppAuthRole;
   status?: AppAuthStatus;
-  password: {
+  password?: {
     salt: string;
     hash: string;
     N: number;
@@ -28,6 +28,7 @@ interface StoredUser {
     p: number;
     keyLen: number;
   };
+  googleSub?: string;
   createdAt: string;
   approvedAt?: string;
   approvedBy?: string;
@@ -55,13 +56,11 @@ export interface AppAuthOptions {
   registrationAllowlist?: string[];
   adminEmails?: string[];
   publicRegistration?: boolean;
-  notifyWebhookUrl?: string;
   allowFirstUserRegistration?: boolean;
 }
 
 export interface AppRegistrationResult {
   user: AppAuthUser;
-  approvalRequired: boolean;
 }
 
 export interface AppAuthUserRecord extends AppAuthUser {
@@ -147,7 +146,7 @@ function hashPassword(password: string): StoredUser["password"] {
   return { ...params, salt: salt.toString("base64"), hash: hash.toString("base64") };
 }
 
-function verifyPassword(password: string, stored: StoredUser["password"]): boolean {
+function verifyPassword(password: string, stored: NonNullable<StoredUser["password"]>): boolean {
   const salt = Buffer.from(stored.salt, "base64");
   const expected = Buffer.from(stored.hash, "base64");
   const actual = scryptSync(password, salt, stored.keyLen, {
@@ -183,7 +182,6 @@ export class AppAuth {
   private registrationAllowlist: Set<string>;
   private adminEmails: Set<string>;
   private publicRegistration: boolean;
-  private notifyWebhookUrl: string;
   private allowFirstUserRegistration: boolean;
   private failedLogins = new Map<string, { count: number; lockedUntil: number }>();
 
@@ -194,7 +192,6 @@ export class AppAuth {
       registrationAllowlist: parseEmailList(process.env.HAWKY_REGISTRATION_ALLOWLIST ?? ""),
       adminEmails: parseEmailList(process.env.HAWKY_ADMIN_EMAILS ?? ""),
       publicRegistration: process.env.HAWKY_PUBLIC_REGISTRATION === "1",
-      notifyWebhookUrl: process.env.HAWKY_ADMIN_NOTIFY_WEBHOOK_URL ?? "",
       allowFirstUserRegistration: process.env.HAWKY_ALLOW_FIRST_USER_REGISTRATION === "1",
     });
   }
@@ -207,7 +204,6 @@ export class AppAuth {
     this.registrationAllowlist = new Set((options.registrationAllowlist ?? []).map(normalizeEmail).filter(Boolean));
     this.adminEmails = new Set((options.adminEmails ?? []).map(normalizeEmail).filter(Boolean));
     this.publicRegistration = options.publicRegistration ?? false;
-    this.notifyWebhookUrl = options.notifyWebhookUrl ?? "";
     this.allowFirstUserRegistration = options.allowFirstUserRegistration ?? false;
     this.signingKey = this.loadOrCreateSigningKey();
   }
@@ -221,8 +217,7 @@ export class AppAuth {
   }
 
   canRegister(): boolean {
-    return this.publicRegistration
-      || this.registrationAllowlist.size > 0
+    return this.registrationAllowlist.size > 0
       || Boolean(this.registrationCode)
       || (this.allowFirstUserRegistration && this.getUserCount() === 0);
   }
@@ -242,9 +237,11 @@ export class AppAuth {
     const approvedByEmail = this.registrationAllowlist.has(email);
     const approvedByCode = Boolean(this.registrationCode)
       && constantTimeEqual(registrationCode, this.registrationCode);
-    const adminBootstrap = this.adminEmails.has(email) || (this.adminEmails.size === 0 && firstUserAllowed);
+    // A password registration does not prove ownership of an admin email.
+    // Configured admin addresses can gain the role through verified Google sign-in.
+    const adminBootstrap = this.adminEmails.size === 0 && firstUserAllowed;
     if (!firstUserAllowed) {
-      if (!approvedByEmail && !approvedByCode && !this.publicRegistration && !this.adminEmails.has(email)) {
+      if (!approvedByEmail && !approvedByCode) {
         if (this.registrationCode) {
           throw new Error("Invalid registration code.");
         }
@@ -255,25 +252,21 @@ export class AppAuth {
       throw new Error("That email is already registered.");
     }
 
-    const approved = adminBootstrap || approvedByEmail || approvedByCode;
     const now = new Date().toISOString();
     const user: StoredUser = {
       id: randomBytes(16).toString("hex"),
       email,
       role: adminBootstrap ? "admin" : "user",
-      status: approved ? "approved" : "pending",
+      status: "approved",
       password: hashPassword(password),
       createdAt: now,
-      approvedAt: approved ? now : undefined,
-      approvedBy: approved ? "registration-policy" : undefined,
+      approvedAt: now,
+      approvedBy: "registration-policy",
     };
     store.users.push(user);
     this.saveStore(store);
     log.info("app user registered", { userId: user.id, email, role: user.role, status: user.status });
-    if (!approved) {
-      this.notifyAdminOfRegistration(user);
-    }
-    return { user: this.toPublicUser(user), approvalRequired: !approved };
+    return { user: this.toPublicUser(user) };
   }
 
   login(emailRaw: string, password: string, throttleKey = ""): { user: AppAuthUser; token: string } {
@@ -281,12 +274,9 @@ export class AppAuth {
     const attemptKey = `${email}:${throttleKey}`;
     this.assertLoginAllowed(attemptKey);
     const user = this.loadStore().users.find((candidate) => candidate.email === email);
-    if (!user || !verifyPassword(password, user.password)) {
+    if (!user?.password || !verifyPassword(password, user.password)) {
       this.recordFailedLogin(attemptKey);
       throw new Error("Invalid email or password.");
-    }
-    if (user.status === "pending") {
-      throw new Error("Your registration is pending admin approval.");
     }
     if (user.status === "disabled") {
       throw new Error("This account is disabled.");
@@ -296,6 +286,72 @@ export class AppAuth {
       user: this.toPublicUser(user),
       token: this.createSessionToken(user),
     };
+  }
+
+  loginWithGoogle(identity: { sub: string; email: string; hostedDomain?: string }, linkedUserId: string | null = null): AppRegistrationResult & { token: string } {
+    const email = normalizeEmail(identity.email);
+    if (!identity.sub || !email || !email.includes("@")) throw new Error("Google identity is incomplete.");
+    const emailDomain = email.split("@").at(-1)!;
+    const googleOwnsEmail = emailDomain === "gmail.com" || emailDomain === "googlemail.com"
+      || identity.hostedDomain?.toLowerCase() === emailDomain;
+    const store = this.loadStore();
+    if (linkedUserId) {
+      const linkingUser = store.users.find((candidate) => candidate.id === linkedUserId);
+      if (!linkingUser || linkingUser.email !== email) {
+        throw new Error("Google email must match your signed-in Hawky account.");
+      }
+      if (linkingUser.googleSub && linkingUser.googleSub !== identity.sub) {
+        throw new Error("This Hawky account is already linked to another Google account.");
+      }
+    }
+    let user = store.users.find((candidate) => candidate.googleSub === identity.sub);
+    if (user && user.email !== email) {
+      throw new Error("Google account email changed. Contact an admin to update this account.");
+    }
+    if (!user) {
+      user = store.users.find((candidate) => candidate.email === email);
+      if (user) {
+        if (user.googleSub && user.googleSub !== identity.sub) {
+          throw new Error("This email is already linked to another Google account.");
+        }
+        if (user.password && linkedUserId !== user.id) {
+          throw new Error("This email already has a Hawky account. Sign in with your password first, then connect Google.");
+        }
+        if (linkedUserId !== user.id && !googleOwnsEmail) {
+          throw new Error("This email already has a Hawky account. Sign in with your password first, then connect Google.");
+        }
+        user.googleSub = identity.sub;
+        if (googleOwnsEmail && this.adminEmails.has(email)) user.role = "admin";
+        this.saveStore(store);
+      } else {
+        if (!googleOwnsEmail) {
+          throw new Error("Google cannot verify this email domain for a new Hawky account. Use a Gmail or Google Workspace account.");
+        }
+        const firstUserAllowed = Boolean(googleOwnsEmail) && this.allowFirstUserRegistration && store.users.length === 0;
+        const allowlisted = Boolean(googleOwnsEmail) && this.registrationAllowlist.has(email);
+        const adminBootstrap = Boolean(googleOwnsEmail) && (this.adminEmails.has(email) || (this.adminEmails.size === 0 && firstUserAllowed));
+        if (!this.publicRegistration && !firstUserAllowed && !allowlisted && !adminBootstrap) {
+          throw new Error("Registration is closed.");
+        }
+        const now = new Date().toISOString();
+        user = {
+          id: randomBytes(16).toString("hex"),
+          email,
+          googleSub: identity.sub,
+          role: adminBootstrap ? "admin" : "user",
+          status: "approved",
+          createdAt: now,
+          approvedAt: now,
+          approvedBy: "registration-policy",
+        };
+        store.users.push(user);
+        this.saveStore(store);
+        log.info("Google app user registered", { userId: user.id, email, role: user.role, status: user.status });
+      }
+    }
+    const publicUser = this.toPublicUser(user);
+    if (user.status === "disabled") throw new Error("This account is disabled.");
+    return { user: publicUser, token: this.createSessionToken(user) };
   }
 
   userFromRequest(req: Request): AppAuthUser | null {
@@ -371,7 +427,7 @@ export class AppAuth {
     return domain ? [expiredSessionCookie(), expiredSessionCookie(domain)] : [expiredSessionCookie()];
   }
 
-  loginPage(returnUrl: string, error = "", message = ""): string {
+  loginPage(returnUrl: string, error = "", googleEnabled = Boolean(process.env.HAWKY_GOOGLE_CLIENT_ID && process.env.HAWKY_GOOGLE_CLIENT_SECRET)): string {
     const safeReturn = sanitizeReturnUrl(returnUrl);
     const allowRegister = this.canRegister();
     return `<!doctype html>
@@ -391,15 +447,13 @@ export class AppAuth {
     input { height: 44px; border: 1px solid #30352f; border-radius: 8px; padding: 0 12px; background: #171b18; color: #fff; font: inherit; }
     button, .button { height: 44px; border: 0; border-radius: 8px; background: #f5f3ee; color: #101310; font-weight: 650; cursor: pointer; display: grid; place-items: center; text-decoration: none; font: inherit; }
     button.secondary, .button.secondary { background: #252a26; color: #f5f3ee; border: 1px solid #3a403a; }
+    .button.google { display: flex; align-items: center; justify-content: center; gap: 10px; }
+    .google svg { width: 18px; height: 18px; flex: none; }
     .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
     .actions button:only-child { grid-column: 1 / -1; }
     .muted { color: #888d86; font-size: 12px; margin-top: 14px; }
     .error { padding: 10px 12px; border: 1px solid #6f2e2e; border-radius: 8px; background: #301919; color: #ffd8d8; margin-bottom: 14px; }
     .notice { padding: 10px 12px; border: 1px solid #335d3d; border-radius: 8px; background: #172619; color: #d9f7df; margin-bottom: 14px; }
-    .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .58); }
-    .modal { width: min(390px, 100%); border: 1px solid #335d3d; border-radius: 14px; background: #151a16; padding: 22px; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
-    .modal h2 { margin: 0 0 8px; font-size: 20px; }
-    .modal p { margin-bottom: 18px; }
   </style>
 </head>
 <body>
@@ -417,36 +471,28 @@ export class AppAuth {
         ${allowRegister ? `<button type="submit" class="secondary" formaction="/auth/register">Sign up</button>` : ""}
       </div>
     </form>
-    ${message ? `<div class="modal-backdrop" role="presentation">
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="approval-title">
-        <h2 id="approval-title">Sign-up received</h2>
-        <p>${escapeHtml(message)}</p>
-        <a class="button" href="/auth/login?return_url=${encodeURIComponent(safeReturn)}">OK</a>
-      </div>
-    </div>` : ""}
+    ${googleEnabled ? `<a class="button secondary google" style="margin-top: 12px" href="/auth/google/start?return_url=${encodeURIComponent(safeReturn)}"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="#4285F4" d="M21.35 12.22c0-.7-.06-1.37-.17-2.02H12v3.83h5.25a4.49 4.49 0 0 1-1.95 2.94v2.45h3.16c1.85-1.71 2.89-4.23 2.89-7.2Z"/><path fill="#34A853" d="M12 21.75c2.64 0 4.86-.88 6.48-2.33l-3.16-2.45c-.88.59-2.01.94-3.32.94a5.99 5.99 0 0 1-5.63-4.15H3.11v2.53A9.75 9.75 0 0 0 12 21.75Z"/><path fill="#FBBC05" d="M6.37 13.76a5.86 5.86 0 0 1 0-3.52V7.71H3.11a9.75 9.75 0 0 0 0 8.58l3.26-2.53Z"/><path fill="#EA4335" d="M12 6.09c1.44 0 2.72.5 3.73 1.45l2.79-2.79A9.34 9.34 0 0 0 12 2.25a9.75 9.75 0 0 0-8.89 5.46l3.26 2.53A5.99 5.99 0 0 1 12 6.09Z"/></svg><span>Continue with Google</span></a>` : ""}
   </main>
 </body>
 </html>`;
   }
 
-  registerPage(returnUrl: string, message = "", error = ""): string {
+  registerPage(returnUrl: string, error = ""): string {
     const safeReturn = sanitizeReturnUrl(returnUrl);
     if (!this.canRegister()) {
       return this.loginPage(safeReturn, "Registration is closed.");
     }
-    return this.loginPage(safeReturn, error, message);
+    return this.loginPage(safeReturn, error);
   }
 
   adminPage(admin: AppAuthUser, message = "", error = ""): string {
     const users = this.listUsers(admin);
-    const pending = users.filter((user) => user.status === "pending").length;
     const approved = users.filter((user) => user.status === "approved").length;
     return this.shellPage("Admin", `
-      <p>Review access requests, manage roles, and disable accounts.</p>
+      <p>Manage user roles and account access.</p>
       ${message ? `<div class="notice">${escapeHtml(message)}</div>` : ""}
       ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
       <div class="stats">
-        <div><strong>${pending}</strong><span>pending</span></div>
         <div><strong>${approved}</strong><span>approved</span></div>
         <div><strong>${users.length}</strong><span>total</span></div>
       </div>
@@ -460,10 +506,10 @@ export class AppAuth {
               <td><span class="badge ${escapeHtml(user.status)}">${escapeHtml(user.status)}</span></td>
               <td>${escapeHtml(user.createdAt.slice(0, 10))}</td>
               <td>
-                ${user.status !== "approved" ? `
+                ${user.status === "disabled" ? `
                   <form method="post" action="/admin/users/${encodeURIComponent(user.id)}/approve" class="inline">
                     <select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
-                    <button type="submit">Approve</button>
+                    <button type="submit">Enable</button>
                   </form>
                 ` : ""}
                 ${user.status !== "disabled" && user.id !== admin.id ? `
@@ -498,12 +544,14 @@ export class AppAuth {
     let changed = false;
     store.users = store.users.map((user, index) => {
       if (!user.status) { user.status = "approved"; changed = true; }
-      const desiredRole = this.resolveInitialRole(user.email, user.role ?? (index === 0 ? "admin" : "user"));
-      if (user.role !== desiredRole) { user.role = desiredRole; changed = true; }
-      if (this.adminEmails.has(user.email) && user.status !== "approved") {
+      if (!user.role) { user.role = index === 0 ? "admin" : "user"; changed = true; }
+      if (user.status === "pending") {
+        // Older registrations waited for manual approval. Let them sign in now,
+        // without allowing an unverified password account to claim admin status.
+        if (user.role === "admin" && !user.googleSub) user.role = "user";
         user.status = "approved";
         user.approvedAt = user.approvedAt ?? new Date().toISOString();
-        user.approvedBy = user.approvedBy ?? "admin-email-policy";
+        user.approvedBy = user.approvedBy ?? "approval-policy-removed";
         changed = true;
       }
       return user;
@@ -590,27 +638,6 @@ export class AppAuth {
     if (!this.isAdmin(user)) throw new Error("Admin access required.");
   }
 
-  private resolveInitialRole(email: string, requestedRole: AppAuthRole): AppAuthRole {
-    if (this.adminEmails.has(normalizeEmail(email))) return "admin";
-    return requestedRole;
-  }
-
-  private notifyAdminOfRegistration(user: StoredUser): void {
-    log.warn("app registration pending admin approval", { userId: user.id, email: user.email });
-    if (!this.notifyWebhookUrl) return;
-    const body = JSON.stringify({
-      text: `New Hawky registration pending approval: ${user.email}`,
-      user: { id: user.id, email: user.email, status: user.status, role: user.role },
-    });
-    void fetch(this.notifyWebhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-    }).catch((err) => {
-      log.warn("admin registration webhook failed", { error: err instanceof Error ? err.message : String(err) });
-    });
-  }
-
   private shellPage(title: string, content: string, wide = false): string {
     return `<!doctype html>
 <html lang="en">
@@ -660,7 +687,7 @@ export class AppAuth {
 }
 
 export function sanitizeReturnUrl(raw: string | null | undefined): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || /[\\\u0000-\u001f\u007f]/.test(raw)) return "/";
   return raw;
 }
 

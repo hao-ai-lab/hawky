@@ -173,6 +173,12 @@ a:focus-visible,button:focus-visible,
 .hero__tagline .hl{color:var(--accent)}
 .hero__sub{color:var(--muted);margin-top:20px;max-width:46ch}
 .hero__ctas{display:flex;flex-wrap:wrap;gap:14px;margin-top:30px}
+.hero__qr-codes{display:flex;flex-wrap:wrap;gap:14px;margin-top:24px}
+.hero__qr{display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px;border:1px solid var(--line-2);border-radius:14px;text-decoration:none;color:var(--text)}
+.hero__qr:hover{border-color:var(--accent)}
+.hero__qr:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.hero__qr img{display:block;width:116px;height:116px;padding:8px;background:#fff;border-radius:4px;image-rendering:pixelated}
+.hero__qr strong{font-size:15px;font-weight:600;line-height:1.4}
 .hero__chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:30px}
 .chip{
   display:inline-flex;align-items:center;gap:8px;

@@ -22,6 +22,7 @@ import { createMethodRegistry } from "./methods.js";
 import { NodeRegistry } from "./node-registry.js";
 import { DeviceAuth, callbackRedirectHtml, manualTokenHtml, webAuthRedirectHtml, type DeviceTokenPayload } from "./device-auth.js";
 import { AppAuth, sanitizeReturnUrl, type AppAuthUser } from "./app-auth.js";
+import { GoogleOAuth } from "./google-oauth.js";
 import {
   LiveRealtimeBrokerError,
   mintOpenAIRealtimeClientSecret,
@@ -120,6 +121,7 @@ export class GatewayServer {
   private webDistDir: string | null = null;
   private pushService: PushService | null = null;
   private appAuth: AppAuth | null = null;
+  private googleOAuth: GoogleOAuth | null = null;
   private _subscriptions = createSubscriptionRegistry();
   private _getSessionKeys: (() => string[]) | null = null;
   private _nodeRegistry = new NodeRegistry();
@@ -133,6 +135,7 @@ export class GatewayServer {
     // Resolve web frontend dist directory (if built)
     this.webDistDir = resolveWebDistDir();
     this.appAuth = AppAuth.fromEnv();
+    if (this.appAuth) this.googleOAuth = GoogleOAuth.fromEnv();
   }
 
   // ---------------------------------------------------------------------------
@@ -213,6 +216,12 @@ export class GatewayServer {
         // issuing device tokens. Cloudflare Access can still sit in front.
         if (self.appAuth && url.pathname === "/auth/login") {
           return self.handleAppLogin(req, url);
+        }
+        if (self.appAuth && url.pathname === "/auth/google/start") {
+          return self.handleGoogleStart(req, url);
+        }
+        if (self.appAuth && url.pathname === "/auth/google/callback") {
+          return self.handleGoogleCallback(req, url);
         }
         if (self.appAuth && url.pathname === "/auth/register") {
           return self.handleAppRegister(req, url);
@@ -626,6 +635,35 @@ export class GatewayServer {
     }
   }
 
+  private handleGoogleStart(req: Request, url: URL): Response {
+    if (!this.appAuth || !this.googleOAuth) return new Response("Google sign-in is unavailable.", { status: 503 });
+    if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
+    const currentUser = this.appAuth.userFromRequest(req);
+    const flow = this.googleOAuth.start(url.searchParams.get("return_url") ?? "/", currentUser?.id ?? null);
+    return redirect(flow.url, [["Set-Cookie", flow.cookie]]);
+  }
+
+  private async handleGoogleCallback(req: Request, url: URL): Promise<Response> {
+    if (!this.appAuth || !this.googleOAuth) return new Response("Google sign-in is unavailable.", { status: 503 });
+    if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
+    const clearCookie: [string, string] = ["Set-Cookie", this.googleOAuth.clearCookie()];
+    try {
+      const flow = await this.googleOAuth.finish(req, url);
+      const currentUser = this.appAuth.userFromRequest(req);
+      if (flow.linkedUserId && currentUser?.id !== flow.linkedUserId) {
+        throw new Error("Your Hawky session changed during Google sign-in. Please try again.");
+      }
+      const result = this.appAuth.loginWithGoogle(flow.identity, flow.linkedUserId);
+      return redirect(this.postLoginRedirect(req, result.user, flow.returnUrl), [clearCookie, ["Set-Cookie", this.appAuth.createSessionCookie(result.token)]]);
+    } catch (err) {
+      const error = err instanceof Error ? err.message : "Google sign-in failed.";
+      return new Response(this.appAuth.loginPage("/", error), {
+        status: 401,
+        headers: { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": clearCookie[1] },
+      });
+    }
+  }
+
   private async handleAppRegister(req: Request, _url: URL): Promise<Response> {
     if (!this.appAuth) return new Response("Not found", { status: 404 });
     const url = new URL(req.url);
@@ -640,15 +678,10 @@ export class GatewayServer {
     const returnUrl = sanitizeReturnUrl(body.return_url ?? "/");
     try {
       const result = this.appAuth.register(body.email ?? "", body.password ?? "", body.registration_code ?? "");
-      if (result.approvalRequired) {
-        return new Response(this.appAuth.loginPage(returnUrl, "", "Sign-up received. An admin will review it before you can sign in."), {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
-      }
       const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
       return redirect(result.user.role === "admin" ? "/admin" : this.postLoginRedirect(req, result.user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
-      return new Response(this.appAuth.registerPage(returnUrl, "", err instanceof Error ? err.message : "Registration failed."), {
+      return new Response(this.appAuth.registerPage(returnUrl, err instanceof Error ? err.message : "Registration failed."), {
         status: 400,
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
@@ -744,6 +777,7 @@ export class GatewayServer {
     if (url.pathname === "/health" || url.pathname === "/healthz") return null;
     if (url.pathname === "/ready" || url.pathname === "/readyz") return null;
     if (url.pathname === "/auth/login") return null;
+    if (url.pathname.startsWith("/auth/google/")) return null;
     if (url.pathname === "/auth/register") return null;
     if (url.pathname === "/auth/logout") return null;
     if (url.pathname === "/auth/me") return null;
