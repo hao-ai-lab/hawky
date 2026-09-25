@@ -1,3 +1,4 @@
+import { useLiveSettings } from "./lib/live-settings";
 import { useEffect, useState } from "react";
 import { useNav } from "./lib/nav";
 import { useSocketStore } from "./lib/socket-store";
@@ -11,6 +12,16 @@ import { MemoryScreen } from "./screens/MemoryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 
 export function App() {
+  useEffect(() => {
+    fetch("/api/workspace-defaults").then(r => r.ok ? r.json() : null).then(defaults => {
+      if (!defaults?.userId || defaults.backendRuntime !== "codex") return;
+      const key = "hawky-runtime-initialized-" + defaults.userId;
+      if (!localStorage.getItem(key)) {
+        useLiveSettings.getState().set("backendRuntime", "codex");
+        localStorage.setItem(key, "1");
+      }
+    }).catch(() => {});
+  }, []);
   const route = useNav((s) => s.route);
   const status = useSocketStore((s) => s.status);
   // Live hides the mobile bar when it goes full-screen video.

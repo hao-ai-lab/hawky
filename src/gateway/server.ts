@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+import { WorkspaceSetup, workspaceSetupPage } from "./workspace-setup.js";
 // =============================================================================
 // Gateway Server
 //
@@ -30,7 +32,7 @@ import {
 } from "./live-realtime-broker.js";
 import { handleProviderGatewayRequest, isProviderGatewayPath } from "./provider-gateway.js";
 import { provisionWorkspaceForUser } from "./workspace-provisioner.js";
-import { isAdminHost, isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
+import { findWorkspaceForUser, isAdminHost, isControlHost, workspaceLocalTargetForUser } from "./workspace-registry.js";
 import { isLoopbackHost } from "./loopback.js";
 
 const log = createSubsystemLogger("gateway/server");
@@ -122,6 +124,8 @@ export class GatewayServer {
   private pushService: PushService | null = null;
   private appAuth: AppAuth | null = null;
   private googleOAuth: GoogleOAuth | null = null;
+  private workspaceSetup: WorkspaceSetup | null = null;
+  private workspaceProxyToken = process.env.HAWKY_WORKSPACE_PROXY_TOKEN || "";
   private _subscriptions = createSubscriptionRegistry();
   private _getSessionKeys: (() => string[]) | null = null;
   private _nodeRegistry = new NodeRegistry();
@@ -136,6 +140,7 @@ export class GatewayServer {
     this.webDistDir = resolveWebDistDir();
     this.appAuth = AppAuth.fromEnv();
     if (this.appAuth) this.googleOAuth = GoogleOAuth.fromEnv();
+    if (this.appAuth && process.env.HAWKY_AUTO_PROVISION === "1") this.workspaceSetup = new WorkspaceSetup(id => this.appAuth?.getUserById(id));
   }
 
   // ---------------------------------------------------------------------------
@@ -158,6 +163,24 @@ export class GatewayServer {
 
       // HTTP handler — health endpoints + static files
       fetch(req, server) {
+        if (self.workspaceProxyToken) {
+          const supplied = Buffer.from(req.headers.get("X-Hawky-Workspace-Token") || "");
+          const expected = Buffer.from(self.workspaceProxyToken);
+          if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return new Response("Unauthorized workspace access", { status: 401 });
+        }
+        const requestUrl = new URL(req.url);
+        const isWorkspaceRequest = req.headers.get("upgrade")?.toLowerCase() === "websocket" || requestUrl.pathname === "/auth/device" || !requestUrl.pathname.startsWith("/auth/") && !requestUrl.pathname.startsWith("/admin") && !["/health", "/healthz", "/ready", "/readyz"].includes(requestUrl.pathname) && !isProviderGatewayPath(requestUrl.pathname);
+        if (self.workspaceSetup && isWorkspaceRequest) {
+          const user = self.appAuth?.userFromRequest(req);
+          if (!user && req.headers.get("upgrade")?.toLowerCase() === "websocket") return new Response("Login required", { status: 401 });
+          if (user && self.workspaceSetup.ensure(user).status !== "ready") {
+            if (req.headers.get("upgrade")?.toLowerCase() === "websocket") return new Response("Workspace setup is not ready", { status: 503 });
+            return redirect("/auth/workspace?return_url=" + encodeURIComponent(sanitizeReturnUrl(requestUrl.pathname + requestUrl.search)));
+          }
+        }
+        if (self.workspaceSetup && isWorkspaceRequest && self.appAuth?.userFromRequest(req) && !self.workspaceProxyTarget(req, requestUrl)) {
+          return new Response("Use the application host to open your workspace", { status: 403 });
+        }
         // WebSocket upgrade — check FIRST, before any URL parsing.
         if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
           const proxyTarget = self.workspaceProxyTarget(req, new URL(req.url));
@@ -167,6 +190,8 @@ export class GatewayServer {
               data: {
                 connId: "",
                 proxyTarget: `ws://${proxyTarget}${url.pathname}${url.search}`,
+                proxyToken: self.proxyCredential(req),
+                proxyAuthCookie: req.headers.get("Cookie") || "",
               } as WSData,
             });
             return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
@@ -188,6 +213,9 @@ export class GatewayServer {
           return handleProviderGatewayRequest(req, url);
         }
 
+        if (url.pathname === "/api/workspace-defaults" && self.workspaceProxyToken) {
+          return Response.json({ userId: process.env.HAWKY_WORKSPACE_USER_ID, backendRuntime: process.env.HAWKY_DEFAULT_BACKEND_RUNTIME || "codex" }, { headers: { "Cache-Control": "no-store" } });
+        }
         // Health endpoints — always unauthenticated (needed for probes/monitoring)
         if (url.pathname === "/health" || url.pathname === "/healthz") {
           if (self.appAuth && !self.isAuthorizedHealthRequest(req)) {
@@ -212,6 +240,17 @@ export class GatewayServer {
           });
         }
 
+        if (self.workspaceSetup && url.pathname.startsWith("/auth/workspace")) {
+          const user = self.appAuth?.userFromRequest(req);
+          if (!user) return new Response("Login required", { status: 401 });
+          if (url.pathname === "/auth/workspace/status") {
+            if (!["GET", "POST"].includes(req.method)) return new Response("Method not allowed", { status: 405 });
+            if (req.method === "POST" && req.headers.get("Origin") && new URL(req.headers.get("Origin")!).host !== (req.headers.get("Host") || url.host)) return new Response("Forbidden", { status: 403 });
+            return Response.json(self.workspaceSetup.ensure(user, req.method === "POST"), { headers: { "Cache-Control": "no-store" } });
+          }
+          self.workspaceSetup.ensure(user);
+          return new Response(workspaceSetupPage(), { headers: { "Content-Type": "text/html", "Cache-Control": "no-store" } });
+        }
         // App auth endpoints — optional email/password login wall before
         // issuing device tokens. Cloudflare Access can still sit in front.
         if (self.appAuth && url.pathname === "/auth/login") {
@@ -298,7 +337,10 @@ export class GatewayServer {
         open(ws) {
           if (ws.data?.proxyTarget) {
             const pending: Array<string | Buffer> = [];
-            const upstream = new WebSocket(ws.data.proxyTarget);
+            const upstream = new WebSocket(ws.data.proxyTarget, { headers: ws.data.proxyToken ? { "X-Hawky-Workspace-Token": ws.data.proxyToken } : {} });
+            if (self.appAuth && ws.data.proxyAuthCookie) ws.data.proxyAuthTimer = setInterval(() => {
+              if (!self.appAuth?.userFromRequest(new Request("http://localhost", { headers: { Cookie: ws.data.proxyAuthCookie! } }))) ws.close(1008, "Session expired");
+            }, 5000);
             ws.data.proxyUpstream = upstream;
             ws.data.proxyPending = pending;
             upstream.addEventListener("open", () => {
@@ -308,7 +350,7 @@ export class GatewayServer {
               ws.send(event.data);
             });
             upstream.addEventListener("close", (event) => {
-              ws.close(event.code || 1000, event.reason || "");
+              ws.close(proxyCloseCode(event.code), event.reason || "");
             });
             upstream.addEventListener("error", () => {
               ws.close(1011, "upstream websocket error");
@@ -343,10 +385,11 @@ export class GatewayServer {
         },
 
         close(ws, code, reason) {
+          if (ws.data?.proxyAuthTimer) clearInterval(ws.data.proxyAuthTimer);
           const upstream = ws.data?.proxyUpstream;
           if (upstream) {
             if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
-              upstream.close(code || 1000, reason || "");
+              upstream.close(proxyCloseCode(code), reason || "");
             }
             return;
           }
@@ -679,7 +722,7 @@ export class GatewayServer {
     try {
       const result = this.appAuth.register(body.email ?? "", body.password ?? "", body.registration_code ?? "");
       const { token } = this.appAuth.login(body.email ?? "", body.password ?? "", loginThrottleKey(req));
-      return redirect(result.user.role === "admin" ? "/admin" : this.postLoginRedirect(req, result.user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
+      return redirect(this.postLoginRedirect(req, result.user, returnUrl), [["Set-Cookie", this.appAuth.createSessionCookie(token)]]);
     } catch (err) {
       return new Response(this.appAuth.registerPage(returnUrl, err instanceof Error ? err.message : "Registration failed."), {
         status: 400,
@@ -709,6 +752,7 @@ export class GatewayServer {
   }
 
   private postLoginRedirect(req: Request, user: AppAuthUser, returnUrl: string): string {
+    if (this.workspaceSetup && this.workspaceSetup.ensure(user).status !== "ready") return "/auth/workspace?return_url=" + encodeURIComponent(returnUrl);
     if (isAdminHost(req.headers.get("Host") ?? "") && returnUrl === "/") return "/admin";
     if (user.role === "admin" && returnUrl === "/") return "/admin";
     return returnUrl;
@@ -746,6 +790,10 @@ export class GatewayServer {
         const body = await readFormOrJson(req);
         const role = body.role === "admin" ? "admin" : "user";
         const approved = this.appAuth.approveUser(admin, userId, role);
+        if (this.workspaceSetup) {
+          this.workspaceSetup.ensure(approved, true);
+          return redirect("/admin?message=Workspace%20setup%20started");
+        }
         const provision = await provisionWorkspaceForUser({ user: approved, role, admin });
         const message = provision.ok
           ? provision.skipped
@@ -755,6 +803,8 @@ export class GatewayServer {
         return redirect(`/admin?message=${encodeURIComponent(message)}`);
       }
       this.appAuth.disableUser(admin, userId);
+      const disabled = this.appAuth.getUserById(userId);
+      if (disabled && this.workspaceSetup) await this.workspaceSetup.disable(disabled);
       return redirect("/admin?message=User%20disabled");
     } catch (err) {
       const error = encodeURIComponent(err instanceof Error ? err.message : "Admin action failed.");
@@ -776,6 +826,7 @@ export class GatewayServer {
     if (isAdminHost(req.headers.get("Host") ?? "")) return null;
     if (url.pathname === "/health" || url.pathname === "/healthz") return null;
     if (url.pathname === "/ready" || url.pathname === "/readyz") return null;
+    if (url.pathname.startsWith("/auth/workspace")) return null;
     if (url.pathname === "/auth/login") return null;
     if (url.pathname.startsWith("/auth/google/")) return null;
     if (url.pathname === "/auth/register") return null;
@@ -788,13 +839,22 @@ export class GatewayServer {
     return workspaceLocalTargetForUser(user);
   }
 
+  private proxyCredential(req: Request): string | undefined {
+    const user = this.appAuth?.userFromRequest(req);
+    return user ? findWorkspaceForUser(user)?.proxyToken : undefined;
+  }
+
   private proxyWorkspaceRequest(req: Request, url: URL): Promise<Response> | null {
     const target = this.workspaceProxyTarget(req, url);
     if (!target) return null;
     const upstreamUrl = `http://${target}${url.pathname}${url.search}`;
+    const headers = proxyHeaders(req.headers);
+    headers.delete("X-Hawky-Workspace-Token");
+    const credential = this.proxyCredential(req);
+    if (credential) { headers.set("X-Hawky-Workspace-Token", credential); headers.delete("cookie"); }
     return fetch(upstreamUrl, {
       method: req.method,
-      headers: proxyHeaders(req.headers),
+      headers,
       body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
       signal: req.signal,
     }).then((upstream) => new Response(upstream.body, {
@@ -1048,4 +1108,9 @@ export function resetGatewayState(): void {
   resetCommandQueue();
   resetBroadcast();
   resetConnectionCounter();
+}
+
+/** Reserved transport codes (notably 1006) cannot be sent in a close frame. */
+export function proxyCloseCode(code: number): number {
+  return (code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code <= 4999) ? code : 1011;
 }

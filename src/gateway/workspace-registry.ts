@@ -9,6 +9,8 @@ export interface WorkspaceRegistryUser {
   port?: number;
   linuxUser?: string;
   userId?: string;
+  ready?: boolean;
+  proxyToken?: string;
 }
 
 interface WorkspaceRegistryFile {
@@ -22,7 +24,7 @@ export function findWorkspaceForUser(user: AppAuthUser): WorkspaceRegistryUser |
     const registry = JSON.parse(readFileSync(registryPath, "utf8")) as WorkspaceRegistryFile;
     const users = Array.isArray(registry.users) ? registry.users : [];
     const email = user.email.toLowerCase();
-    return users.find((entry) => String(entry.email || "").toLowerCase() === email) ?? null;
+    return users.find((entry) => entry.userId ? entry.userId === user.id : String(entry.email || "").toLowerCase() === email) ?? null;
   } catch {
     return null;
   }
@@ -30,6 +32,7 @@ export function findWorkspaceForUser(user: AppAuthUser): WorkspaceRegistryUser |
 
 export function workspaceLocalTargetForUser(user: AppAuthUser): string | null {
   const workspace = findWorkspaceForUser(user);
+  if (workspace?.ready === false) return null;
   const port = Number(workspace?.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   return `127.0.0.1:${port}`;

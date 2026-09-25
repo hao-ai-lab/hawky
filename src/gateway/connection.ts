@@ -22,6 +22,9 @@ const log = createSubsystemLogger("gateway/conn");
 export interface WSData {
   connId: string;
   proxyTarget?: string;
+  proxyToken?: string;
+  proxyAuthCookie?: string;
+  proxyAuthTimer?: ReturnType<typeof setInterval>;
   proxyUpstream?: WebSocket;
   proxyPending?: Array<string | Buffer>;
 }

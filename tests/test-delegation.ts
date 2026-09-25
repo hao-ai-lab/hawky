@@ -268,3 +268,16 @@ test("explicit status checks are durable task activity; recovery polling stays q
   expect(listed.tasks[0].events.at(-1).data.callId).toBe("call-list-1");
   expect(() => g.call("delegation.get", { ...request, ownerSession: "other", statusCheck: "bad" })).toThrow("not found");
 });
+
+test("explicit Linux-user policy preserves read-only intent without claiming sandbox enforcement", async () => {
+ const previous = process.env.HAWKY_CODEX_EXECUTION_POLICY;
+ process.env.HAWKY_CODEX_EXECUTION_POLICY = "linux-user";
+ try {
+  const g = gateway(async (_conn,task,observer) => {
+   expect(task.readOnly).toBe(false); expect(observer.readOnly).toBe(false);
+   expect(task.brief).toContain("do not modify files"); return {reply:"inspected"};
+  });
+  const task = await g.call("delegation.run", {...request,runtime:"codex",execution:"read_only"});
+  expect(task.events.some((e:any)=>e.type === "execution.policy")).toBe(true);
+ } finally { if(previous===undefined)delete process.env.HAWKY_CODEX_EXECUTION_POLICY;else process.env.HAWKY_CODEX_EXECUTION_POLICY=previous; }
+});

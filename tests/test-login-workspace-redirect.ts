@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AppAuth } from "../src/gateway/app-auth.js";
-import { GatewayServer, resetGatewayState } from "../src/gateway/server.js";
+import { GatewayServer, resetGatewayState, proxyCloseCode } from "../src/gateway/server.js";
 import { resetConfig, resetConfigDir, setConfigDir } from "../src/storage/config.js";
 
 const CONTROL_HOST = "app.hawky.live";
@@ -28,6 +28,7 @@ describe("login workspace routing", () => {
   let port: number;
   let workspacePort: number;
   let configDir: string;
+  let receivedWorkspaceHeaders: Headers;
 
   beforeEach(() => {
     configDir = mkdtempSync(join(tmpdir(), "hawky-login-redirect-"));
@@ -48,7 +49,9 @@ describe("login workspace routing", () => {
     workspaceServer = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(req) {
+      fetch(req, socketServer) {
+        if (req.headers.get("upgrade") === "websocket") return socketServer.upgrade(req) ? undefined : new Response("failed", {status:400});
+        receivedWorkspaceHeaders = new Headers(req.headers);
         const url = new URL(req.url);
         return new Response(`workspace:${url.pathname}${url.search}`, {
           headers: {
@@ -57,6 +60,7 @@ describe("login workspace routing", () => {
           },
         });
       },
+      websocket: { message(ws, message) { ws.send(message); } },
     });
     workspacePort = workspaceServer.port;
 
@@ -89,6 +93,8 @@ describe("login workspace routing", () => {
     resetConfigDir();
     resetConfig();
     rmSync(configDir, { recursive: true, force: true });
+    delete process.env.HAWKY_AUTO_PROVISION;
+    delete process.env.HAWKY_WORKSPACE_PROVISION_COMMAND;
     delete process.env.HAWKY_APP_AUTH;
     delete process.env.HAWKY_GOOGLE_CLIENT_ID;
     delete process.env.HAWKY_GOOGLE_CLIENT_SECRET;
@@ -97,6 +103,58 @@ describe("login workspace routing", () => {
     delete process.env.HAWKY_WORKSPACE_REGISTRY_FILE;
     delete process.env.HAWKY_CONTROL_HOSTNAMES;
     delete process.env.HAWKY_ADMIN_HOSTNAMES;
+  });
+
+  test("automatic setup blocks device tokens and workspace access until ready", async () => {
+    await server.stop(1000);
+    process.env.HAWKY_AUTO_PROVISION = "1";
+    process.env.HAWKY_WORKSPACE_PROVISION_COMMAND = "";
+    server = new GatewayServer(); server.start(port);
+    const login = await fetch(`http://localhost:${port}/auth/login`, {method:"POST",redirect:"manual",headers:{Host:CONTROL_HOST},body:formBody("juc049@ucsd.edu")});
+    expect(login.headers.get("location")).toStartWith("/auth/workspace");
+    for (const path of ["/ws", "/auth/login", "/health", "/admin"]) {
+      const upgrade = await fetch(`http://localhost:${port}${path}`, {headers:{Host:CONTROL_HOST,Upgrade:"websocket"}});
+      expect(upgrade.status).toBe(401);
+    }
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    for (const path of ["/", "/auth/device", "/api/workspace-defaults"]) {
+      const response = await fetch(`http://localhost:${port}${path}`, {redirect:"manual",headers:{Host:CONTROL_HOST,Cookie:cookie}});
+      expect(response.status).toBe(303); expect(response.headers.get("location")).toStartWith("/auth/workspace");
+    }
+    const status = await fetch(`http://localhost:${port}/auth/workspace/status`, {headers:{Host:CONTROL_HOST,Cookie:cookie}});
+    expect((await status.json()).status).toBe("failed");
+  });
+
+  test("proxy injects the mapped credential and strips browser cookies", async () => {
+    writeFileSync(join(configDir,"workspaces.json"), JSON.stringify({users:[{slug:"juc049",email:"juc049@ucsd.edu",port:workspacePort,ready:true,proxyToken:"private-workspace-secret"}]}));
+    const login = await fetch(`http://localhost:${port}/auth/login`,{method:"POST",redirect:"manual",headers:{Host:CONTROL_HOST},body:formBody("juc049@ucsd.edu")});
+    const cookie=login.headers.get("set-cookie")!.split(";")[0];
+    const res=await fetch(`http://localhost:${port}/api/test`,{headers:{Host:CONTROL_HOST,Cookie:cookie,"X-Hawky-Workspace-Token":"attacker-selected"}});
+    expect(res.status).toBe(200);expect(receivedWorkspaceHeaders.get("X-Hawky-Workspace-Token")).toBe("private-workspace-secret");expect(receivedWorkspaceHeaders.has("Cookie")).toBe(false);
+  });
+
+  test("proxied websocket retains session authentication after the HTTP request ends", async () => {
+    const login=await fetch(`http://localhost:${port}/auth/login`,{method:"POST",redirect:"manual",headers:{Host:CONTROL_HOST},body:formBody("juc049@ucsd.edu")});
+    const cookie=login.headers.get("set-cookie")!.split(";")[0];
+    const ws=new WebSocket(`ws://localhost:${port}/ws`,{headers:{Host:CONTROL_HOST,Cookie:cookie}});
+    try {
+      await new Promise<void>((resolve,reject)=>{ws.onopen=()=>resolve();ws.onerror=reject;});
+      await Bun.sleep(5200);
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      const echoed=new Promise<string>((resolve,reject)=>{const t=setTimeout(()=>reject(new Error("echo timeout")),1000);ws.onmessage=e=>{clearTimeout(t);resolve(String(e.data));};});
+      ws.send("still connected");expect(await echoed).toBe("still connected");
+    } finally {ws.close();}
+  }, 10000);
+
+  test("tenant gateway rejects direct localhost requests without its credential", async () => {
+    process.env.HAWKY_WORKSPACE_PROXY_TOKEN="private-workspace-secret";process.env.HAWKY_APP_AUTH="0";
+    const tenant=new GatewayServer();const tenantPort=getTestPort();tenant.start(tenantPort);
+    delete process.env.HAWKY_WORKSPACE_PROXY_TOKEN;process.env.HAWKY_APP_AUTH="1";
+    try {
+      expect((await fetch(`http://localhost:${tenantPort}/health`)).status).toBe(401);
+      expect((await fetch(`http://localhost:${tenantPort}/health`,{headers:{"X-Hawky-Workspace-Token":"wrong"}})).status).toBe(401);
+      expect((await fetch(`http://localhost:${tenantPort}/health`,{headers:{"X-Hawky-Workspace-Token":"private-workspace-secret"}})).status).toBe(200);
+    } finally {await tenant.stop(1000);}
   });
 
   test("control login keeps approved users on the control host", async () => {
@@ -236,4 +294,9 @@ describe("login workspace routing", () => {
     expect(admin.status).toBe(200);
     expect(admin.headers.get("x-workspace")).toBeNull();
   });
+});
+
+test("proxy close converts reserved transport codes to a legal frame", () => {
+  for (const code of [0, 1004, 1005, 1006, 1015]) expect(proxyCloseCode(code)).toBe(1011);
+  for (const code of [1000, 1001, 1011, 4001]) expect(proxyCloseCode(code)).toBe(code);
 });
