@@ -62,7 +62,7 @@ bun run test    # vitest + jsdom smoke tests (mounts App, switches tabs, mocks t
 For a deployment that provides model access to its users, build with
 `VITE_HAWKY_HOSTED_PREVIEW=true bun run build`, or put
 `VITE_HAWKY_HOSTED_PREVIEW=true` in that host's untracked `.env.production.local`.
-This enables a compact notice in the app and details in Live settings: Hawky
+This enables an expandable notice in the Live header and details in Live settings: Hawky
 provides API access, hosts JoyAI/Venus, and includes model access during a limited
 free preview. It also discloses Venus's current one-conversation capacity.
 

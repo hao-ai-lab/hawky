@@ -10,7 +10,6 @@ import { LiveScreen } from "./screens/LiveScreen";
 import { PeopleScreen } from "./screens/PeopleScreen";
 import { MemoryScreen } from "./screens/MemoryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import { HostedPreviewNotice } from "./components/HostedPreviewNotice";
 
 export function App() {
   useEffect(() => {
@@ -38,7 +37,6 @@ export function App() {
     <div className="flex h-dvh w-full overflow-hidden bg-canvas text-white">
       <Sidebar />
       <div className="relative flex min-w-0 flex-1 flex-col">
-        <HostedPreviewNotice compact />
         <main className="relative min-h-0 flex-1 overflow-hidden">
           {/* Live stays MOUNTED across tab switches (just hidden) so an active
               realtime session — mic, camera, WebRTC — keeps running when you
