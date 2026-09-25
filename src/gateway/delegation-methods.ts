@@ -129,7 +129,8 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     const requestedReadOnly = p.execution == null ? continued?.readOnly ?? false : p.execution === "read_only";
     if (runtime === "native" && continued?.readOnly && !requestedReadOnly)
       throw new MethodError("CONFLICT", "This native conversation has read-only tools. Start a separate task for workspace changes.");
-    const readOnly = runtime === "codex" ? requestedReadOnly : runtime === "native" && (continued?.readOnly ?? requestedReadOnly);
+    const codexUnrestrictedHost = runtime === "codex" && process.env.HAWKY_CODEX_EXECUTION_POLICY === "linux-user";
+    const readOnly = runtime === "codex" ? requestedReadOnly && !codexUnrestrictedHost : runtime === "native" && (continued?.readOnly ?? requestedReadOnly);
     const dependsOn: string[] = Array.isArray(p.dependsOn) ? [...new Set<string>(p.dependsOn.map((id: unknown) => String(id)))] : [];
     for (const dependency of dependsOn) lookup(conn, { ownerSession, id: dependency });
     conn.bindSession(ownerSession);
@@ -144,8 +145,12 @@ export function registerDelegationMethods(server: GatewayServer, execute: Delega
     };
     // A correction keeps the original causal capture, never the current camera.
     task.evidence = capture ? db().capture(owner(conn), id, capture) : continued?.evidence;
+    if (codexUnrestrictedHost && requestedReadOnly) {
+      task.constraints = [task.constraints, "The user requested read-only work: inspect only and do not modify files. This host runs Codex under a private Linux user without a read-only sandbox; execution is serialized as exclusive work."].filter(Boolean).join("\n");
+    }
     task.brief = delegationBrief(task);
     publish(conn, task, "queued", { request: task.request });
+    if (codexUnrestrictedHost && requestedReadOnly) publish(conn, task, "execution.policy", { policy: "linux-user", readOnlyEnforced: false, scheduling: "exclusive" });
     const controller = new AbortController();
     const promise = Promise.resolve().then(async () => {
       const timer = setTimeout(() => {

@@ -1,3 +1,4 @@
+import { openAIEndpoint } from "../agent/openai-endpoint.js";
 // =============================================================================
 // API Key Validators
 //
@@ -25,7 +26,6 @@ export interface ValidationResult {
 const VALIDATION_TIMEOUT_MS = 10_000;
 
 const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
-const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
 
 // -----------------------------------------------------------------------------
 // Anthropic key validation
@@ -217,7 +217,7 @@ export async function validateOpenAIKey(
   }
 
   try {
-    const response = await fetch(OPENAI_MODELS_URL, {
+    const response = await fetch(openAIEndpoint("models", apiKey), {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(5_000),
     });

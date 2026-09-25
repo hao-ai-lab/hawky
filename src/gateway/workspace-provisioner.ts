@@ -9,6 +9,7 @@ export interface WorkspaceProvisionRequest {
   user: AppAuthUser;
   role: AppAuthRole;
   admin: AppAuthUser;
+  action?: "provision" | "disable";
 }
 
 export interface WorkspaceProvisionResult {
@@ -47,10 +48,12 @@ function runProvisionCommand(
   return new Promise((resolve) => {
     const child = spawn(command, [], {
       shell: true,
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         HAWKY_PROVISION_USER_ID: request.user.id,
+        HAWKY_PROVISION_ACTION: request.action ?? "provision",
         HAWKY_PROVISION_USER_EMAIL: request.user.email,
         HAWKY_PROVISION_USER_ROLE: request.role,
         HAWKY_PROVISION_ADMIN_EMAIL: request.admin.email,
@@ -63,7 +66,7 @@ function runProvisionCommand(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill("SIGTERM");
+      try { if (child.pid) process.kill(-child.pid, "SIGTERM"); } catch {}
       resolve({ ok: false, message: `Workspace provisioning timed out after ${timeoutMs}ms.` });
     }, timeoutMs);
 

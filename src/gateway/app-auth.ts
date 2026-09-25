@@ -212,6 +212,11 @@ export class AppAuth {
     return true;
   }
 
+  getUserById(id: string): AppAuthUser | undefined {
+    const user = this.loadStore().users.find(candidate => candidate.id === id);
+    return user ? this.toPublicUser(user) : undefined;
+  }
+
   getUserCount(): number {
     return this.loadStore().users.length;
   }

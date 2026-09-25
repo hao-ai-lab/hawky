@@ -1,3 +1,4 @@
+import { openAIEndpoint } from "../agent/openai-endpoint.js";
 import { loadConfig } from "../storage/config.js";
 import { selectRealtimeApiKey, enforceRealtimeMintQuota } from "./live-realtime-broker.js";
 import { MethodError } from "./methods.js";
@@ -41,7 +42,7 @@ export function registerGptLiveMethods(server: GatewayServer, tasks: DelegationS
     if (!selection.apiKey) throw new MethodError("UNAVAILABLE", "GPT-Live needs an OpenAI API key in BYOK settings or on this gateway.");
     if (!selection.byokApiKey) enforceRealtimeMintQuota(`gpt-live:${owner(conn)}:${conn.clientId}`);
     for (const session of active.values()) if (session.owner === owner(conn) && session.ownerSession === p.ownerSession) await session.close();
-    const response = await fetch("https://api.openai.com/v1/live/sessions", {
+    const response = await fetch(openAIEndpoint("live/sessions", selection.apiKey), {
       method: "POST", signal: AbortSignal.timeout(30000),
       headers: { Authorization: `Bearer ${selection.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ session: config, transport: { type: "webrtc", sdp: p.sdp } }),
@@ -52,7 +53,7 @@ export function registerGptLiveMethods(server: GatewayServer, tasks: DelegationS
     if (typeof id !== "string" || typeof data.transport?.sdp !== "string") throw new MethodError("UPSTREAM_ERROR", "GPT-Live returned an invalid connection");
     conn.bindSession(p.ownerSession);
     const BunSocket = WebSocket as unknown as { new(url: string, options: Bun.WebSocketOptions): WebSocket };
-    const socket = new BunSocket(`wss://api.openai.com/v1/live/sessions/${encodeURIComponent(id)}/attach`, {
+    const socket = new BunSocket(openAIEndpoint(`live/sessions/${encodeURIComponent(id)}/attach`, selection.apiKey).replace(/^http/, "ws"), {
       headers: { Authorization: `Bearer ${selection.apiKey}` },
     });
     const send = (event: Record<string, unknown>) => {
