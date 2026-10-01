@@ -23,6 +23,8 @@ Bun WebSocket transport      <- gateway proxy and JoyAI speech
 - `src/contracts/delegation.ts` owns serializable delegation types. Live code no longer depends on the gateway for these contracts; the gateway path remains a compatibility export.
 - `src/platform/websocket.ts` contains Bun's authenticated-handshake overload. A real loopback WebSocket test checks headers; this also fixes two existing DOM/Bun constructor type errors.
 
+The first hosted run also exposed web builds relying on root-installed Node types. The shared wire parser now accepts standard `Uint8Array` data (including Buffer subclasses), and the older web client declares its own Node and Vite types. Both web builds were verified with root `node_modules` temporarily absent.
+
 Provider contracts and session behavior remain distinct. No common abstract provider class, rewritten event loop, changed wire protocol, cloud deployment, or credentials are needed for this refactor.
 
 ## Concrete checks

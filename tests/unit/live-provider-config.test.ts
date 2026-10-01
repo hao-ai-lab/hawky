@@ -36,3 +36,10 @@ describe("live provider boundaries", () => {
     } finally { ws.close(); server.stop(true); }
   });
 });
+
+test("shared wire parsing accepts sliced UTF-8 bytes without Node globals", async () => {
+  const { parseFrame } = await import("../../src/gateway/protocol");
+  const bytes = new TextEncoder().encode('xx{"type":"req","id":"中文","method":"connect"}yy');
+  expect(parseFrame(bytes.subarray(2, bytes.length - 2))?.id).toBe("中文");
+  expect(parseFrame(new TextEncoder().encode('garbage'))).toBeNull();
+});

@@ -152,9 +152,9 @@ export const ErrorCodes = {
  * Parse a raw WebSocket message into a RequestFrame.
  * Returns null if the message is not a valid request frame.
  */
-export function parseFrame(raw: string | Buffer): RequestFrame | null {
+export function parseFrame(raw: string | Uint8Array): RequestFrame | null {
   try {
-    const data = typeof raw === "string" ? raw : raw.toString("utf-8");
+    const data = typeof raw === "string" ? raw : new TextDecoder("utf-8", { ignoreBOM: true }).decode(raw);
     const parsed = JSON.parse(data);
     if (!parsed || typeof parsed !== "object") return null;
     if (parsed.type !== "req") return null;
