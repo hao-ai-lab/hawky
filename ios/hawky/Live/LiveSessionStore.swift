@@ -152,6 +152,14 @@ final class LiveSessionStore {
     private(set) var config: LiveSessionConfig
     private(set) var activeConfig: LiveSessionConfig?
     var liveConfig: LiveSessionConfig { activeConfig ?? config }
+    /// True while the current session's config suppresses the conversation
+    /// record (`conversationJournalingEnabled == false` — the owner-voiceprint
+    /// enrollment listening session). Captured as stored state in start() and
+    /// cleared in stop() because appends bracket the `activeConfig` lifetime on
+    /// both sides ("Connecting…" fires before the snapshot is frozen, "Session
+    /// stopped" after it is cleared) — deriving from `liveConfig` alone would
+    /// leak exactly those bracketing messages into the chat.
+    private var suppressConversationRecord = false
     private(set) var phase: LiveSessionPhase = .idle
     /// Gateway (your Hawky machine) reachability for the active session. Drives the
     /// prominent bridge-offline banner so an unreachable machine no longer produces a
@@ -304,6 +312,43 @@ final class LiveSessionStore {
     @ObservationIgnored private var lastScrollTickAt: Date?
     private var currentUserAudioEntryID: UUID?
     private var transcriptEntryByItemID: [String: UUID] = [:]
+    private var voiceprintRealtimeTask: Task<Void, Never>?
+    private var voiceprintRealtimeTasks: [UUID: Task<Void, Never>] = [:]
+    private var voiceprintRealtimeGeneration = 0
+    private var voiceprintTranscriptItemIDsSent = Set<String>()
+    private var voiceprintOpenSpeechWindowID: String?
+    private var voiceprintClosedSpeechWindowIDs: [String] = []
+    private var voiceprintSpeechWindowCounter = 0
+    /// WS2 edge-triggered owner-identity state machine. Holds the last-applied
+    /// verdict so the two push channels (realtime_event piggyback + `voiceprint.identity`
+    /// broadcast) inject/relabel at most ONCE per genuine establish/flip and de-dupe
+    /// against each other. Reset per session in `resetVoiceprintRealtimeState`.
+    private var voiceprintIdentityMachine = LiveVoiceprintIdentityMachine()
+    /// WS2 UI indicator: the current owner/speaker label, surfaced when recognition
+    /// establishes/flips. nil until the first identity edge. OFF-BY-DEFAULT: stays nil
+    /// unless `voiceprintRealtimeEnabled` is on and the gateway pushes an identity.
+    private(set) var voiceprintIdentityLabel: String?
+    /// Last VAD timestamp (ms) handed to the server voiceprint turn tracker, in the
+    /// recording-offset time base. The tracker requires speech_stopped strictly after
+    /// speech_started (`endMs > startMs`) and a finite time; the WebRTC transport emits
+    /// arg-less VAD, so start/stop can resolve to the same recording offset (or nil during
+    /// warm-up). This floor makes every emitted VAD timestamp finite and strictly
+    /// monotonic while staying aligned to the recording/audio-artifact timeline.
+    private var voiceprintLastVadOffsetMs: Double?
+    /// Speech windows whose speech_stopped fired before the recording WAV was open
+    /// (warm-up race). For WebRTC the parallel-mic WAV opens LAZILY on the first
+    /// streamed chunk after `isStreamingAudio` flips (see startParallelMicRecording),
+    /// so a first-turn speech_stopped can find `recordingSink.currentAudioArtifact ==
+    /// nil` and would otherwise drop the artifact permanently — the server tracker
+    /// defaults includeMissingAudio=false, so that turn never finalizes/scores. We
+    /// stash the join keys here and late-bind the artifact once the WAV opens. Ordered
+    /// + de-duped by join key; bounded (only warm-up turns land here, then it drains).
+    private var voiceprintPendingAudioArtifactJoins: [(itemID: String?, speechWindowID: String?)] = []
+    /// B1 on-device speaker embedder. Lazily resolved to the CoreML CAM++ model
+    /// when `onDeviceEmbeddingEnabled` gates on and the binary is provisioned;
+    /// nil/unavailable otherwise so the marker path is used. Not wired to any
+    /// default-on behavior — see `resolvedSpeakerEmbedder`.
+    @ObservationIgnored private var speakerEmbedder: SpeakerEmbedder?
     // Maps a Realtime output item_id → the assistant bubble it streams into, so
     // re-delivered transcripts for the same item update one bubble instead of
     // appending a duplicate.
@@ -901,6 +946,191 @@ final class LiveSessionStore {
         return (LiveGatewayBridge(gatewayURL: url), key)
     }
 
+    /// A bridge + session key for owner voiceprint enrollment (B3). Works in any
+    /// session state — enrollment is a workspace-global owner-template write, so it
+    /// only needs a gateway URL. Reuse the live bridge if present, else build a
+    /// short-lived one. Returns nil when no gateway is configured (offline).
+    func voiceprintEnrollmentGateway() -> (VoiceprintEnrollmentGateway, String)? {
+        let key = Self.resolvedRuntimeGatewayBridgeSessionKey(from: liveConfig, fallback: "realtime:main")
+            ?? "realtime:main"
+        if let bridge = gatewayBridge { return (bridge, key) }
+        guard let url = defaultBrokerURL else { return nil }
+        return (LiveGatewayBridge(gatewayURL: url), key)
+    }
+
+    // -------------------------------------------------------------------------
+    // Owner-voiceprint enrollment listening session (B3, live-capture path).
+    //
+    // Enrollment must capture through the SAME live WebRTC pipeline recognition
+    // scores — a standalone recorder is acoustically orthogonal to that domain
+    // (docs/voiceprint-architecture.md, "capture-domain mismatch"). So the Voice
+    // enrollment screen runs a REAL Live session, silenced, with recording forced
+    // to live upload; the gateway then builds the template from the uploaded
+    // `.segNNN.mic` segments via enroll_owner_from_recording.
+    // -------------------------------------------------------------------------
+
+    /// True while the silent enrollment listening session is running. Session-
+    /// scoped; cleared by `stopEnrollmentListeningSession()`.
+    private(set) var enrollmentListeningActive = false
+
+    /// WHY the last `startEnrollmentListeningSession()` returned false, captured
+    /// before `stop()` clears the phase. This is the enrollment UI's only window
+    /// into the real cause (auth / key / network from `classifyStartFailure`,
+    /// recording never opening, silence setup) — without it the screen can only
+    /// show a catch-all that wrongly blames the microphone. nil while a start is
+    /// in flight or after a successful one.
+    private(set) var lastEnrollmentListeningStartFailure: String?
+
+    /// Base id of the current (or, after stop, most recent) Live recording — the
+    /// WAV basename, which is byte-identical to the base of the uploaded
+    /// `.segNNN.mic` segment media ids (e.g. "live-20260712-135209"). Reads the
+    /// open recording's artifact while recording, and falls back to
+    /// `lastRecordingURL` afterwards (the sink clears its recording id on stop
+    /// but keeps the last URL readable).
+    var currentRecordingBaseId: String? {
+        if let artifact = recordingSink.currentAudioArtifact {
+            return artifact.audioArtifactID
+        }
+        guard let url = recordingSink.lastRecordingURL else { return nil }
+        let base = url.deletingPathExtension().lastPathComponent
+        return base.isEmpty ? nil : base
+    }
+
+    /// Start a SILENT live listening session for owner-voiceprint enrollment.
+    ///
+    /// Reuses the one true `start()` path (never a forked second session) with
+    /// TEMPORARY overrides passed via `configOverride`, which start() uses for
+    /// the frozen `activeConfig` snapshot only — the draft `config` and its
+    /// UserDefaults persistence are never touched, so nothing here can leak into
+    /// the user's saved settings and there is nothing to restore beyond stop():
+    /// - audioInputEnabled: on (the whole point is capturing the mic),
+    /// - mediaPersistenceMode: .liveUpload (segments must reach the gateway
+    ///   DURING the session for enroll_owner_from_recording to resolve them),
+    /// - camera/video: off (voice only; also keeps Safety/CocktailParty visual
+    ///   pipelines out of the session),
+    /// - speakOnlyWhenSpokenTo: on + openingBehavior .silent, so the connect-time
+    ///   session config already has auto-response off and no greeting — closing
+    ///   the gap before the full silence update below lands.
+    ///
+    /// SILENCING CHOICE — Stay Silent's `setSilenceMode(true)`, NOT
+    /// `safetyCheckEnabled`/hardQuiet: hardQuiet deliberately KEEPS server-VAD
+    /// auto-response so the model still replies to the user's own speech turns
+    /// (exactly what a 40s enrollment monologue would trigger), and enabling
+    /// Safety Check also drags in the hazard-watch controller — a side feature.
+    /// `setSilenceMode(true)` is the one mechanism that ONLY silences: it turns
+    /// off auto-response AND the manual reply-on-user-turn path, sets
+    /// tool_choice "none", and cancels any stray server turn. Its release-recap
+    /// behavior never runs because we tear the session down while still silent.
+    ///
+    /// Returns false (with the session torn down) if the session, its recording,
+    /// or the silence update could not be established — the flow FAILS CLOSED
+    /// rather than listening non-silently or without upload.
+    func startEnrollmentListeningSession(
+        recordingTransport: GatewayTransport? = nil
+    ) async -> Bool {
+        lastEnrollmentListeningStartFailure = nil
+        guard !phase.isActive else {
+            lastEnrollmentListeningStartFailure = "A live session is already running — stop it first."
+            return false
+        }
+        let override = Self.enrollmentListeningConfigOverride(from: config)
+        await start(
+            recordingTransport: recordingTransport ?? lastRecordingTransport,
+            configOverride: override
+        )
+        guard phase == .connected, let provider else {
+            // Capture the REAL start failure (auth / key / network via
+            // classifyStartFailure) before stop() clears the phase, so the
+            // enrollment UI can report what actually failed.
+            if case .failed(let message) = phase {
+                lastEnrollmentListeningStartFailure = message
+            } else {
+                lastEnrollmentListeningStartFailure = "The live connection did not come up."
+            }
+            await stop()
+            return false
+        }
+        // No recording ⇒ no segments ever reach the gateway ⇒ enrollment can only
+        // end in no_usable_segments. Fail now with the session torn down.
+        guard isRecording else {
+            lastEnrollmentListeningStartFailure = "The session started but its recording did not, so no audio could upload."
+            await stop()
+            return false
+        }
+        do {
+            try await provider.setSilenceMode(true, config: liveConfig)
+        } catch {
+            // Couldn't silence — never run a listening session where the model
+            // may talk over the user's enrollment speech.
+            lastEnrollmentListeningStartFailure = "Could not set up silent listening: \(error.localizedDescription)"
+            await stop()
+            return false
+        }
+        enrollmentListeningActive = true
+        // Deliberately NO system message: with conversationJournalingEnabled off
+        // this session leaves the chat record untouched — the enrollment screen
+        // itself shows the listening state.
+        return true
+    }
+
+    /// The TEMPORARY config override the enrollment listening session runs with
+    /// (see `startEnrollmentListeningSession` for why each knob is forced).
+    /// Extracted as a nonisolated static so the shape — especially the
+    /// journaling suppression that keeps enrollment audio out of the chat
+    /// record — is pinned by unit tests without driving a live session.
+    nonisolated static func enrollmentListeningConfigOverride(
+        from base: LiveSessionConfig
+    ) -> LiveSessionConfig {
+        var override = base
+        override.audioInputEnabled = true
+        override.mediaPersistenceMode = .liveUpload
+        override.visualSource = .off
+        override.visualCadence = .off
+        // No visual input → no visual side features. Forced off explicitly so an
+        // enabled setting can't wedge a camera pipeline into the listening session.
+        override.cocktailPartyEnabled = false
+        override.safetyCheckEnabled = false
+        override.speakOnlyWhenSpokenTo = true
+        override.openingBehavior = .silent
+        // The enrollment monologue is BIOMETRIC CAPTURE, not conversation: it
+        // must never journal into the app chat / session history, never append
+        // to the gateway session transcript (latent recognizer), and never
+        // distill into daily memory. One flag gates all of those record paths.
+        override.conversationJournalingEnabled = false
+        // Capture-only: the listening session must NOT run live recognition on
+        // the enrollment monologue itself. Scoring it wastes sidecar work
+        // (against the template being replaced) and — worse — establishes
+        // owner_present in the iOS identity machine DURING enrollment, so the
+        // NEXT real session's same-verdict broadcast can dedupe to no-op and
+        // the agent never learns who is speaking (observed on device,
+        // 2026-07-13 14:41: gateway emitted owner_present but the model still
+        // disclaimed).
+        override.voiceprintRealtimeEnabled = false
+        return override
+    }
+
+    /// Stop the enrollment listening session and return the recording base id to
+    /// enroll from (nil when the recording never opened). The temporary session
+    /// shape needs no explicit restore: it lived only in `activeConfig`, which
+    /// `stop()` clears — the draft `config` and persisted settings were never
+    /// modified. Silence is deliberately NOT released first; the session is torn
+    /// down whole, so the model never gets a turn (and the Stay Silent release
+    /// recap never runs).
+    @discardableResult
+    func stopEnrollmentListeningSession() async -> String? {
+        let wasActive = enrollmentListeningActive
+        enrollmentListeningActive = false
+        // Read before stop() (the open artifact is definitive); the accessor's
+        // lastRecordingURL fallback covers the post-stop re-read below, and also
+        // the case where the session already auto-stopped (backgrounding /
+        // provider failure) — the finished recording is still enrollable.
+        let baseID = currentRecordingBaseId
+        if wasActive || phase.isActive {
+            await stop()
+        }
+        return baseID ?? currentRecordingBaseId
+    }
+
     // -------------------------------------------------------------------------
     // Memory feature (#653): bridge access for the Live → More → Memory testing
     // tab. Like peopleBridge(), this works in any session state — the memory.*
@@ -1343,6 +1573,14 @@ final class LiveSessionStore {
         persist()
     }
 
+    /// Toggle live server-side owner recognition. When on (and an owner voice is
+    /// enrolled), finalized live turns are scored against the owner template and the
+    /// transcript shows who is speaking. Off by default.
+    func updateVoiceprintRealtimeEnabled(_ enabled: Bool) {
+        config.voiceprintRealtimeEnabled = enabled
+        persist()
+    }
+
     func updateVisualDedupEnabled(_ enabled: Bool) {
         config.visualDedupEnabled = enabled
         persist()
@@ -1514,7 +1752,16 @@ final class LiveSessionStore {
         persistSessions()
     }
 
-    func start(recordingTransport: GatewayTransport? = nil) async {
+    /// `configOverride`, when non-nil, is the config this session runs with INSTEAD
+    /// of the draft `config`. It is used verbatim for the session snapshot
+    /// (`activeConfig`) but is NEVER written back to the draft or persisted (the
+    /// only draft write below remains the resolved gatewayBridgeSessionKey), so
+    /// temporary session shapes — e.g. the enrollment listening session — cannot
+    /// leak into the user's saved settings.
+    func start(
+        recordingTransport: GatewayTransport? = nil,
+        configOverride: LiveSessionConfig? = nil
+    ) async {
         guard !phase.isActive else { return }
         // Remember the transport so auto-recovery (scene-phase, no container) can
         // restart with the same recording target; a fresh start cancels any
@@ -1540,7 +1787,15 @@ final class LiveSessionStore {
         }
 
         let prepareStartedAt = Date()
-        var effectiveConfig = config
+        var effectiveConfig = configOverride ?? config
+        // Latch record suppression BEFORE the first append ("Connecting…") so a
+        // record-suppressed session (enrollment listening) never writes its
+        // connect-time system messages into the chat. Every start() re-latches,
+        // so a normal session always restores journaling.
+        suppressConversationRecord = Self.conversationRecordSuppressed(
+            activeConfig: effectiveConfig,
+            draftConfig: effectiveConfig
+        )
         audioOutputPlayer.updateDestination(effectiveConfig.audioOutputDestination)
         if effectiveConfig.provider == .openAIRealtime {
             effectiveConfig.openAICredentialMode = .directAPIKey
@@ -1558,6 +1813,23 @@ final class LiveSessionStore {
             // WebRTC headers don't expose decoded PCM for the remote track.)
             effectiveConfig.openingBehavior = .silent
             refreshDirectOpenAIAPIKeyStatus()
+        }
+        // WS2 (closes #12): live owner recognition needs the turn audio streamed to the
+        // gateway DURING the session so the gateway auto-score sees it in time. Coerce
+        // media persistence to liveUpload whenever recognition is on — .off/.local/
+        // .deferredUpload all become .liveUpload. Applied to `effectiveConfig` (which
+        // becomes `activeConfig`) so the parallel-mic gate and the voiceprint runtime
+        // target — both of which require mediaPersistenceMode != .off — agree. This
+        // "just works" instead of surfacing a disabled hint. OFF-BY-DEFAULT: gated on
+        // `voiceprintRealtimeEnabled`, so flag off leaves the mode byte-for-byte
+        // unchanged.
+        if effectiveConfig.voiceprintRealtimeEnabled,
+           effectiveConfig.mediaPersistenceMode != .liveUpload {
+            appendSystemMessage(
+                "Live owner recognition on — media set to live upload",
+                detail: "Turn audio streams to your Hawky machine during the session so it can recognize the speaker."
+            )
+            effectiveConfig.mediaPersistenceMode = .liveUpload
         }
         effectiveConfig.bridgeAvailability = effectiveConfig.gatewayBridgeEnabled ? .available : .disabled
         phase = .connecting
@@ -1659,6 +1931,8 @@ final class LiveSessionStore {
             providerLabel: effectiveConfig.provider.label
         )
         let nextProvider = LiveSessionProviderFactory.makeProvider(for: effectiveConfig, gatewayBridge: gatewayBridge)
+        resetVoiceprintRealtimeQueue()
+        enqueueVoiceprintRealtimeResetIfNeeded(config: effectiveConfig)
         if nextProvider.seedsHistoryOnConnect {
             effectiveConfig.historyReplayTurns = historyReplayTurns
             journalRaw(
@@ -1681,7 +1955,7 @@ final class LiveSessionStore {
                 return try await summarize(scope)
             }
             rtProvider.silenceSummaryHook = { [weak self] in
-                await self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
+                self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
             }
             rtProvider.cocktailPartyActiveHook = { [weak self] in self?.cocktailPartyActive ?? false }
             rtProvider.identifyOnCameraHook = { [weak self] in
@@ -1706,7 +1980,7 @@ final class LiveSessionStore {
                 return try await summarize(scope)
             }
             rtcProvider.silenceSummaryHook = { [weak self] in
-                await self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
+                self?.captureSilenceWindowRecap() ?? "No Stay Silent window was captured."
             }
             rtcProvider.cocktailPartyActiveHook = { [weak self] in self?.cocktailPartyActive ?? false }
             rtcProvider.identifyOnCameraHook = { [weak self] in
@@ -1904,7 +2178,10 @@ final class LiveSessionStore {
         if userInitiated {
             cancelInterruptedRecovery()
         }
-        // Stay Silent is session-scoped; reset it when the session ends.
+        // Stay Silent is session-scoped; reset it when the session ends. So is the
+        // enrollment listening session — clearing it here covers non-user stops
+        // (backgrounding, provider failure) as well as the explicit stop path.
+        enrollmentListeningActive = false
         staySilentActive = false
         silenceStartedAt = nil
         silenceTranscript.removeAll()
@@ -1913,9 +2190,13 @@ final class LiveSessionStore {
         // per-session recognizer/cooldowns do not).
         teardownCocktailParty()
         teardownSafety()
+        resetVoiceprintRealtimeQueue()
         guard phase.isActive || provider != nil else {
             phase = .idle
             bridgeStatus = .idle
+            // A failed record-suppressed start (enrollment listening) lands here;
+            // release the latch so later idle-time messages journal normally.
+            suppressConversationRecord = false
             return
         }
         let stopStartedAt = Date()
@@ -1997,9 +2278,16 @@ final class LiveSessionStore {
         // Memory feature (#653): auto-distill the just-ended session into the
         // daily log. Detached + best-effort so it never delays teardown or blocks
         // the UI; failures (no gateway, no transcript) are swallowed.
-        Task.detached { [weak self, endedSessionKey] in
-            await self?.distillEndedSessionIntoDailyMemory(sessionKey: endedSessionKey)
+        // SKIPPED for record-suppressed sessions (enrollment listening): the
+        // enrollment monologue is biometric capture and must not reach memory.
+        if !suppressConversationRecord {
+            Task.detached { [weak self, endedSessionKey] in
+                await self?.distillEndedSessionIntoDailyMemory(sessionKey: endedSessionKey)
+            }
         }
+        // Release the latch LAST — "Session stopped" above must stay suppressed
+        // for a record-suppressed session.
+        suppressConversationRecord = false
     }
 
     func pause() async {
@@ -2186,6 +2474,10 @@ final class LiveSessionStore {
     }
 
     private func startRecordingIfNeeded(transport: GatewayTransport?, config: LiveSessionConfig) async {
+        // WS2 (closes #12): when live owner recognition is on, `config` has already
+        // been coerced to .liveUpload upstream (in `start`) so the parallel-mic gate
+        // and the voiceprint runtime target agree. This switch therefore records with
+        // the live transport for the recognition path without a second coercion here.
         switch config.mediaPersistenceMode {
         case .off:
             break
@@ -2282,6 +2574,11 @@ final class LiveSessionStore {
                         source: source,
                         audioSampleRate: chunk.sampleRate
                     )
+                    // The WAV (and thus currentAudioArtifact) is now open. Late-bind any
+                    // warm-up turn whose speech_stopped fired before this point, so a
+                    // first-turn artifact is not permanently lost (server tracker drops
+                    // turns with no audio when includeMissingAudio is false).
+                    self.flushPendingVoiceprintAudioArtifacts()
                 }
                 // Mic-health signal: the realtime mic flows through WebRTC, not
                 // the sample recorder, so this parallel tap is the only
@@ -3177,6 +3474,7 @@ final class LiveSessionStore {
             appendUserTranscriptDelta(itemID: itemID, delta: text, detail: detail, eventType: eventType)
         case .inputTranscriptComplete(let itemID, let text, let detail, let eventType):
             finishUserTranscript(itemID: itemID, transcript: text, detail: detail, eventType: eventType)
+            enqueueFallbackVoiceprintTranscriptCompleted(itemID: itemID, transcript: text)
         case .outputAudioDelta(let data):
             publishOutputAudioDiagnostics(receivedBytes: data.count)
             if liveConfig.responseModality == .audio {
@@ -3218,7 +3516,7 @@ final class LiveSessionStore {
             journalRaw(direction: direction, type: type, json: json)
             appendVerbose("\(direction.rawValue): \(type)", detail: json)
             if direction == .received {
-                handleRealtimeRawEvent(type)
+                handleRealtimeRawEvent(type, json: json)
                 updateConversationState(forRawType: type)
             }
             if config.diagnosticsLevel == .verbose {
@@ -3262,7 +3560,21 @@ final class LiveSessionStore {
         }
     }
 
-    private func handleRealtimeRawEvent(_ type: String) {
+    private func handleRealtimeRawEvent(_ type: String, json: String) {
+        if let event = prepareVoiceprintRealtimeEvent(rawType: type, rawJSON: json) {
+            enqueueVoiceprintRealtimeEvent(event)
+            if type == "conversation.item.input_audio_transcription.completed",
+               let itemID = event.itemID {
+                voiceprintTranscriptItemIDsSent.insert(itemID)
+            }
+            if type == "input_audio_buffer.speech_stopped" {
+                enqueueCurrentVoiceprintAudioArtifact(
+                    itemID: event.itemID,
+                    speechWindowID: event.speechWindowID
+                )
+            }
+        }
+
         switch type {
         case "input_audio_buffer.speech_started":
             startRawAudioTrackSegmentIfNeeded()
@@ -3277,6 +3589,668 @@ final class LiveSessionStore {
         default:
             break
         }
+    }
+
+    private func prepareVoiceprintRealtimeEvent(rawType: String, rawJSON: String) -> LiveVoiceprintRealtimeEvent? {
+        guard var event = Self.voiceprintRealtimeEvent(
+            rawType: rawType,
+            rawJSON: rawJSON,
+            route: diagnostics.audioRoute,
+            recordingOffsetMs: recordingSink.currentAudioOffsetMs
+        ) else {
+            return nil
+        }
+
+        switch rawType {
+        case "input_audio_buffer.speech_started":
+            if event.itemID == nil && event.speechWindowID == nil {
+                event.speechWindowID = nextVoiceprintSpeechWindowID()
+            }
+            event.audioStartMs = nextMonotonicVoiceprintVadOffsetMs(candidate: event.audioStartMs)
+            voiceprintOpenSpeechWindowID = event.speechWindowID ?? event.itemID
+        case "input_audio_buffer.speech_stopped":
+            if event.itemID == nil && event.speechWindowID == nil {
+                event.speechWindowID = voiceprintOpenSpeechWindowID
+            }
+            event.audioEndMs = nextMonotonicVoiceprintVadOffsetMs(candidate: event.audioEndMs)
+            appendVoiceprintClosedSpeechWindowID(event.speechWindowID ?? event.itemID)
+            voiceprintOpenSpeechWindowID = nil
+        default:
+            break
+        }
+        return event
+    }
+
+    /// Resolve a recording-timeline-aligned, finite, strictly-monotonic VAD timestamp.
+    ///
+    /// `candidate` is the recording offset (or explicit JSON `audio_*_ms`) from the
+    /// converter — the SAME time base as the audio artifact WAV, so a finalized turn
+    /// window `[startMs, endMs]` maps to the correct recording segment. Two realities
+    /// force the repair here rather than in the pure converter:
+    ///  - Warm-up: the parallel mic tap opens the WAV lazily on the first streamed
+    ///    chunk, so an early speech_started can arrive with a nil offset. Floor it to
+    ///    the last emitted VAD offset (or 0 at session start) — still on the recording
+    ///    timeline, just at its origin.
+    ///  - Arg-less WebRTC VAD: start and stop can resolve to the identical recording
+    ///    offset (no new frames written between them). The server turn tracker rejects
+    ///    `endMs <= startMs`, so nudge strictly forward by 1ms. 1ms is inaudible and
+    ///    keeps the window inside the same recording segment.
+    private func nextMonotonicVoiceprintVadOffsetMs(candidate: Double?) -> Double {
+        let next = Self.monotonicVoiceprintVadOffsetMs(
+            candidate: candidate,
+            last: voiceprintLastVadOffsetMs
+        )
+        voiceprintLastVadOffsetMs = next
+        return next
+    }
+
+    /// Pure, unit-testable core of `nextMonotonicVoiceprintVadOffsetMs`. `last` is the
+    /// previously emitted VAD offset (nil at session start). Returns a finite value that
+    /// is `> last` (or `>= 1` when `last` is nil), preferring `candidate` when it is
+    /// finite and already ahead of the monotonic floor.
+    nonisolated static func monotonicVoiceprintVadOffsetMs(
+        candidate: Double?,
+        last: Double?
+    ) -> Double {
+        let floor = (last?.isFinite == true) ? last! : 0
+        let base = (candidate?.isFinite == true) ? candidate! : floor
+        return max(base, floor + 1)
+    }
+
+    private func enqueueFallbackVoiceprintTranscriptCompleted(itemID: String, transcript: String) {
+        let trimmedItemID = itemID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedItemID.isEmpty else { return }
+        guard !voiceprintTranscriptItemIDsSent.contains(trimmedItemID) else {
+            _ = Self.consumeVoiceprintFallbackSpeechWindowID(
+                forTranscriptItemID: trimmedItemID,
+                from: &voiceprintClosedSpeechWindowIDs,
+                transcriptAlreadySent: true
+            )
+            return
+        }
+        voiceprintTranscriptItemIDsSent.insert(trimmedItemID)
+        let speechWindowID = Self.consumeVoiceprintFallbackSpeechWindowID(
+            forTranscriptItemID: trimmedItemID,
+            from: &voiceprintClosedSpeechWindowIDs,
+            transcriptAlreadySent: false
+        )
+        enqueueVoiceprintRealtimeEvent(LiveVoiceprintRealtimeEvent(
+            type: "conversation.item.input_audio_transcription.completed",
+            itemID: trimmedItemID,
+            speechWindowID: speechWindowID,
+            audioStartMs: nil,
+            audioEndMs: nil,
+            transcript: transcript,
+            audioArtifactID: nil,
+            audioPath: nil,
+            sampleRate: nil,
+            route: diagnostics.audioRoute
+        ))
+    }
+
+    private func appendVoiceprintClosedSpeechWindowID(_ id: String?) {
+        guard let id = Self.cleanedString(id) else { return }
+        guard !voiceprintClosedSpeechWindowIDs.contains(id) else { return }
+        voiceprintClosedSpeechWindowIDs.append(id)
+    }
+
+    private func enqueueCurrentVoiceprintAudioArtifact(itemID: String?, speechWindowID: String?) {
+        guard Self.cleanedString(itemID) != nil || Self.cleanedString(speechWindowID) != nil else { return }
+        guard let artifact = recordingSink.currentAudioArtifact else {
+            // Warm-up race: the parallel-mic WAV is not open yet (WebRTC opens it
+            // lazily on the first streamed chunk). Stash the join keys and late-bind
+            // when the WAV opens (flushPendingVoiceprintAudioArtifacts), so this turn
+            // is not permanently lost. The artifact is the whole-session WAV; the
+            // server slices by the turn's [startMs, endMs] window, and our VAD offsets
+            // are floored at the WAV origin, so a late-bound first turn still maps to
+            // the correct leading segment.
+            recordPendingVoiceprintAudioArtifactJoin(itemID: itemID, speechWindowID: speechWindowID)
+            return
+        }
+        enqueueVoiceprintRealtimeEvent(Self.voiceprintAudioArtifactEvent(
+            itemID: itemID,
+            speechWindowID: speechWindowID,
+            artifact: artifact,
+            route: diagnostics.audioRoute
+        ))
+    }
+
+    private func recordPendingVoiceprintAudioArtifactJoin(itemID: String?, speechWindowID: String?) {
+        // Off-by-default parity: only stash when the voiceprint realtime path is armed.
+        // With the flag off, the artifact event would be dropped by enqueue anyway, so
+        // stashing it would be dead state. This keeps flag-off behavior a pure no-op.
+        guard Self.voiceprintRealtimeRuntimeTarget(activeConfig: activeConfig, draftConfig: config) != nil else {
+            return
+        }
+        Self.appendPendingVoiceprintAudioArtifactJoin(
+            itemID: itemID,
+            speechWindowID: speechWindowID,
+            into: &voiceprintPendingAudioArtifactJoins
+        )
+    }
+
+    /// Pure, unit-testable core of the warm-up pending-join stash. Appends a cleaned
+    /// (itemID, speechWindowID) pair to `pending` unless a pair with the same server
+    /// join key (itemID first, else speechWindowID — matching voiceprintAudioArtifactEvent)
+    /// is already queued, so a re-fired speech_stopped cannot double-bind the artifact.
+    /// A pair with no usable join key is ignored.
+    nonisolated static func appendPendingVoiceprintAudioArtifactJoin(
+        itemID: String?,
+        speechWindowID: String?,
+        into pending: inout [(itemID: String?, speechWindowID: String?)]
+    ) {
+        let cleanItemID = cleanedString(itemID)
+        let cleanWindowID = cleanedString(speechWindowID)
+        guard let joinKey = cleanItemID ?? cleanWindowID else { return }
+        let alreadyPending = pending.contains { entry in
+            (cleanedString(entry.itemID) ?? cleanedString(entry.speechWindowID)) == joinKey
+        }
+        guard !alreadyPending else { return }
+        pending.append((itemID: cleanItemID, speechWindowID: cleanWindowID))
+    }
+
+    /// Late-bind audio artifacts for warm-up turns whose speech_stopped fired before
+    /// the recording WAV opened. Called once the WAV is available (first
+    /// recordingSink.start). No-op when there is nothing pending or the artifact is
+    /// still unavailable (defensive; the caller invokes this right after the WAV opens).
+    private func flushPendingVoiceprintAudioArtifacts() {
+        guard !voiceprintPendingAudioArtifactJoins.isEmpty else { return }
+        guard let artifact = recordingSink.currentAudioArtifact else { return }
+        let pending = voiceprintPendingAudioArtifactJoins
+        voiceprintPendingAudioArtifactJoins.removeAll()
+        let route = diagnostics.audioRoute
+        for join in pending {
+            enqueueVoiceprintRealtimeEvent(Self.voiceprintAudioArtifactEvent(
+                itemID: join.itemID,
+                speechWindowID: join.speechWindowID,
+                artifact: artifact,
+                route: route
+            ))
+        }
+    }
+
+    private func enqueueVoiceprintRealtimeEvent(_ event: LiveVoiceprintRealtimeEvent) {
+        guard let bridge = gatewayBridge,
+              let target = Self.voiceprintRealtimeRuntimeTarget(activeConfig: activeConfig, draftConfig: config) else {
+            return
+        }
+        let previous = voiceprintRealtimeTask
+        let generation = voiceprintRealtimeGeneration
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self, bridge, event, previous, target, generation, taskID] in
+            defer { self?.voiceprintRealtimeTasks.removeValue(forKey: taskID) }
+            await previous?.value
+            guard let self, !Task.isCancelled, self.voiceprintRealtimeGeneration == generation else { return }
+            guard Self.voiceprintRealtimeRuntimeTarget(activeConfig: self.activeConfig, draftConfig: self.config) == target else { return }
+            let result = await bridge.sendVoiceprintRealtimeEvent(
+                event,
+                sessionKey: target.sessionKey,
+                mode: target.modeRaw
+            )
+            guard !Task.isCancelled, self.voiceprintRealtimeGeneration == generation, let result else { return }
+            self.handleVoiceprintRealtimeResult(result)
+        }
+        voiceprintRealtimeTask = task
+        voiceprintRealtimeTasks[taskID] = task
+    }
+
+    private func enqueueVoiceprintRealtimeResetIfNeeded(config: LiveSessionConfig) {
+        guard let bridge = gatewayBridge,
+              let target = Self.voiceprintRealtimeRuntimeTarget(activeConfig: nil, draftConfig: config) else {
+            return
+        }
+        let previous = voiceprintRealtimeTask
+        let generation = voiceprintRealtimeGeneration
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self, bridge, previous, target, generation, taskID] in
+            defer { self?.voiceprintRealtimeTasks.removeValue(forKey: taskID) }
+            await previous?.value
+            guard let self, !Task.isCancelled, self.voiceprintRealtimeGeneration == generation else { return }
+            _ = await bridge.resetVoiceprintRealtime(
+                sessionKey: target.sessionKey,
+                mode: target.modeRaw
+            )
+            guard !Task.isCancelled, self.voiceprintRealtimeGeneration == generation else { return }
+            self.appendVerbose("Voiceprint realtime buffer reset")
+        }
+        voiceprintRealtimeTask = task
+        voiceprintRealtimeTasks[taskID] = task
+    }
+
+    private func resetVoiceprintRealtimeQueue() {
+        voiceprintRealtimeGeneration += 1
+        voiceprintRealtimeTask?.cancel()
+        for task in voiceprintRealtimeTasks.values {
+            task.cancel()
+        }
+        voiceprintRealtimeTask = nil
+        voiceprintRealtimeTasks.removeAll()
+        voiceprintTranscriptItemIDsSent.removeAll()
+        voiceprintOpenSpeechWindowID = nil
+        voiceprintClosedSpeechWindowIDs.removeAll()
+        voiceprintSpeechWindowCounter = 0
+        voiceprintLastVadOffsetMs = nil
+        voiceprintPendingAudioArtifactJoins.removeAll()
+        // Drop any cached embedder so a config change (flags off, or a newly
+        // provisioned model) is re-resolved on the next finalized turn.
+        speakerEmbedder = nil
+        // WS2: reset the edge-triggered identity machine + UI indicator so a new
+        // session starts from `unknown` and re-establishes cleanly.
+        voiceprintIdentityMachine = LiveVoiceprintIdentityMachine()
+        voiceprintIdentityLabel = nil
+    }
+
+    private func handleVoiceprintRealtimeResult(_ result: LiveVoiceprintRealtimeResult) {
+        // WS2 PRIMARY identity channel: apply the piggybacked identity summary (if any)
+        // through the edge-triggered state machine BEFORE the finalized-turn gate, so
+        // an identity that arrives on a response carrying no NEW finalized turns still
+        // establishes/flips. A nil summary is a no-op (fail-safe).
+        if let identity = result.identity {
+            handleVoiceprintIdentitySummary(identity)
+        }
+        // WS2: render the gateway's piggybacked per-turn recognition states as verbose
+        // lines. These replace the old marker-path score_turns lines (that path is gone
+        // — the gateway auto-scores now) with the SAME renderer, so per-turn recognition
+        // still surfaces in the verbose log. Empty scoredStates → nothing logged.
+        if !result.scoredStates.isEmpty {
+            for line in Self.voiceprintRecognitionLines(
+                states: result.scoredStates,
+                total: result.scoredStates.count
+            ) {
+                appendVerbose(line)
+            }
+        }
+        guard !result.finalizedTurns.isEmpty else { return }
+        appendVerbose(
+            "Voiceprint finalized \(result.finalizedTurns.count) turn\(result.finalizedTurns.count == 1 ? "" : "s")",
+            detail: result.finalizedTurns
+                .map { "\($0.transcriptItemID) \(Int($0.startMs))-\(Int($0.endMs))ms" }
+                .joined(separator: "\n")
+        )
+        maybeAttachOnDeviceEmbeddings(finalizedTurns: result.finalizedTurns, sessionKey: result.sessionKey)
+    }
+
+    /// WS2 identity apply: the SINGLE place both push channels (realtime_event
+    /// piggyback + `voiceprint.identity` broadcast) funnel through. The edge-trigger
+    /// + de-dupe live entirely in `LiveVoiceprintIdentityMachine`, so this method just
+    /// routes the machine's decision to the two side effects on an establish/flip:
+    /// (1) UI — surface the owner/unknown indicator (retro-label), and (2) AGENT
+    /// INJECTION — one no-response system context item so the answering Hawky knows who
+    /// is speaking.
+    ///
+    /// OFF-BY-DEFAULT: gated on `voiceprintRealtimeEnabled` — flag off is a hard no-op.
+    /// FAIL-SAFE: `.none` (de-dupe / below the edge / garbled verdict) does nothing; the
+    /// injection is best-effort (`try?`) and never triggers a response or blocks the
+    /// data channel, so an injection failure degrades quietly and never surfaces a
+    /// false owner.
+    private func handleVoiceprintIdentitySummary(_ summary: LiveVoiceprintIdentitySummary) {
+        guard (activeConfig ?? config).voiceprintRealtimeEnabled else { return }
+        let action = voiceprintIdentityMachine.ingest(summary)
+        guard case let .apply(_, injection, label) = action else { return }
+
+        // (1) UI retro-label / owner indicator.
+        voiceprintIdentityLabel = label
+        appendSystemMessage(
+            "Speaker: \(label)",
+            detail: summary.confidence.map { String(format: "confidence %.2f", $0) },
+            eventType: "voiceprint.identity"
+        )
+
+        // (2) AGENT INJECTION: exactly ONE no-response context item. Never
+        // `response.create`; best-effort so a send failure cannot stall the session.
+        guard let provider else { return }
+        Task { [weak self] in
+            do {
+                try await provider.sendContext(injection, createResponse: false)
+            } catch {
+                await MainActor.run {
+                    self?.append("Voiceprint identity injection failed", level: .warning, detail: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// B1/B2: OFF-BY-DEFAULT hook. When the on-device embedding gate is on AND a
+    /// CoreML model is provisioned, produce score_turns turns carrying an on-device
+    /// `sampleEmbedding` per turn, then submit them through the fail-closed liveness
+    /// coordinator (B2): request a FRESH single-use A8 nonce, attach it, and call
+    /// `identity.voiceprint.score_turns`.
+    ///
+    /// WS2: the gateway now AUTO-SCORES finalized turns server-side (config
+    /// `voiceprint.live_scoring.auto_score_finalized`) and PUSHES identity back — so
+    /// iOS no longer boomerangs marker-only score_turns for the server path (that
+    /// would double-score). The safe rule: iOS submits score_turns ONLY when it has a
+    /// REAL on-device embedding (embedded > 0); otherwise it relies on the gateway
+    /// auto-score. Because the on-device embedder is inert in this open build
+    /// (`resolvedSpeakerEmbedder` returns nil — no CoreML model), every turn produces
+    /// zero embeddings today and NOTHING is submitted; the identity arrives via the
+    /// pushed channels (`handleVoiceprintIdentitySummary`).
+    ///
+    /// When the model is absent (the default here), `resolvedSpeakerEmbedder` returns
+    /// nil and this method returns after building markers-only turns — NOTHING requests
+    /// a challenge or sends score_turns. B1 follow-up folded in: `embed()` (CoreML
+    /// inference) runs OFF the @MainActor on a detached task so per-turn inference never
+    /// blocks the store; the submission then hops back to the main actor. Never
+    /// blocks/crashes the session.
+    private func maybeAttachOnDeviceEmbeddings(
+        finalizedTurns: [LiveVoiceprintFinalizedTurn],
+        sessionKey: String
+    ) {
+        let cfg = activeConfig ?? config
+        // Gate on `voiceprintRealtimeEnabled` + `gatewayBridge`. The embedder is
+        // resolved OPTIONALLY: when it is nil (the default, no CoreML model) every turn
+        // degrades to markers-only and iOS submits NOTHING — the gateway auto-scores.
+        // When it is present, the turns that produce an embedding take the fail-closed
+        // client-embedding (B2) path.
+        guard cfg.voiceprintRealtimeEnabled, let bridge = gatewayBridge else { return }
+        let embedder = resolvedSpeakerEmbedder(config: cfg)
+        let modeRaw = cfg.mode.rawValue
+
+        // Run CoreML inference OFF the main actor so per-turn embedding never blocks
+        // @MainActor LiveSessionStore. `buildVoiceprintScoreTurns` is nonisolated and
+        // Sendable-safe; the finalized turns + embedder are value types / Sendable.
+        Task { [weak self, embedder, bridge, finalizedTurns, sessionKey, modeRaw] in
+            let scoreTurns = await Task.detached(priority: .utility) {
+                LiveSessionStore.buildVoiceprintScoreTurns(
+                    sessionKey: sessionKey,
+                    finalizedTurns: finalizedTurns,
+                    embedder: embedder,
+                    nonce: nil,
+                    pcmForTurn: { _ in
+                        // The finalized turn's PCM lives in the local WAV; extracting
+                        // the exact [startMs, endMs] window is a device-only concern
+                        // wired when the CAM++ model is provisioned. Until then the
+                        // gate is closed (embedder unavailable), so this closure is
+                        // never called in the default build and each turn degrades to
+                        // markers-only — nothing is submitted.
+                        nil
+                    }
+                )
+            }.value
+
+            let embedded = scoreTurns.filter { $0.embedding != nil }.count
+            // WS2: NO on-device embedding produced → do NOT submit score_turns. The
+            // gateway auto-scores the finalized turns itself (it already has the
+            // liveUpload audio) and pushes identity back. Submitting here would
+            // double-score. This is the default path in the open build (embedder inert).
+            guard embedded > 0 else { return }
+
+            // FAIL-CLOSED liveness binding: fresh single-use nonce → attach → submit.
+            // Runs ONLY on turns that produced a real on-device embedding (Phase 2).
+            let coordinator = VoiceprintLivenessCoordinator(gateway: bridge)
+            let submission = await coordinator.submit(
+                sessionKey: sessionKey,
+                mode: modeRaw,
+                turns: scoreTurns
+            )
+            let provider = embedder?.modelInfo.provider.rawValue ?? "on-device"
+            await MainActor.run { [weak self] in
+                self?.appendVerbose(Self.voiceprintSubmissionLog(
+                    submission,
+                    embedded: embedded,
+                    total: scoreTurns.count,
+                    provider: provider
+                ))
+            }
+        }
+    }
+
+    /// Build the per-turn verbose recognition lines from a server-side score_turns
+    /// result. Pure/static so it is unit-testable without a live session. FAIL-SAFE:
+    /// a nil result or empty `states` yields a single neutral "no result" line and
+    /// NEVER an owner line, so a transport error can never surface a false "owner".
+    ///
+    /// WS2: kept as a thin wrapper over `voiceprintRecognitionLines(states:total:)`
+    /// so the score_turns-result shape (used by the on-device / B2 path and the test
+    /// suite) and the piggybacked `scoredStates` shape (rendered from
+    /// `handleVoiceprintRealtimeResult`) share one renderer.
+    nonisolated static func voiceprintRecognitionLines(  // testable
+        result: LiveVoiceprintScoreTurnsResult?,
+        total: Int
+    ) -> [String] {
+        voiceprintRecognitionLines(states: result?.states ?? [], total: total)
+    }
+
+    /// Render per-turn verbose recognition lines from the pushed/scored states.
+    /// Shared by both the score_turns-result wrapper above and the WS2 piggyback
+    /// (`result.scoredStates`) path. FAIL-SAFE: empty `states` yields a single
+    /// neutral "no result" line and NEVER an owner line.
+    nonisolated static func voiceprintRecognitionLines(  // testable
+        states: [LiveVoiceprintScoreTurnState],
+        total: Int
+    ) -> [String] {
+        guard !states.isEmpty else {
+            return ["Voiceprint recognition: no result for \(total) turn\(total == 1 ? "" : "s") — marker path"]
+        }
+        return states.map { state in
+            let score = state.confidence.map { String(format: "%.2f", $0) }
+            switch state.result {
+            case "owner_speaking":
+                return "🗣️ You (owner)" + (score.map { " · \($0)" } ?? "")
+            case "possible_owner":
+                return "Possibly you (owner)" + (score.map { " · \($0)" } ?? "")
+            case "unknown_speaker", "unknown_cluster":
+                return "Unknown speaker" + (score.map { " · \($0)" } ?? "")
+            case "confirmed_person":
+                return "Known person" + (score.map { " · \($0)" } ?? "")
+            case let other?:
+                return "Speaker: \(other)" + (score.map { " · \($0)" } ?? "")
+            case nil:
+                // No decision (skipped / pending / error lifecycle) — never "owner".
+                let why = state.skipReason ?? state.lifecycle
+                return "Voiceprint: \(state.transcriptItemID) not scored (\(why))"
+            }
+        }
+    }
+
+    /// Human-readable summary of one liveness submission for the verbose event log.
+    nonisolated static func voiceprintSubmissionLog(
+        _ submission: VoiceprintLivenessSubmission,
+        embedded: Int,
+        total: Int,
+        provider: String
+    ) -> String {
+        switch submission {
+        case .submittedWithNonce:
+            return "Voiceprint on-device embeddings: \(embedded)/\(total) turns via \(provider) (nonce-bound)"
+        case .markersOnly(let reason):
+            let why = reason == .challengeExpired ? "nonce expired" : "no fresh nonce"
+            return "Voiceprint embeddings withheld (\(why)) — marker path already covered \(total) turns"
+        case .noEmbeddingTurns:
+            return "Voiceprint on-device embeddings: 0/\(total) turns — marker path"
+        }
+    }
+
+    // MARK: - B1 on-device speaker embedding
+
+    /// Resolve the on-device speaker embedder for the effective config, or nil to
+    /// use the marker path. This is the single OFF-BY-DEFAULT gate: it returns an
+    /// embedder ONLY when the voiceprint side-channel is on, the new
+    /// `onDeviceEmbeddingEnabled` toggle is on, AND a CoreML CAM++ model is
+    /// actually provisioned (available). When the model is absent — the default
+    /// state in this open repo — it returns nil and the caller keeps sending
+    /// markers, so the session never blocks and default behavior is unchanged.
+    private func resolvedSpeakerEmbedder(config: LiveSessionConfig) -> SpeakerEmbedder? {
+        guard config.voiceprintRealtimeEnabled, config.onDeviceEmbeddingEnabled else {
+            return nil
+        }
+        if let speakerEmbedder, speakerEmbedder.isAvailable {
+            return speakerEmbedder
+        }
+        let embedder = CoreMLSpeakerEmbedder.available()
+        speakerEmbedder = embedder
+        return embedder.isAvailable ? embedder : nil
+    }
+
+    /// Build score_turns turn params for finalized turns, attaching an on-device
+    /// `sampleEmbedding` when `embedder` produced one for that turn's PCM. Any
+    /// per-turn embedding failure degrades that turn to markers-only (no crash,
+    /// never blocks). Pure/static so it is unit-testable without a live session.
+    ///
+    /// `pcmForTurn` yields the finalized turn's mono float PCM + sample rate when
+    /// available on-device; returning nil (e.g. media persistence off, WAV not yet
+    /// flushed) leaves the turn markers-only. B2 later supplies the `nonce`.
+    nonisolated static func buildVoiceprintScoreTurns(
+        sessionKey: String,
+        finalizedTurns: [LiveVoiceprintFinalizedTurn],
+        embedder: SpeakerEmbedder?,
+        nonce: String? = nil,
+        pcmForTurn: (LiveVoiceprintFinalizedTurn) -> (samples: [Float], sampleRate: Double)?
+    ) -> [LiveVoiceprintScoreTurn] {
+        finalizedTurns.map { turn in
+            var embedding: SpeakerEmbedding?
+            if let embedder, embedder.isAvailable, let pcm = pcmForTurn(turn) {
+                embedding = try? embedder.embed(pcm.samples, sampleRate: pcm.sampleRate)
+            }
+            return LiveVoiceprintScoreTurn(
+                sessionKey: turn.sessionKey.isEmpty ? sessionKey : turn.sessionKey,
+                transcriptItemID: turn.transcriptItemID,
+                role: turn.role,
+                text: turn.text,
+                startMs: turn.startMs,
+                endMs: turn.endMs,
+                audioArtifactID: turn.audioArtifactID,
+                audioPath: turn.audioPath,
+                route: turn.route,
+                embedding: embedding,
+                nonce: nonce
+            )
+        }
+    }
+
+    private func nextVoiceprintSpeechWindowID() -> String {
+        voiceprintSpeechWindowCounter += 1
+        return "ios_speech_\(voiceprintSpeechWindowCounter)"
+    }
+
+    nonisolated static func voiceprintRealtimeEvent(
+        rawType: String,
+        rawJSON: String,
+        route: String? = nil,
+        recordingOffsetMs: Double? = nil
+    ) -> LiveVoiceprintRealtimeEvent? {
+        let object = rawJSONObject(rawJSON)
+        let itemID = stringValue(object, keys: ["item_id", "itemId"])
+        let speechWindowID = stringValue(object, keys: ["speech_window_id", "speechWindowId"])
+        let eventRoute = stringValue(object, keys: ["route", "audio_route", "audioRoute"]) ?? cleanedString(route)
+        let recordingOffset = finiteNumber(recordingOffsetMs)
+
+        switch rawType {
+        case "input_audio_buffer.speech_started":
+            // The vendored WebRTC transport delegate is arg-less, so the provider
+            // re-emits speech_started with an EMPTY JSON body ("{}"). Do NOT drop the
+            // event when neither the raw JSON nor the recording offset carries a
+            // timestamp: the window is still real and must reach the server. When the
+            // recording offset is nil (parallel-mic warm-up), leave audioStartMs nil
+            // here and let the MainActor caller (`prepareVoiceprintRealtimeEvent`)
+            // stamp a recording-timeline-aligned, monotonic timestamp. Stamping here
+            // when the offset IS available preserves the existing wire behavior.
+            let audioStartMs = numberValue(object, keys: ["audio_start_ms", "start_ms", "at_ms"]) ?? recordingOffset
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: itemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: audioStartMs,
+                audioEndMs: nil,
+                transcript: nil,
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        case "input_audio_buffer.speech_stopped":
+            // See speech_started: never drop an empty-JSON VAD stop. A nil audioEndMs
+            // is repaired by the MainActor caller so endMs > startMs strictly, in the
+            // same recording-offset time base as the audio artifact.
+            let audioEndMs = numberValue(object, keys: ["audio_end_ms", "end_ms", "at_ms"]) ?? recordingOffset
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: itemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: nil,
+                audioEndMs: audioEndMs,
+                transcript: nil,
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        case "conversation.item.input_audio_transcription.completed":
+            guard itemID != nil else { return nil }
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: itemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: nil,
+                audioEndMs: nil,
+                transcript: stringValue(object, keys: ["transcript", "text"]),
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        case "response.audio_transcript.done", "response.output_audio_transcript.done":
+            let transcriptItemID = itemID ?? stringValue(object, keys: ["response_id", "responseId"])
+            guard transcriptItemID != nil else { return nil }
+            return LiveVoiceprintRealtimeEvent(
+                type: rawType,
+                itemID: transcriptItemID,
+                speechWindowID: speechWindowID,
+                audioStartMs: nil,
+                audioEndMs: nil,
+                transcript: stringValue(object, keys: ["transcript", "text"]),
+                audioArtifactID: nil,
+                audioPath: nil,
+                sampleRate: nil,
+                route: eventRoute
+            )
+        default:
+            return nil
+        }
+    }
+
+    nonisolated static func voiceprintAudioArtifactEvent(
+        itemID: String?,
+        speechWindowID: String?,
+        artifact: LiveVoiceprintAudioArtifactReference,
+        route: String? = nil
+    ) -> LiveVoiceprintRealtimeEvent {
+        let cleanItemID = cleanedString(itemID)
+        let cleanSpeechWindowID = cleanedString(speechWindowID)
+        let joinID = cleanItemID ?? cleanSpeechWindowID
+        let artifactID = [artifact.audioArtifactID, joinID]
+            .compactMap { cleanedString($0) }
+            .joined(separator: ":")
+        return LiveVoiceprintRealtimeEvent(
+            type: "live_recording.audio_artifact",
+            itemID: cleanItemID,
+            speechWindowID: cleanSpeechWindowID,
+            audioStartMs: nil,
+            audioEndMs: nil,
+            transcript: nil,
+            audioArtifactID: artifactID,
+            audioPath: artifact.audioPath,
+            sampleRate: artifact.sampleRate,
+            route: cleanedString(route)
+        )
+    }
+
+    nonisolated static func consumeVoiceprintFallbackSpeechWindowID(
+        forTranscriptItemID itemID: String,
+        from closedSpeechWindowIDs: inout [String],
+        transcriptAlreadySent: Bool
+    ) -> String? {
+        let cleanItemID = cleanedString(itemID) ?? itemID
+        if transcriptAlreadySent {
+            if let index = closedSpeechWindowIDs.firstIndex(of: cleanItemID) {
+                closedSpeechWindowIDs.remove(at: index)
+            } else if !closedSpeechWindowIDs.isEmpty {
+                closedSpeechWindowIDs.removeFirst()
+            }
+            return nil
+        }
+        guard !closedSpeechWindowIDs.isEmpty else { return nil }
+        return closedSpeechWindowIDs.removeFirst()
     }
 
     private func append(_ message: String, level: LiveEventLogEntry.Level = .info, detail: String? = nil) {
@@ -3683,6 +4657,11 @@ final class LiveSessionStore {
         let modeRaw: String
     }
 
+    struct LiveVoiceprintRealtimeRuntimeTarget: Equatable {
+        let sessionKey: String
+        let modeRaw: String
+    }
+
     nonisolated static func bridgeStartDecision(for result: LiveBootContextResult, required: Bool) -> LiveBridgeStartDecision {
         switch result {
         case .loaded, .skipped:
@@ -3715,11 +4694,55 @@ final class LiveSessionStore {
         draftConfig: LiveSessionConfig
     ) -> LiveTranscriptAppendRuntimeTarget? {
         let cfg = activeConfig ?? draftConfig
+        // conversationJournalingEnabled == false (enrollment listening session):
+        // the user's turns are biometric capture, not conversation — they must
+        // not append to the gateway session transcript either.
         guard cfg.modeLatentIntentionEnabled,
+              cfg.conversationJournalingEnabled,
               let sessionKey = resolvedRuntimeGatewayBridgeSessionKey(from: cfg) else {
             return nil
         }
         return LiveTranscriptAppendRuntimeTarget(sessionKey: sessionKey, modeRaw: cfg.mode.rawValue)
+    }
+
+    /// Whether the given session shape keeps the conversation record untouched
+    /// (no app chat entries, no journal lines, no session-end memory distill).
+    /// Same activeConfig-over-draft precedence as the runtime-target helpers so
+    /// a mid-session settings edit can never flip journaling for the running
+    /// session. FAIL-CLOSED default: only an explicit override suppresses.
+    nonisolated static func conversationRecordSuppressed(
+        activeConfig: LiveSessionConfig?,
+        draftConfig: LiveSessionConfig
+    ) -> Bool {
+        !(activeConfig ?? draftConfig).conversationJournalingEnabled
+    }
+
+    /// Whether a session's free-text lock-screen line — a system message's
+    /// `detailLine` or a user turn's "You: …" contextLine — may be persisted to
+    /// the cross-process WidgetStatusStore / lock-screen widget. Record
+    /// suppression (enrollment listening) must gate this the same way it gates
+    /// the chat record: the enrollment session's bracketing status text
+    /// ("Connecting …", the bridge session key, "Session stopped") and any user
+    /// turn text is session content that a bystander must not see on the lock
+    /// screen and that must leave no persisted trace. FAIL-CLOSED: suppress
+    /// whenever the record is suppressed.
+    nonisolated static func widgetDetailLinePersistAllowed(recordSuppressed: Bool) -> Bool {
+        !recordSuppressed
+    }
+
+    nonisolated static func voiceprintRealtimeRuntimeTarget(
+        activeConfig: LiveSessionConfig?,
+        draftConfig: LiveSessionConfig
+    ) -> LiveVoiceprintRealtimeRuntimeTarget? {
+        let cfg = activeConfig ?? draftConfig
+        guard cfg.gatewayBridgeEnabled,
+              cfg.voiceprintRealtimeEnabled,
+              cfg.audioInputEnabled,
+              cfg.mediaPersistenceMode != .off,
+              let sessionKey = resolvedRuntimeGatewayBridgeSessionKey(from: cfg) else {
+            return nil
+        }
+        return LiveVoiceprintRealtimeRuntimeTarget(sessionKey: sessionKey, modeRaw: cfg.mode.rawValue)
     }
 
     private func fetchStartupBootContext(config: LiveSessionConfig) async -> LiveBootContextResult {
@@ -4000,6 +5023,24 @@ final class LiveSessionStore {
                         }
                         continue
                     }
+                    // WS2 live owner recognition (SECONDARY channel): the edge-triggered
+                    // `voiceprint.identity` broadcast. Route into the SAME identity state
+                    // machine as the realtime_event piggyback (de-duped there) in any feed
+                    // mode. FAIL-SAFE: handled behind the recognition flag; a garbled
+                    // verdict never yields owner.
+                    if case .voiceprintIdentity(_, let verdict, let decision, let confidence, let at) = event {
+                        await MainActor.run {
+                            self?.handleVoiceprintIdentitySummary(
+                                LiveVoiceprintIdentitySummary(
+                                    verdict: verdict,
+                                    decision: decision,
+                                    confidence: confidence,
+                                    at: at
+                                )
+                            )
+                        }
+                        continue
+                    }
                     // Surface intention deliveries (M6) are injected in any feed mode.
                     if case .intentionSurface(let intentionId, let text, let speak, let whenBusy, let cautious) = event {
                         let policy: SurfaceBusyPolicy
@@ -4068,6 +5109,8 @@ final class LiveSessionStore {
                         break // handled before the feed gate above (#482)
                     case .whenDisarmed:
                         break // handled before the feed gate above (#482)
+                    case .voiceprintIdentity:
+                        break // handled before the feed gate above (WS2)
                     case .error(let message):
                         await flush(reason: "before error")
                         await MainActor.run {
@@ -4126,11 +5169,22 @@ final class LiveSessionStore {
 
     private func appendUserMessage(_ message: String) {
         appendConversation(role: .user, text: message, level: .info, isStreaming: false)
-        updateWidgetStatus(contextLine: "You: \(message)")
+        // Record-suppressed session (enrollment listening): the chat entry is
+        // already dropped by appendConversation's central guard, so keep the
+        // user text off the cross-process widget context line too. Routes through
+        // the same persist gate as the system detailLine, matching the sibling
+        // suppression in finishUserTranscript, so a future path that injects a
+        // typed turn during a suppressed session leaves no lock-screen trace.
+        if Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) {
+            updateWidgetStatus(contextLine: "You: \(message)")
+        }
         currentAssistantEntryID = nil
     }
 
     private func appendVisualFrame(_ data: Data) {
+        // Record-suppressed session (enrollment listening): no frame bubbles.
+        // (Enrollment forces the camera off; this is the fail-closed belt.)
+        guard !suppressConversationRecord else { return }
         let detail = """
         {
           "type": "input_image",
@@ -4219,6 +5273,9 @@ final class LiveSessionStore {
 
     private func appendAssistantDelta(itemID: String?, phase: String? = nil, delta: String, detail: String?, eventType: String?) {
         guard !delta.isEmpty else { return }
+        // Record-suppressed session (enrollment listening): nothing enters the
+        // chat record. (The model is silenced anyway; this is the belt.)
+        guard !suppressConversationRecord else { return }
         // Prefer keying by the Realtime output item_id: one item == one bubble,
         // even across multiple deltas/redeliveries. Fall back to the single
         // "current" entry only when no item_id is provided (e.g. mock provider).
@@ -4291,7 +5348,16 @@ final class LiveSessionStore {
             // Stop the bubble reading the holder; it now shows the committed text.
             streamingText.text[id] = nil
             journal(conversation[index])
-            updateWidgetStatus(contextLine: "Agent: \(conversation[index].text)")
+            // Record-suppressed session (enrollment listening): the chat entry is
+            // dropped by appendConversation's central guard, so keep the assistant
+            // text off the cross-process widget context line too. Routes through
+            // the same persist gate as the sibling user paths (appendUserMessage,
+            // finishUserTranscript) and the system detailLine, so a provider
+            // greeting that slips past speakOnlyWhenSpokenTo leaves no lock-screen
+            // trace during a silent enrollment listening session.
+            if Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) {
+                updateWidgetStatus(contextLine: "Agent: \(conversation[index].text)")
+            }
         } else if let fallbackText, !fallbackText.isEmpty {
             var entry = appendConversation(role: .assistant, text: fallbackText, level: .info, isStreaming: false, detail: detail, eventType: eventType)
             if let phase, let index = conversation.firstIndex(where: { $0.id == entry.id }) {
@@ -4300,7 +5366,14 @@ final class LiveSessionStore {
                 journal(entry)
             }
             if let itemID { assistantEntryByItemID[itemID] = entry.id }
-            updateWidgetStatus(contextLine: "Agent: \(entry.text)")
+            // Record-suppressed session (enrollment listening): a lone response.done
+            // carrying a transcript reaches this fallback branch independent of any
+            // prior deltas; the bubble is already dropped by appendConversation's
+            // central guard, so gate the widget context line the same way. Fail
+            // closed so the silenced model's words never persist on the lock screen.
+            if Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) {
+                updateWidgetStatus(contextLine: "Agent: \(entry.text)")
+            }
             return
         }
         currentAssistantEntryID = nil
@@ -4308,6 +5381,9 @@ final class LiveSessionStore {
 
     private func appendUserTranscriptDelta(itemID: String, delta: String, detail: String?, eventType: String?) {
         guard !delta.isEmpty else { return }
+        // Record-suppressed session (enrollment listening): the user's words are
+        // biometric capture, never conversation — keep them out of the record.
+        guard !suppressConversationRecord else { return }
         if let entryID = transcriptEntryByItemID[itemID],
            let index = conversation.firstIndex(where: { $0.id == entryID }) {
             conversation[index].text += delta
@@ -4347,12 +5423,22 @@ final class LiveSessionStore {
             conversation[index].isStreaming = false
             conversation[index].detail = detail ?? conversation[index].detail
             conversation[index].eventType = eventType ?? conversation[index].eventType
-            journal(conversation[index])
-            updateWidgetStatus(contextLine: "You: \(conversation[index].text)")
-        } else if !transcript.isEmpty {
+            // Record-suppressed session (enrollment listening): never journal the turn
+            // or leak it onto the lock-screen widget. Today this branch is unreachable
+            // under suppression because appendUserTranscriptDelta (the sole populator of
+            // transcriptEntryByItemID) early-returns before writing the key — but guard
+            // here too, matching every sibling append path, so a future path that
+            // populates the map some other way can't leak an enrollment turn.
+            if !suppressConversationRecord {
+                journal(conversation[index])
+                updateWidgetStatus(contextLine: "You: \(conversation[index].text)")
+            }
+        } else if !transcript.isEmpty, !suppressConversationRecord {
+            // Record-suppressed session (enrollment listening): the finalized turn
+            // stays out of the chat AND off the widget context line.
             appendConversation(role: .user, text: transcript, level: .info, isStreaming: false, detail: detail, eventType: eventType)
             updateWidgetStatus(contextLine: "You: \(transcript)")
-        } else if eventType == "input_audio_buffer.speech_stopped" {
+        } else if eventType == "input_audio_buffer.speech_stopped", !suppressConversationRecord {
             let unavailableDetail = detail ?? "No transcription text was provided for this spoken turn."
             appendConversation(role: .user, text: "", level: .warning, isStreaming: false, detail: unavailableDetail, eventType: eventType)
             updateWidgetStatus(contextLine: "You spoke")
@@ -4400,6 +5486,8 @@ final class LiveSessionStore {
     }
 
     private func finishCurrentAudioTurn(byteCount: Int) {
+        // Record-suppressed session (enrollment listening): no "Audio turn" rows.
+        guard !suppressConversationRecord else { return }
         let cfg = liveConfig
         if cfg.inputTranscriptionEnabled {
             if currentUserAudioEntryID == nil {
@@ -4432,6 +5520,8 @@ final class LiveSessionStore {
         arguments: String? = nil,
         output: String? = nil
     ) {
+        // Record-suppressed session (enrollment listening): no tool bubbles.
+        guard !suppressConversationRecord else { return }
         let now = Date()
         // Update an existing bubble for this call id.
         if let callID, let id = toolEntryByCallID[callID],
@@ -4533,6 +5623,14 @@ final class LiveSessionStore {
     ) {
         guard conversation.last?.text != message || conversation.last?.role != .system else { return }
         appendConversation(role: .system, text: message, level: level, isStreaming: false, detail: detail, eventType: eventType)
+        // `detailLine` is free-text session content (e.g. "Connecting OpenAI…",
+        // the bridge session key, "Session stopped"). Under record suppression
+        // (enrollment listening) it must NOT reach the cross-process
+        // WidgetStatusStore / lock-screen widget — the enrollment session's whole
+        // purpose is to leave no trace. Legitimate liveState/recordingState widget
+        // updates route through their own direct updateWidgetStatus calls and are
+        // unaffected. Fail closed: suppress the persisted detailLine here too.
+        guard Self.widgetDetailLinePersistAllowed(recordSuppressed: suppressConversationRecord) else { return }
         updateWidgetStatus(detailLine: message)
     }
 
@@ -4553,6 +5651,9 @@ final class LiveSessionStore {
             detail: detail,
             eventType: eventType
         )
+        // Record-suppressed session (enrollment listening): return the entry
+        // unappended so callers no-op instead of writing to the chat record.
+        guard !suppressConversationRecord else { return entry }
         conversation.append(entry)
         journal(entry)
         trimConversation()
@@ -4741,11 +5842,60 @@ final class LiveSessionStore {
         return text
     }
 
+    private nonisolated static func rawJSONObject(_ rawJSON: String) -> [String: Any] {
+        guard let data = rawJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return object
+    }
+
+    private nonisolated static func stringValue(_ object: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = cleanedString(object[key] as? String) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func numberValue(_ object: [String: Any], keys: [String]) -> Double? {
+        for key in keys {
+            if let value = object[key] as? Double, value.isFinite {
+                return value
+            }
+            if let value = object[key] as? Int {
+                return Double(value)
+            }
+            if let value = object[key] as? NSNumber {
+                let number = value.doubleValue
+                if number.isFinite {
+                    return number
+                }
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func finiteNumber(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return value
+    }
+
+    private nonisolated static func cleanedString(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
     private func currentRealtimeBridgeSessionKey() -> String {
         "realtime:\(currentSessionID.uuidString.lowercased())"
     }
 
     private func journal(_ entry: LiveConversationEntry) {
+        // Record-suppressed session (enrollment listening): no journal lines —
+        // session history must not retain any trace of the enrollment monologue.
+        guard !suppressConversationRecord else { return }
         guard let session = localSessions.first(where: { $0.id == currentSessionID }) else { return }
         LiveSessionArchive.append(entry: entry, to: session)
         scheduleSessionMetadataSave()
@@ -4757,6 +5907,9 @@ final class LiveSessionStore {
         json: String,
         providerLabel: String? = nil
     ) {
+        // Record-suppressed session (enrollment listening): the raw event log
+        // carries the same transcript payloads — keep it out of history too.
+        guard !suppressConversationRecord else { return }
         guard let session = localSessions.first(where: { $0.id == currentSessionID }) else { return }
         let entry = LiveRawLogEntry(
             provider: providerLabel ?? config.provider.label,
@@ -4772,7 +5925,7 @@ final class LiveSessionStore {
         sessionMetadataSaveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
-            await self?.saveCurrentSession()
+            self?.saveCurrentSession()
         }
     }
 

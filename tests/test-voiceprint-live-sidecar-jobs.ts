@@ -1,0 +1,388 @@
+import { describe, expect, test } from "bun:test";
+import {
+  buildLiveVoiceprintScoringBatchRequest,
+  buildLiveVoiceprintScoringJob,
+  prepareLiveVoiceprintTurn,
+  scoreLiveVoiceprintScoringJobResponse,
+  UnusableVoiceprintEmbeddingError,
+  validateEmbeddingResponse,
+  type LiveVoiceprintReadyTurn,
+} from "../src/identity/voiceprint/index.js";
+
+const sampleRate = 16000;
+const processingConsent = {
+  captureAllowed: true,
+  biometricAllowed: true,
+};
+
+describe("live voiceprint sidecar jobs", () => {
+  test("builds deterministic queued jobs and embedding batch requests", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({
+      prepared,
+      audioPath: "/tmp/live-turn.wav",
+      targetSampleRate: 16000,
+      ownerTemplateRef: "owner-template:v1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      maxAttempts: 2,
+      timeoutMs: 10_000,
+    });
+    const again = buildLiveVoiceprintScoringJob({
+      prepared,
+      audioPath: "/tmp/live-turn.wav",
+      targetSampleRate: 16000,
+      ownerTemplateRef: "owner-template:v1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      maxAttempts: 2,
+      timeoutMs: 10_000,
+    });
+
+    expect(job.version).toBe(1);
+    expect(job.status).toBe("queued");
+    expect(job.id).toBe(again.id);
+    expect(job.embeddingRequest.id).toBe(`${job.id}_embedding`);
+    expect(job.embeddingRequest.audioPath).toBe("/tmp/live-turn.wav");
+    expect(job.embeddingRequest.route).toBe("iphone_mic");
+    expect(job.attempts).toEqual({ current: 0, max: 2 });
+
+    const batch = buildLiveVoiceprintScoringBatchRequest([job]);
+    expect(batch.requests).toEqual([job.embeddingRequest]);
+    expect(() => buildLiveVoiceprintScoringBatchRequest([job, again])).toThrow(/Duplicate/);
+
+    const sliced = buildLiveVoiceprintScoringJob({
+      prepared,
+      audioPath: "/tmp/live-turn.wav",
+      requestStartMs: 100,
+      requestEndMs: 900,
+      targetSampleRate: 8000,
+      ownerTemplateRef: "owner-template:v1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+    });
+    expect(sliced.id).not.toBe(job.id);
+    expect(sliced.embeddingRequest.id).not.toBe(job.embeddingRequest.id);
+    expect(buildLiveVoiceprintScoringBatchRequest([job, sliced]).requests).toHaveLength(2);
+
+    const routeChanged = buildLiveVoiceprintScoringJob({
+      prepared: readyTurn("speaker"),
+      audioPath: "/tmp/live-turn.wav",
+      targetSampleRate: 16000,
+      ownerTemplateRef: "owner-template:v1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      maxAttempts: 2,
+      timeoutMs: 10_000,
+    });
+    expect(routeChanged.embeddingRequest.route).toBe("speaker");
+    expect(routeChanged.id).not.toBe(job.id);
+    expect(routeChanged.embeddingRequest.id).not.toBe(job.embeddingRequest.id);
+    expect(buildLiveVoiceprintScoringBatchRequest([job, routeChanged]).requests).toHaveLength(2);
+  });
+
+  test("scores a matching sidecar response through the live scoring flow", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({
+      prepared,
+      audioPath: "/tmp/live-turn.wav",
+    });
+
+    const result = scoreLiveVoiceprintScoringJobResponse({
+      job,
+      response: {
+        id: job.embeddingRequest.id,
+        embedding: [1, 0],
+        model: { provider: "custom", modelId: "live-sidecar", version: "1" },
+      },
+      expectedModel: { provider: "custom", modelId: "live-sidecar", version: "1" },
+      ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+      consent: { ...processingConsent, memoryPromotionAllowed: true },
+      eventId: "event_live_1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+    });
+
+    expect(result.status).toBe("scored");
+    expect(result.jobId).toBe(job.id);
+    expect(result.requestId).toBe(job.embeddingRequest.id);
+    expect(result.result.score.decision).toBe("owner_speaking");
+    expect(result.result.score.records.transcriptSpeakerAnnotation.transcriptItemId).toBe("rt_live_job");
+    expect(result.result.score.records.eventParticipation?.actor).toEqual({ type: "owner" });
+    expect(result.response.model.version).toBe("1");
+  });
+
+  test("rejects mismatched sidecar responses and unsafe job options", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({
+      prepared,
+      audioPath: "/tmp/live-turn.wav",
+    });
+
+    expect(() =>
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: "different_request",
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0]],
+      }),
+    ).toThrow(/does not match job request id/);
+
+    expect(() =>
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "live-sidecar", version: "2" },
+        },
+        expectedModel: { provider: "custom", modelId: "live-sidecar", version: "1" },
+        ownerEmbeddings: [[1, 0]],
+      }),
+    ).toThrow(/does not match expected/);
+
+    expect(() =>
+      buildLiveVoiceprintScoringJob({
+        prepared,
+        audioPath: "/tmp/live-turn.wav",
+        attempt: 1,
+      }),
+    ).toThrow(/attempt must be less than maxAttempts/);
+
+    expect(() =>
+      buildLiveVoiceprintScoringJob({
+        prepared: {
+          ...prepared,
+          turn: { ...prepared.turn, startMs: Number.NaN },
+        },
+        audioPath: "/tmp/live-turn.wav",
+      }),
+    ).toThrow(/finite startMs and endMs/);
+  });
+
+  test("A5 guard: refuses a reference-tagged returned model even when expectedModel is unset", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // The sidecar RETURNED a reference-backend model tag (e.g. a misconfigured or
+    // wrapper process) while expected_model is unset. With the guard on this MUST
+    // refuse at score time — the reference backend is non-discriminative.
+    expect(() =>
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "reference", modelId: "reference-fbank-v0", version: "0" },
+        },
+        requireDiscriminativeModel: true,
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      }),
+    ).toThrow(/non-discriminative reference model/);
+
+    // A mislabeled tag (reference modelId under a "custom" provider) is caught too.
+    expect(() =>
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "reference-fbank-v0", version: "0" },
+        },
+        requireDiscriminativeModel: true,
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      }),
+    ).toThrow(/non-discriminative reference model/);
+  });
+
+  test("A5 guard OFF (default): reference-tagged responses still score for dev/test", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // Default posture (requireDiscriminativeModel omitted) preserves the existing
+    // behavior: the reference backend remains fully usable in dev/test.
+    const result = scoreLiveVoiceprintScoringJobResponse({
+      job,
+      response: {
+        id: job.embeddingRequest.id,
+        embedding: [1, 0],
+        model: { provider: "reference", modelId: "reference-fbank-v0", version: "0" },
+      },
+      ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+      consent: { ...processingConsent, memoryPromotionAllowed: true },
+    });
+    expect(result.status).toBe("scored");
+  });
+});
+
+describe("live voiceprint unusable-embedding is a TYPED per-turn fault (not substring)", () => {
+  // The batch scorer must distinguish a per-turn DATA fault (skip only this turn)
+  // from a PRECONDITION fault (fail the batch) by the ERROR TYPE, not by matching
+  // the message text. These tests prove the type-based reclassification and that a
+  // message reword could not silently flip skip-vs-fail.
+
+  test("garbage/empty RESPONSE embedding reclassifies to the TYPED error via instanceof", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // Empty embedding vector: a per-turn DATA fault. The batch scorer catches this by
+    // `instanceof UnusableVoiceprintEmbeddingError` and skips only this turn.
+    let caught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    // Detection is by TYPE — this holds even if the message were reworded.
+    expect(caught).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+    // Message text is preserved verbatim for any caller/test asserting on it.
+    expect((caught as Error).message).toBe(
+      "Voiceprint embedding response requires a finite non-empty embedding.",
+    );
+  });
+
+  test("wrong-dimension SAMPLE embedding reclassifies to the TYPED error", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // A usable-but-wrong-dimension sidecar vector: still a per-turn DATA fault that
+    // skips only this turn. Owner embeddings are 2-D; the sample is 3-D.
+    let caught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0], [0.98, 0.02]],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+    expect((caught as Error).message).toContain("sample embedding has dimension");
+  });
+
+  test("a genuine PRECONDITION fault stays a hard (non-Unusable) error", () => {
+    const prepared = readyTurn();
+    const job = buildLiveVoiceprintScoringJob({ prepared, audioPath: "/tmp/live-turn.wav" });
+
+    // Owner-template fault (no owner embeddings): a configuration/precondition fault.
+    // It MUST NOT be reclassified — it fails the batch, so it is a plain Error and
+    // NOT an UnusableVoiceprintEmbeddingError.
+    let caught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: job.embeddingRequest.id,
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [],
+        consent: { ...processingConsent, memoryPromotionAllowed: true },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+
+    // A response-id mismatch is likewise a batch-integrity precondition, NOT unusable.
+    let idCaught: unknown;
+    try {
+      scoreLiveVoiceprintScoringJobResponse({
+        job,
+        response: {
+          id: "different_request",
+          embedding: [1, 0],
+          model: { provider: "custom", modelId: "live-sidecar" },
+        },
+        ownerEmbeddings: [[1, 0]],
+      });
+    } catch (error) {
+      idCaught = error;
+    }
+    expect(idCaught).not.toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+  });
+
+  test("the VALIDATION ORIGIN throws the typed error, so detection is by type not string", () => {
+    // validateEmbeddingResponse is the origin of the "finite non-empty embedding"
+    // fault. It now throws the TYPED error directly (message preserved), which is
+    // what lets the scorer reclassify by instanceof instead of substring.
+    let caught: unknown;
+    try {
+      validateEmbeddingResponse({
+        id: "req_1",
+        embedding: [Number.NaN],
+        model: { provider: "custom", modelId: "live-sidecar" },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+
+    // A structural precondition at the SAME origin (missing id) stays a plain Error.
+    let structural: unknown;
+    try {
+      validateEmbeddingResponse({
+        id: "  ",
+        embedding: [1, 0],
+        model: { provider: "custom", modelId: "live-sidecar" },
+      });
+    } catch (error) {
+      structural = error;
+    }
+    expect(structural).toBeInstanceOf(Error);
+    expect(structural).not.toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+  });
+
+  test("the typed error is a distinguishable subclass a message reword cannot break", () => {
+    // Constructed directly with an arbitrary (reworded) message: instanceof still
+    // holds, proving detection does not depend on the message text.
+    const reworded = new UnusableVoiceprintEmbeddingError("totally different wording");
+    expect(reworded).toBeInstanceOf(UnusableVoiceprintEmbeddingError);
+    expect(reworded).toBeInstanceOf(Error);
+    expect(reworded.name).toBe("UnusableVoiceprintEmbeddingError");
+  });
+});
+
+function readyTurn(route: "iphone_mic" | "speaker" = "iphone_mic"): LiveVoiceprintReadyTurn {
+  const prepared = prepareLiveVoiceprintTurn({
+    sessionKey: "live:voiceprint-job",
+    transcriptItemId: "rt_live_job",
+    role: "user",
+    text: "remember this came from the owner",
+    startMs: 1000,
+    endMs: 2500,
+    audioArtifactId: "audio_live_job",
+    route,
+    samples: sineWave(1500, 0.1),
+    sampleRate,
+  });
+  if (prepared.status !== "ready") {
+    throw new Error("expected ready voiceprint turn");
+  }
+  return prepared;
+}
+
+function sineWave(durationMs: number, amplitude: number): Float32Array {
+  const length = Math.round((durationMs / 1000) * sampleRate);
+  const samples = new Float32Array(length);
+  for (let i = 0; i < samples.length; i += 1) {
+    samples[i] = Math.sin((2 * Math.PI * 220 * i) / sampleRate) * amplitude;
+  }
+  return samples;
+}

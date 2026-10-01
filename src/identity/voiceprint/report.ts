@@ -1,0 +1,305 @@
+import {
+  type VoiceprintDecision,
+  type VoiceprintExpectedLabel,
+  type VoiceprintManifest,
+  type VoiceprintModelInfo,
+  type VoiceprintScoreReport,
+  type VoiceprintScoreRow,
+  type VoiceprintThresholds,
+} from "./types.js";
+import { loadVoiceprintEmbedding } from "./manifest.js";
+import { resolveVoiceprintThresholds } from "./thresholds.js";
+import {
+  classifyOwnerSimilarity,
+  isUsableEmbeddingVector,
+  ownerSimilarity,
+} from "./similarity.js";
+import {
+  computeVoiceprintOperatingPoint,
+  type VoiceprintOperatingPoint,
+  type VoiceprintOperatingPointOptions,
+} from "./calibration.js";
+
+const DEFAULT_MODEL: VoiceprintModelInfo = {
+  provider: "external-json",
+  modelId: "external-embedding",
+};
+
+const VALID_EXPECTED_LABELS = new Set<VoiceprintExpectedLabel>([
+  "owner",
+  "non_owner",
+  "noise",
+  "assistant_leakage",
+  "unknown",
+]);
+
+export async function scoreVoiceprintManifest(
+  manifest: VoiceprintManifest,
+  options: {
+    baseDir?: string;
+    thresholdOverrides?: Partial<VoiceprintThresholds>;
+    generatedAt?: string;
+  } = {},
+): Promise<VoiceprintScoreReport> {
+  validateManifest(manifest);
+
+  const model = manifest.model ?? DEFAULT_MODEL;
+  const thresholds = resolveVoiceprintThresholds(
+    manifest.thresholds,
+    options.thresholdOverrides,
+  );
+
+  const baseDir = options.baseDir ?? process.cwd();
+  const enrollmentEmbeddings = await Promise.all(
+    manifest.owner.enrollment.map((source) => loadVoiceprintEmbedding(source, baseDir, model)),
+  );
+  // Score samples with the same best-matching-enrolled-clip aggregation the live
+  // turn-scoring path uses (max over per-clip cosine), so the threshold report
+  // reflects production scoring for multi-clip enrollments instead of a
+  // divergent mean-centroid. For single-clip enrollment this is identical to the
+  // old centroid score, so existing single-clip reports are unchanged.
+  //
+  // ownerSimilarity silently skips dimension-mismatched enrolled clips (mixed dims
+  // would have thrown under the old meanVector centroid), so pin every clip to the
+  // first clip's dimension here to keep that hard-fail invariant and avoid quietly
+  // dropping enrollment conditions from the calibration.
+  const enrollmentDim = enrollmentEmbeddings[0]!.vector.length;
+  validateLoadedEmbeddingVectors(enrollmentEmbeddings, "owner enrollment", enrollmentDim);
+  const ownerVectors = enrollmentEmbeddings.map((embedding) => embedding.vector);
+
+  const rows: VoiceprintScoreRow[] = [];
+  for (const sample of manifest.samples) {
+    const loaded = await loadVoiceprintEmbedding(sample, baseDir, model);
+    validateLoadedEmbeddingVectors([loaded], "sample", enrollmentDim);
+    const similarity = ownerSimilarity(ownerVectors, loaded.vector);
+    const decision = classifyOwnerSimilarity(similarity, thresholds);
+    const assessment = assessDecision(sample.expected, decision);
+    rows.push({
+      id: sample.id,
+      expected: sample.expected,
+      decision,
+      similarity,
+      passed: assessment.passed,
+      risk: assessment.risk,
+      route: sample.route,
+      provider: loaded.provider,
+      modelId: loaded.modelId,
+      notes: sample.notes,
+    });
+  }
+
+  return {
+    generatedAt: options.generatedAt ?? new Date().toISOString(),
+    ownerId: manifest.owner.id ?? "owner",
+    model,
+    thresholds,
+    enrollment: {
+      count: enrollmentEmbeddings.length,
+      dim: enrollmentDim,
+    },
+    summary: summarizeRows(rows),
+    rows,
+  };
+}
+
+export function formatVoiceprintReport(report: VoiceprintScoreReport): string {
+  const lines = [
+    "Voiceprint threshold report",
+    `Generated: ${report.generatedAt}`,
+    `Owner: ${report.ownerId}`,
+    `Model: ${report.model.provider}/${report.model.modelId}`,
+    `Thresholds: ownerAccept=${report.thresholds.ownerAccept.toFixed(3)}, ownerPossible=${report.thresholds.ownerPossible.toFixed(3)}`,
+    `Enrollment: ${report.enrollment.count} vectors, dim=${report.enrollment.dim}`,
+    "",
+    "Samples:",
+  ];
+
+  for (const row of report.rows) {
+    const status =
+      row.passed === null ? "unlabeled" : row.passed ? "pass" : "fail";
+    lines.push(
+      [
+        `- ${row.id}`,
+        `expected=${row.expected}`,
+        `decision=${row.decision}`,
+        `similarity=${row.similarity.toFixed(4)}`,
+        `risk=${row.risk}`,
+        `status=${status}`,
+      ].join(" | "),
+    );
+  }
+
+  lines.push(
+    "",
+    `Summary: total=${report.summary.total}, passed=${report.summary.passed}, failed=${report.summary.failed}, unlabeled=${report.summary.unlabeled}, falseAccepts=${report.summary.falseAccepts}, falseRejects=${report.summary.falseRejects}, possibleFalseAccepts=${report.summary.possibleFalseAccepts}`,
+  );
+
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * ADDITIVE. Derive genuine (expected "owner") vs impostor (expected "non_owner"
+ * or "assistant_leakage") similarity arrays from a scored report and compute the
+ * operating point (EER, FAR/FRR curve, recommended thresholds). "noise"/"unknown"
+ * rows are excluded — they are not a genuine/impostor label. Rows whose similarity
+ * is the not-a-match sentinel are excluded too (they carry no comparable score).
+ *
+ * This is a labeled-manifest calibration on FIXTURE data. Per the A10 honesty
+ * note, fixture/TTS data is NOT a production cohort: the recommendation here is a
+ * MACHINERY demonstration + a fixture operating point, not a production number.
+ */
+export function computeVoiceprintReportOperatingPoint(
+  report: VoiceprintScoreReport,
+  options: VoiceprintOperatingPointOptions = {},
+): VoiceprintOperatingPoint {
+  const genuineScores: number[] = [];
+  const impostorScores: number[] = [];
+  for (const row of report.rows) {
+    if (!Number.isFinite(row.similarity) || row.similarity <= -1) {
+      continue;
+    }
+    if (row.expected === "owner") {
+      genuineScores.push(row.similarity);
+    } else if (row.expected === "non_owner" || row.expected === "assistant_leakage") {
+      impostorScores.push(row.similarity);
+    }
+  }
+  return computeVoiceprintOperatingPoint(genuineScores, impostorScores, options);
+}
+
+/**
+ * ADDITIVE. Format the operating point for the report tail. Returns an empty
+ * string when there was insufficient labeled data (so existing report output is
+ * unchanged unless a caller opts to append this).
+ */
+export function formatVoiceprintOperatingPoint(point: VoiceprintOperatingPoint): string {
+  if (point.kind === "insufficient_data") {
+    return `Operating point: insufficient labeled data (${point.reason}; genuine=${point.genuineCount}, impostor=${point.impostorCount}).\n`;
+  }
+  return [
+    "Operating point (fixture calibration — PROVISIONAL, not a production cohort):",
+    `  genuine=${point.genuineCount}, impostor=${point.impostorCount}, space=${point.scoreSpace}`,
+    `  EER=${point.eer.rate.toFixed(4)} at threshold=${point.eer.threshold.toFixed(4)} (FAR=${point.eer.far.toFixed(4)}, FRR=${point.eer.frr.toFixed(4)})`,
+    `  Recommended (targetFar=${point.targets.targetFar}, targetFrr=${point.targets.targetFrr}): ownerAccept=${point.recommended.ownerAccept.toFixed(4)}, ownerPossible=${point.recommended.ownerPossible.toFixed(4)}`,
+  ].join("\n") + "\n";
+}
+
+function validateManifest(manifest: VoiceprintManifest): void {
+  if (manifest.version !== 1) {
+    throw new Error(`Unsupported voiceprint manifest version: ${String(manifest.version)}.`);
+  }
+  if (!manifest.owner?.enrollment?.length) {
+    throw new Error("Voiceprint manifest needs at least one owner enrollment source.");
+  }
+  if (!Array.isArray(manifest.samples)) {
+    throw new Error("Voiceprint manifest samples must be an array.");
+  }
+  if (manifest.samples.length === 0) {
+    throw new Error("Voiceprint manifest needs at least one sample.");
+  }
+
+  const enrollmentIds = new Set<string>();
+  for (const [index, source] of manifest.owner.enrollment.entries()) {
+    if (!source?.id?.trim()) {
+      throw new Error(`Voiceprint owner enrollment at index ${index} requires id.`);
+    }
+    if (enrollmentIds.has(source.id)) {
+      throw new Error(`Duplicate voiceprint owner enrollment id: ${source.id}.`);
+    }
+    enrollmentIds.add(source.id);
+  }
+
+  const sampleIds = new Set<string>();
+  for (const [index, sample] of manifest.samples.entries()) {
+    if (!sample?.id?.trim()) {
+      throw new Error(`Voiceprint sample at index ${index} requires id.`);
+    }
+    if (sampleIds.has(sample.id)) {
+      throw new Error(`Duplicate voiceprint sample id: ${sample.id}.`);
+    }
+    sampleIds.add(sample.id);
+    if (!VALID_EXPECTED_LABELS.has(sample.expected)) {
+      throw new Error(
+        `Voiceprint sample "${sample.id}" has invalid expected label: ${String(sample.expected)}.`,
+      );
+    }
+  }
+}
+
+function assessDecision(
+  expected: VoiceprintExpectedLabel,
+  decision: VoiceprintDecision,
+): Pick<VoiceprintScoreRow, "passed" | "risk"> {
+  if (expected === "unknown") {
+    return { passed: null, risk: "unlabeled" };
+  }
+
+  if (expected === "owner") {
+    if (decision === "owner_speaking") {
+      return { passed: true, risk: "ok" };
+    }
+    if (decision === "possible_owner") {
+      return { passed: false, risk: "possible_owner_miss" };
+    }
+    return { passed: false, risk: "false_reject" };
+  }
+
+  if (decision === "owner_speaking") {
+    return { passed: false, risk: "false_accept" };
+  }
+  if (decision === "possible_owner") {
+    return { passed: false, risk: "possible_false_accept" };
+  }
+  return { passed: true, risk: "ok" };
+}
+
+function summarizeRows(rows: VoiceprintScoreRow[]): VoiceprintScoreReport["summary"] {
+  // Single pass over rows building every bucket at once. Each accumulator field
+  // increments under the same predicate the old per-bucket `.filter(...).length`
+  // used, so the counts are identical to the prior six separate passes.
+  return rows.reduce(
+    (summary, row) => {
+      summary.total += 1;
+      if (row.passed === true) summary.passed += 1;
+      if (row.passed === false) summary.failed += 1;
+      if (row.passed === null) summary.unlabeled += 1;
+      if (row.risk === "false_accept") summary.falseAccepts += 1;
+      if (row.risk === "false_reject") summary.falseRejects += 1;
+      if (row.risk === "possible_false_accept") summary.possibleFalseAccepts += 1;
+      return summary;
+    },
+    {
+      total: 0,
+      passed: 0,
+      failed: 0,
+      unlabeled: 0,
+      falseAccepts: 0,
+      falseRejects: 0,
+      possibleFalseAccepts: 0,
+    },
+  );
+}
+
+function validateLoadedEmbeddingVectors(
+  embeddings: readonly { sourceId: string; vector: number[]; dim: number }[],
+  kind: string,
+  expectedDim?: number,
+): void {
+  for (const embedding of embeddings) {
+    if (!isUsableEmbeddingVector(embedding.vector)) {
+      throw new Error(
+        `Voiceprint ${kind} "${embedding.sourceId}" produced an invalid embedding.`,
+      );
+    }
+    if (embedding.dim !== embedding.vector.length) {
+      throw new Error(
+        `Voiceprint ${kind} "${embedding.sourceId}" has inconsistent embedding dimensions.`,
+      );
+    }
+    if (expectedDim !== undefined && embedding.vector.length !== expectedDim) {
+      throw new Error(
+        `Voiceprint ${kind} "${embedding.sourceId}" has dimension ${embedding.vector.length}; expected ${expectedDim}.`,
+      );
+    }
+  }
+}

@@ -47,3 +47,9 @@ services/deepface/.venv/
 services/deepface/facedb/
 __pycache__/
 *.pyc
+
+# Voiceprint real-model e2e assets (large binaries + real speaker audio; never committed).
+# Fetched on demand by scripts/setup-voiceprint-model.sh for the gated onnx e2e.
+fixtures/voiceprint/models/
+fixtures/voiceprint/audio/
+fixtures/voiceprint/.venv/

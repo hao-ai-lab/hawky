@@ -27,12 +27,35 @@ enum ChatEvent: Sendable, Equatable {
     case whenArmed(intentionId: String, fireDate: String, title: String, body: String)
     /// #482: gateway disarmed or delivered a timed intention — device should cancel the pending notification.
     case whenDisarmed(intentionId: String)
+    /// WS2 live owner recognition (SECONDARY channel): edge-triggered scalar-only
+    /// identity push. Event name `voiceprint.identity` (NOT `agent.`-prefixed).
+    /// Payload: { sessionKey, verdict, decision?, confidence, at }.
+    case voiceprintIdentity(sessionKey: String, verdict: String, decision: String?, confidence: Double?, at: String)
 }
 
 // Maps a raw EventFrame to a ChatEvent. Unknown `event` names return nil so the
 // caller can log drift (Hardening note: unknown frames) without crashing the read loop.
 enum EventFrameDecoder {
     static func decode(_ frame: EventFrame) -> ChatEvent? {
+        // WS2 live owner recognition: the `voiceprint.identity` broadcast has NO
+        // `agent.` prefix, so decode it BEFORE the prefix guard below. FAIL-SAFE: a
+        // payload missing the required `sessionKey`/`verdict`/`at` scalars returns
+        // nil (the frame is safely ignored), never a false identity.
+        if frame.event == "voiceprint.identity" {
+            guard
+                let o = frame.payload?.asObject,
+                let sessionKey = o["sessionKey"]?.asString,
+                let verdict = o["verdict"]?.asString,
+                let at = o["at"]?.asString
+            else { return nil }
+            return .voiceprintIdentity(
+                sessionKey: sessionKey,
+                verdict: verdict,
+                decision: o["decision"]?.asString,
+                confidence: o["confidence"]?.asNumber,
+                at: at
+            )
+        }
         guard frame.event.hasPrefix("agent.") else { return nil }
         let suffix = String(frame.event.dropFirst("agent.".count))
         let obj = frame.payload?.asObject
@@ -121,6 +144,10 @@ private extension JSONValue {
     }
     var asArray: [JSONValue]? {
         if case .array(let a) = self { return a }
+        return nil
+    }
+    var asNumber: Double? {
+        if case .number(let n) = self { return n }
         return nil
     }
 }
