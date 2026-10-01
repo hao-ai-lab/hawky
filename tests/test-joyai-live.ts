@@ -68,7 +68,7 @@ test("Joy microphone passes bounded WAV to configured ASR, then words to VLM", a
     await a.start(); for (let n = 0; n < 3; n++) a.input({ type: "audio", data: voiced.toString("base64") });
     for (let n = 0; n < 6; n++) a.input({ type: "audio", data: Buffer.alloc(3200).toString("base64") });
     await tick();
-    expect(requests.find(r => r.url.endsWith("transcriptions")).init.body.get("model")).toContain("Qwen3-ASR");
+    expect(requests.find(r => r.url.endsWith("transcriptions")).init.body.get("model")).toBe("Qwen/Qwen3-ASR-1.7B");
     expect(events.some(e => e.role === "user" && e.text === "Describe my cup")).toBe(true);
     expect(events.some(e => e.role === "assistant" && e.text === "A blue cup.")).toBe(true);
   } finally { await a.close(); }

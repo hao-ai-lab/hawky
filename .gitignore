@@ -47,3 +47,6 @@ services/deepface/.venv/
 services/deepface/facedb/
 __pycache__/
 *.pyc
+
+# CI timing and test reports
+test-results/

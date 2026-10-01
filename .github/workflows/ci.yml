@@ -5,94 +5,63 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  checks: write
   contents: read
 
 jobs:
-  test:
-    name: Unit, Integration & Web Tests
+  check:
+    name: ${{ matrix.task }}
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        task: ["core:0", "core:1", "core:2", "core:3", "core:4", "core:5", "core:6", "core:7", "core:8", "core:9", "core:10", "core:11", "core:12", "core:13", "core:14", "core:15", "core:16", "core:17", "core:18", "core:19", "core:20", "core:21", "core:22", "core:23", "core:24", "core:25", "core:26", "core:27", "core:28", "core:29", "core:30", "core:31", "core:32", "core:33", "core:34", "core:35", "core:36", "core:37", "core:38", "core:39", "core:40", "core:41", "core:42", "core:43", "core:44", "core:45", "core:46", "core:47", "core:48", "core:49", "core:50", "core:51", "core:52", "core:53", "core:54", "core:55", "core:56", "core:57", "core:58", "core:59", "core:60", "core:61", "core:62", "core:63", "typecheck", "build", "boundaries", "web-build", "web-ios-build", "web:1", "web:2", "web:3", "web:4", "web-ios:1", "web-ios:2", "web-ios:3", "web-ios:4", "web-ios:5", "web-ios:6", "web-ios:7", "web-ios:8"]
     steps:
       - uses: actions/checkout@v4
-
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
-
-      - name: Cache bun dependencies
-        uses: actions/cache@v4
+          bun-version: 1.3.11
+      - uses: actions/cache@v4
         with:
-          path: |
-            ~/.bun/install/cache
-            node_modules
-            web/node_modules
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock', 'web/bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Unit tests
-        run: |
-          mkdir -p test-results
-          bun test --coverage --retry=2 --reporter=junit --reporter-outfile=test-results/unit.xml ./tests/test-*.ts ./tests/test-*.tsx ./tests/unit/*.test.ts
-
-      - name: Integration tests
-        run: bun test --coverage --reporter=junit --reporter-outfile=test-results/integration.xml ./tests/integration/*.ts
-
-      - name: Install web dependencies
-        run: cd web && bun install
-
-      - name: Web build (includes TypeScript typecheck)
-        run: cd web && bun run build
-
-      - name: Web tests
-        run: cd web && bunx vitest run --reporter=default --reporter=junit --outputFile=../test-results/web.xml
-
-      - name: Test report
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: Test Results
-          path: test-results/*.xml
-          reporter: java-junit
-
-  e2e:
-    name: E2E Tests
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Cache bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.bun/install/cache
-            node_modules
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: E2E tests
-        run: bun test --timeout 30000 --max-concurrency=1 ./tests/e2e-*.ts
+          path: ~/.bun/install/cache
+          key: bun-1.3.11-${{ runner.os }}-${{ hashFiles('bun.lock', 'web/bun.lock', 'web-ios/bun.lock') }}
+      - name: Install locked dependencies
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          TASK: ${{ matrix.task }}
+        run: |
+          case "$TASK" in
+            web-ios*) cd web-ios ;;
+            web*) cd web ;;
+          esac
+          bun install --frozen-lockfile
+      - name: Check (28 second execution budget)
+        env:
+          TASK: ${{ matrix.task }}
+        run: bun run ci:check "$TASK"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: timing-${{ strategy.job-index }}
+          path: test-results/*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  test:
+    # Preserve the existing required-check name while covering the whole matrix.
+    name: Unit, Integration & Web Tests
+    needs: check
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every shard to pass
+        env:
+          RESULT: ${{ needs.check.result }}
+        run: test "$RESULT" = success

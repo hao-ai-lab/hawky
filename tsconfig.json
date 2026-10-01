@@ -16,11 +16,23 @@
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": [
+        "./src/*"
+      ]
     },
     "baseUrl": ".",
-    "types": ["bun-types"]
+    "types": [
+      "bun-types"
+    ]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
-  "exclude": ["node_modules", "dist", "web"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "scripts/ci/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "web"
+  ]
 }

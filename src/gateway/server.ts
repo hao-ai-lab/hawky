@@ -1,3 +1,4 @@
+import { connectWebSocket } from "../platform/websocket.js";
 import { timingSafeEqual } from "node:crypto";
 import { WorkspaceSetup, workspaceSetupPage } from "./workspace-setup.js";
 // =============================================================================
@@ -337,7 +338,7 @@ export class GatewayServer {
         open(ws) {
           if (ws.data?.proxyTarget) {
             const pending: Array<string | Buffer> = [];
-            const upstream = new WebSocket(ws.data.proxyTarget, { headers: ws.data.proxyToken ? { "X-Hawky-Workspace-Token": ws.data.proxyToken } : {} });
+            const upstream = connectWebSocket(ws.data.proxyTarget, ws.data.proxyToken ? { "X-Hawky-Workspace-Token": ws.data.proxyToken } : {});
             if (self.appAuth && ws.data.proxyAuthCookie) ws.data.proxyAuthTimer = setInterval(() => {
               if (!self.appAuth?.userFromRequest(new Request("http://localhost", { headers: { Cookie: ws.data.proxyAuthCookie! } }))) ws.close(1008, "Session expired");
             }, 5000);

@@ -1,7 +1,5 @@
-import { VenusAdapter } from "../live/providers/venus.js";
-import { JoyAIAdapter } from "../live/providers/joyai.js";
+import { createStreamAdapter } from "../live/provider-factory.js";
 import { loadConfig } from "../storage/config.js";
-import { GeminiLiveAdapter } from "../live/providers/gemini.js";
 import type { StreamAdapter, StreamEvent, StreamInput, StreamOptions, StreamTaskUpdate } from "../live/stream-contracts.js";
 import type { ConversationTurn } from "../live/contracts.js";
 import type { GatewayServer } from "./server.js";
@@ -71,7 +69,8 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
     const p = raw as any; validateStreamCreate(p);
     if (active.has(p.id)) throw new MethodError("CONFLICT", "Connection ID already exists");
     const isGemini = p.model.startsWith("gemini-");
-    const key = p.gemini_api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || loadConfig().api_keys.gemini;
+    const config = loadConfig();
+    const key = p.gemini_api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || config.api_keys.gemini;
     if (!factory && isGemini && (typeof key !== "string" || !key.trim())) throw new MethodError("UNAVAILABLE", "Gemini Live needs a Gemini API key in Live settings or on the gateway.");
     if (!(isGemini && p.gemini_api_key)) enforceRealtimeMintQuota(`stream:${conn.deviceTokenId ?? "local"}:${conn.clientId}`);
     for (const s of active.values()) if (s.conn === conn && s.ownerSession === p.ownerSession) await s.close();
@@ -123,18 +122,7 @@ export function registerLiveStreamMethods(server: GatewayServer, tasks: Delegati
         if (!session.closed) tasks.delivery(conn, { ownerSession: p.ownerSession, id: taskId, responseId, state });
       },
     };
-    const joy = loadConfig().live_providers?.joyai;
-    const adapter: StreamAdapter = factory ? factory(options, p) : isGemini ? new GeminiLiveAdapter(options, key) : p.model === "joyai-vl-interaction" ? new JoyAIAdapter(options, {
-      ...joy, url: process.env.HAWKY_JOYAI_URL || joy?.url || "http://127.0.0.1:8070",
-      api_key: process.env.HAWKY_JOYAI_API_KEY || joy?.api_key,
-      asr_url: process.env.HAWKY_JOYAI_ASR_URL || joy?.asr_url,
-      asr_api_key: process.env.HAWKY_JOYAI_ASR_API_KEY || joy?.asr_api_key,
-      tts_url: process.env.HAWKY_JOYAI_TTS_URL || joy?.tts_url,
-      tts_api_key: process.env.HAWKY_JOYAI_TTS_API_KEY || joy?.tts_api_key,
-    }) : new VenusAdapter(options, {
-      url: process.env.HAWKY_VENUS_URL || loadConfig().live_providers?.venus?.url || "http://127.0.0.1:8033",
-      apiKey: process.env.HAWKY_VENUS_API_KEY || loadConfig().live_providers?.venus?.api_key,
-    });
+    const adapter = factory ? factory(options, p) : createStreamAdapter(options, config.live_providers, process.env, key);
     session = { conn, ownerSession: p.ownerSession, adapter, closed: false, closing: false, seen: new Set(), completed: new Set(), history: [...p.history],
       lease: setTimeout(() => void session.close(), 45000),
       close: () => {

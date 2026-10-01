@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ConversationTurn } from "./contracts.js";
 import { GptLiveTranscript, type LiveCaption } from "./gpt-live-transcript.js";
 import type { LiveRoute, RoutingSnapshot } from "./gpt-live-router.js";
-import type { DelegationTask, DelegationRuntime } from "../gateway/delegation-types.js";
+import type { DelegationTask, DelegationRuntime } from "../contracts/delegation.js";
 
 export interface LiveTaskPort {
   list(): DelegationTask[];
