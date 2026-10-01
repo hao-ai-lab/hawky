@@ -317,6 +317,241 @@ import Foundation
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    // MARK: - #18 live turn-taking cadence defaults
+
+    /// #18: a fresh install now defaults to semantic VAD (eagerness auto) so short
+    /// mid-sentence pauses don't trigger a reply.
+    @Test func liveTurnDetectionDefaultsToSemanticVAD() {
+        let suiteName = "live-turn-default-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let config = LiveProfileDefaults.load(defaults: defaults)
+
+        #expect(config.turnDetectionMode == .semanticVAD)
+        #expect(config.semanticVADEagerness == .auto)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    /// #18 (review finding, line 1645): a LEGACY install's persisted `server_vad`
+    /// is genuinely ambiguous — it is indistinguishable from a deliberate Server VAD
+    /// choice, since the old build persisted the default too. Silently flipping it
+    /// would stomp a real user choice, so the fix PRESERVES the stored value on a
+    /// legacy install (detected via the provider key the old `save` always wrote).
+    /// The new semantic default reaches only fresh installs.
+    @Test func liveTurnDetectionPreservesLegacyServerVADChoice() {
+        let suiteName = "live-turn-legacy-preserve-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        // Simulate a pre-#18 legacy install: provider key present (every old `save`
+        // wrote it) AND server_vad persisted, migration flag absent.
+        defaults.set(LiveProviderKind.openAIRealtime.rawValue, forKey: "live.provider")
+        defaults.set(LiveTurnDetectionMode.serverVAD.rawValue, forKey: "live.turnDetectionMode")
+
+        let loaded = LiveProfileDefaults.load(defaults: defaults)
+        // NOT stomped to semantic_vad: the legacy choice survives.
+        #expect(loaded.turnDetectionMode == .serverVAD)
+    }
+
+    /// #18: an ORPHANED `server_vad` key with NO provider key is treated as a fresh
+    /// install (fail-closed: it never ran the old build's `save`, which would have
+    /// written the provider key), so it takes the new semantic default rather than a
+    /// stale VAD value. Guards against the fix accidentally honoring stray keys.
+    @Test func liveTurnDetectionIgnoresOrphanedServerVADOnFreshInstall() {
+        let suiteName = "live-turn-orphan-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        // No provider key -> not a legacy install -> orphaned VAD key ignored.
+        defaults.set(LiveTurnDetectionMode.serverVAD.rawValue, forKey: "live.turnDetectionMode")
+
+        let loaded = LiveProfileDefaults.load(defaults: defaults)
+        #expect(loaded.turnDetectionMode == .semanticVAD)
+    }
+
+    /// #18: a user who DELIBERATELY picks Server VAD and saves keeps it across
+    /// reloads. A full `save` writes the provider key, so the reload sees a legacy
+    /// install and honors the stored value.
+    @Test func liveTurnDetectionDeliberateServerVADSurvivesReload() {
+        let suiteName = "live-turn-deliberate-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var config = LiveSessionConfig()
+        config.turnDetectionMode = .serverVAD
+        LiveProfileDefaults.save(config, defaults: defaults)
+        let reloaded = LiveProfileDefaults.load(defaults: defaults)
+
+        #expect(reloaded.turnDetectionMode == .serverVAD)
+    }
+
+    /// #18: the response cap now defaults to a voice-friendly 800 tokens.
+    @Test func liveMaxResponseTokensDefaultsToVoiceCap() {
+        let suiteName = "live-maxtok-default-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let config = LiveProfileDefaults.load(defaults: defaults)
+
+        #expect(config.maxResponseOutputTokens == 800)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    /// #18: a deliberate "unlimited" (nil) choice must survive a save/reload — it is
+    /// persisted as the sentinel 0 so it is distinct from a never-set fresh install
+    /// (which would otherwise re-apply the 800 default).
+    @Test func liveMaxResponseTokensUnlimitedSurvivesReload() {
+        let suiteName = "live-maxtok-unlimited-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        var config = LiveSessionConfig()
+        config.maxResponseOutputTokens = nil
+
+        LiveProfileDefaults.save(config, defaults: defaults)
+        let reloaded = LiveProfileDefaults.load(defaults: defaults)
+
+        #expect(reloaded.maxResponseOutputTokens == nil)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    /// #18 (review finding, line 1710): a LEGACY install whose user had chosen
+    /// "Unlimited" on the OLD build has NO persisted token key (old `save` did
+    /// removeObject for nil). Resolving an absent key to the new 800 default would
+    /// silently cap them. The fix detects the legacy install (provider key present)
+    /// and resolves an absent token key to nil (unlimited), preserving old behavior.
+    @Test func liveMaxResponseTokensLegacyUnlimitedStaysUnlimited() {
+        let suiteName = "live-maxtok-legacy-unlimited-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        // Legacy install: provider key present, NO token key (old nil-as-absent).
+        defaults.set(LiveProviderKind.openAIRealtime.rawValue, forKey: "live.provider")
+
+        let loaded = LiveProfileDefaults.load(defaults: defaults)
+        // NOT silently capped at 800: the old "unlimited" behavior is preserved.
+        #expect(loaded.maxResponseOutputTokens == nil)
+    }
+
+    /// #18 (review finding, line 1731): the legacy-unlimited resolution must be
+    /// COMMITTED to disk on first load, not re-derived every time. The two legacy
+    /// token states are byte-identical on disk, so the chosen resolution has to be
+    /// persisted (sentinel 0) to (a) make the migration idempotent/durable and (b)
+    /// stop a future change to the legacy-detection heuristic from silently
+    /// re-deciding. After the first load the token key is present, so a SECOND load
+    /// takes the concrete sentinel-0 branch — independent of `isLegacyInstall` — and
+    /// still resolves to nil (unlimited).
+    @Test func liveMaxResponseTokensLegacyUnlimitedIsPersistedForward() {
+        let suiteName = "live-maxtok-legacy-persist-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        // Legacy install: provider key present, NO token key.
+        defaults.set(LiveProviderKind.openAIRealtime.rawValue, forKey: "live.provider")
+        #expect(defaults.object(forKey: "live.maxResponseOutputTokens") == nil)
+
+        let first = LiveProfileDefaults.load(defaults: defaults)
+        #expect(first.maxResponseOutputTokens == nil)
+        // The resolution is now committed as the sentinel 0, not left absent.
+        #expect(defaults.object(forKey: "live.maxResponseOutputTokens") != nil)
+        #expect(defaults.integer(forKey: "live.maxResponseOutputTokens") == 0)
+
+        // A second load reaches the concrete sentinel-0 branch and still yields nil,
+        // even if we now remove the provider key (heuristic can no longer re-decide).
+        defaults.removeObject(forKey: "live.provider")
+        let second = LiveProfileDefaults.load(defaults: defaults)
+        #expect(second.maxResponseOutputTokens == nil)
+    }
+
+    /// #18 (review finding, line 1665): the vestigial semantic-VAD migration version
+    /// key was removed. It was written-but-never-read, so it did nothing functional
+    /// while inviting a future dev to treat it as a real one-time guard. Regression:
+    /// a fresh load must NOT resurrect any `live.turnDetection.semanticDefault.v1`
+    /// key (the legacy-vs-fresh discrimination is done entirely by provider-key
+    /// presence, and the flip is idempotent by construction).
+    @Test func liveSemanticVADMigrationKeyIsNotWritten() {
+        let suiteName = "live-turn-nokey-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        _ = LiveProfileDefaults.load(defaults: defaults)
+
+        #expect(defaults.object(forKey: "live.turnDetection.semanticDefault.v1") == nil)
+    }
+
+    /// #18: a FRESH install (no provider key, no token key) takes the new 800 voice
+    /// default — the legacy-unlimited preservation must not leak into fresh installs.
+    @Test func liveMaxResponseTokensFreshInstallTakesVoiceDefault() {
+        let suiteName = "live-maxtok-fresh-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let loaded = LiveProfileDefaults.load(defaults: defaults)
+        #expect(loaded.maxResponseOutputTokens == 800)
+    }
+
+    /// #18: an explicit numeric cap round-trips and is clamped to the valid range.
+    @Test func liveMaxResponseTokensNumericCapPersists() {
+        let suiteName = "live-maxtok-numeric-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        var config = LiveSessionConfig()
+        config.maxResponseOutputTokens = 1_200
+
+        LiveProfileDefaults.save(config, defaults: defaults)
+        let reloaded = LiveProfileDefaults.load(defaults: defaults)
+
+        #expect(reloaded.maxResponseOutputTokens == 1_200)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    /// #18: the WebRTC `session.update` cap value maps nil -> "inf" and a numeric
+    /// cap -> a whole number (integer-only field in the Realtime API). MainActor
+    /// because the provider (and thus its static helper) is MainActor-isolated.
+    @MainActor
+    @Test func liveWebRTCMaxResponseTokensValueMapping() {
+        var config = LiveSessionConfig()
+
+        config.maxResponseOutputTokens = 800
+        #expect(
+            PipecatOpenAIRealtimeLiveSessionProvider.maxResponseOutputTokensValue(config: config)
+                == .number(800))
+
+        config.maxResponseOutputTokens = nil
+        #expect(
+            PipecatOpenAIRealtimeLiveSessionProvider.maxResponseOutputTokensValue(config: config)
+                == .string("inf"))
+
+        // Above-range caps clamp to 4096 rather than being forwarded verbatim.
+        config.maxResponseOutputTokens = 99_999
+        #expect(
+            PipecatOpenAIRealtimeLiveSessionProvider.maxResponseOutputTokensValue(config: config)
+                == .number(4096))
+    }
+
+    /// #18 (review finding, line 2123): the gateway-BROKER client-secret mint path
+    /// must NOT send `max_response_output_tokens`, matching the direct mint path.
+    /// The GA `/v1/realtime/client_secrets` session schema rejects it, so leaving it
+    /// on the broker path was a latent inconsistency that would resurface the mint
+    /// rejection if a future broker refactor stopped stripping it. The cap is applied
+    /// by the post-connect `session.update` instead. MainActor because the provider
+    /// (and thus its static helper) is MainActor-isolated.
+    @MainActor
+    @Test func liveBrokerClientSecretBodyOmitsMaxResponseOutputTokens() {
+        var config = LiveSessionConfig()
+        config.maxResponseOutputTokens = 800
+        let body = OpenAIRealtimeLiveSessionProvider.brokerClientSecretBody(config: config)
+        #expect(body["max_response_output_tokens"] == nil)
+
+        // Even an explicit "unlimited" (nil) must not resurrect the field.
+        config.maxResponseOutputTokens = nil
+        let unlimitedBody = OpenAIRealtimeLiveSessionProvider.brokerClientSecretBody(config: config)
+        #expect(unlimitedBody["max_response_output_tokens"] == nil)
+    }
+
     // Core of the bug fix: how a gateway reachability result maps to session state.
     @Test func bridgeReachableProducesConnected() {
         #expect(LiveSessionStore.bridgeStartDecision(for: .skipped, required: false) == .connected)

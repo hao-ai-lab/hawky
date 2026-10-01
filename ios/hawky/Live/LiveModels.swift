@@ -448,7 +448,7 @@ enum LivePromptPreset: String, CaseIterable, Identifiable, Equatable {
     var defaultInstructions: String {
         switch self {
         case .concise:
-            return "You are Hawky Live, a concise realtime assistant. Answer directly, keep responses short, and ask one clarifying question only when needed."
+            return "You are Hawky Live, a concise realtime assistant. Answer directly. Speak in 1-3 short sentences per turn; for lists or steps, give one item and offer to continue. Ask one clarifying question only when needed."
         case .fieldObserver:
             return "You are Hawky Live, helping during an ambient field session. Notice useful visual or audio context, summarize uncertainty plainly, and keep guidance practical."
         case .debugPartner:
@@ -683,7 +683,16 @@ struct LiveSessionConfig: Equatable {
     var visualDedupEnabled: Bool = false
     var cameraPosition: LiveCameraPosition = .back
     var mediaPersistenceMode: LiveMediaPersistenceMode = .local
-    var turnDetectionMode: LiveTurnDetectionMode = .serverVAD
+    /// #18: default to semantic VAD (eagerness auto). Server VAD's fixed
+    /// silence_duration_ms (500) fires on short mid-sentence pauses, so the model
+    /// barges in before the user finishes a thought. Semantic VAD waits on
+    /// end-of-utterance semantics instead, which matches natural speech cadence.
+    /// This new default applies to FRESH installs ONLY. A legacy install's stored
+    /// `server_vad` is NOT migrated: it is indistinguishable from a deliberate
+    /// Server VAD choice (the old build persisted the default too), and stomping a
+    /// real choice is worse than leaving an existing user on the old cadence. See
+    /// LiveProfileDefaults.load for the fail-closed legacy/fresh discrimination.
+    var turnDetectionMode: LiveTurnDetectionMode = .semanticVAD
     var vadThreshold: Double = 0.5
     var vadPrefixPaddingMs: Double = 300
     var vadSilenceDurationMs: Double = 500
@@ -702,7 +711,12 @@ struct LiveSessionConfig: Equatable {
     var promptInstructions: String = LivePromptPreset.concise.defaultInstructions
     var responseModality: LiveResponseModality = .text
     var reasoningEffort: LiveReasoningEffort = .low
-    var maxResponseOutputTokens: Int?
+    /// Voice-first default response cap (#18). Left unbounded (nil -> "inf") the
+    /// model would routinely produce paragraph-length replies that read fine as
+    /// text but drag as speech. ~800 tokens keeps a spoken turn to a few
+    /// sentences while still allowing a short list. User-overridable in Live
+    /// Settings (persisted; nil means the user explicitly chose "no cap").
+    var maxResponseOutputTokens: Int? = 800
     var toolChoice: LiveToolChoice = .auto
     var parallelToolCallsEnabled: Bool = true
     var realtimeVoice: LiveRealtimeVoice = .marin
@@ -1337,8 +1351,24 @@ enum LiveProfileDefaults {
     private static let echoCancellationEnabledKey = "live.echoCancellationEnabled"
     private static let showVisualFramesInTranscriptKey = "live.showVisualFramesInTranscript"
 
+    /// #18 legacy-install detection. Every `save` (old and new) unconditionally
+    /// writes `providerKey`, so its presence means this install has run before and
+    /// carries a persisted profile. Its ABSENCE means a genuinely fresh install
+    /// that has never saved. This is the one signal that lets the token/VAD
+    /// default-flip migrations tell "legacy install with an implicit old default"
+    /// apart from "fresh install that should take the new struct default" — without
+    /// it, an absent per-setting key is ambiguous between the two. Read BEFORE any
+    /// migration writes, so callers must capture it at the top of `load`.
+    static func hasPersistedProfile(defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: providerKey) != nil
+    }
+
     static func load(defaults: UserDefaults = .standard) -> LiveSessionConfig {
         var config = LiveSessionConfig()
+        // Captured before any migration mutates defaults: distinguishes a legacy
+        // install (has run the old build, carries implicit old defaults) from a
+        // fresh install (should take the new struct defaults). See #18 migrations.
+        let isLegacyInstall = hasPersistedProfile(defaults: defaults)
         if let raw = defaults.string(forKey: providerKey),
            let provider = LiveProviderKind(rawValue: raw) {
             config.provider = provider == .mock ? .openAIRealtime : provider
@@ -1387,7 +1417,20 @@ enum LiveProfileDefaults {
         } else if storedMediaPersistenceMode == "remote" {
             config.mediaPersistenceMode = .liveUpload
         }
-        if let raw = defaults.string(forKey: turnDetectionModeKey),
+        // #18 default flip: turn detection default moved server_vad -> semantic_vad
+        // (see LiveSessionConfig.turnDetectionMode). Because `save` always persists
+        // turnDetectionMode, a legacy install's stored `server_vad` is genuinely
+        // ambiguous — it could be the OLD default OR a deliberate choice, and the
+        // two are indistinguishable in persisted state. Silently flipping it would
+        // stomp a real user choice, so we DO NOT auto-migrate legacy installs: we
+        // honor whatever they stored. The new semantic_vad default reaches only
+        // FRESH installs, via the struct default, since they have no stored value.
+        // A fresh install (no providerKey) that somehow has an orphaned VAD key is
+        // treated as fresh and left to the struct default too. No versioned
+        // migration flag is used: the flip is idempotent by construction — it is
+        // re-derived from `isLegacyInstall` (providerKey presence) on every load —
+        // so a one-time `.vN` guard would be dead state that never gates anything.
+        if isLegacyInstall, let raw = defaults.string(forKey: turnDetectionModeKey),
            let mode = LiveTurnDetectionMode(rawValue: raw) {
             config.turnDetectionMode = mode
         }
@@ -1447,7 +1490,31 @@ enum LiveProfileDefaults {
         }
         if defaults.object(forKey: maxResponseOutputTokensKey) != nil {
             let tokens = defaults.integer(forKey: maxResponseOutputTokensKey)
-            config.maxResponseOutputTokens = min(max(tokens, 1), 4_096)
+            // Sentinel 0 == user explicitly chose "unlimited" (see save()). Any
+            // other stored value is a real cap; clamp to the valid range.
+            config.maxResponseOutputTokens = tokens == 0 ? nil : min(max(tokens, 1), 4_096)
+        } else if isLegacyInstall {
+            // #18: the field gained a non-nil voice default (800). On the OLD build
+            // maxResponseOutputTokens defaulted to nil (unlimited) and `save` did
+            // removeObject for nil, so a legacy install with NO stored key had an
+            // effective value of "unlimited". Preserving that here means we resolve
+            // an absent key to nil for legacy installs rather than silently capping
+            // them at the new 800 default. Fresh installs (no providerKey) fall
+            // through and keep the struct default of 800. This is fail-closed on the
+            // side of not silently shrinking an existing user's spoken replies.
+            //
+            // The two legacy states — "deliberately chose Unlimited" and "never
+            // touched the setting" — are BYTE-IDENTICAL on disk (old `save`
+            // removeObject'd nil in both cases), so the distinguishing bit is
+            // irrecoverably lost; we cannot separate them and must pick one. We COMMIT
+            // this resolution to disk (sentinel 0) instead of re-deriving it every
+            // load: that makes the migration idempotent and durable, and stops a
+            // future change to the legacy-detection heuristic from silently
+            // re-deciding for these users. Once committed, the key is present, so all
+            // subsequent loads take the sentinel-0 branch above (never this one) and a
+            // later explicit user choice cleanly overwrites a concrete value.
+            config.maxResponseOutputTokens = nil
+            defaults.set(0, forKey: maxResponseOutputTokensKey)
         }
         if let raw = defaults.string(forKey: toolChoiceKey),
            let choice = LiveToolChoice(rawValue: raw) {
@@ -1600,10 +1667,16 @@ enum LiveProfileDefaults {
         defaults.set(config.promptInstructions, forKey: promptInstructionsKey)
         defaults.set(config.responseModality.rawValue, forKey: responseModalityKey)
         defaults.set(config.reasoningEffort.rawValue, forKey: reasoningEffortKey)
+        // Persist an explicit "unlimited" (nil) as the sentinel 0 rather than
+        // removing the key. #18 gave the field a non-nil voice default (800), so
+        // an absent key now means "fresh install -> apply default", NOT "user
+        // wants no cap". Writing 0 keeps a deliberate Unlimited choice distinct
+        // from never-set so it survives a reload. 0 is never a valid cap (the
+        // range clamps to 1...4096), so it is a safe sentinel.
         if let maxResponseOutputTokens = config.maxResponseOutputTokens {
             defaults.set(maxResponseOutputTokens, forKey: maxResponseOutputTokensKey)
         } else {
-            defaults.removeObject(forKey: maxResponseOutputTokensKey)
+            defaults.set(0, forKey: maxResponseOutputTokensKey)
         }
         defaults.set(config.toolChoice.rawValue, forKey: toolChoiceKey)
         defaults.set(config.parallelToolCallsEnabled, forKey: parallelToolCallsEnabledKey)
