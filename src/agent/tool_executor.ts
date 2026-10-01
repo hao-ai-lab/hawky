@@ -9,7 +9,7 @@
 // Designed with clean phase boundaries so hooks can slot in later.
 // =============================================================================
 
-import { resolve, normalize } from "node:path";
+import { resolve, normalize, dirname, basename, join } from "node:path";
 import { realpathSync } from "node:fs";
 import type {
   ToolUseRequest,
@@ -27,6 +27,7 @@ import { parseSafeBash } from "./safe-bash-parser.js";
 import { extractCommandPieces, reduceBashForMatch, stripEnvAssignments, stripSafeWrappers, tokenizeShellLite } from "./safe-bash-reductions.js";
 import { evaluateRules, evaluateRulesAgainst, type ToolCallView, type RuleEvalResult } from "./permission-patterns.js";
 import type { LoopGuard } from "./loop_guard.js";
+import { getWorkspaceDir } from "../storage/workspace.js";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -888,14 +889,44 @@ function resolvePath(filePath: string, cwd: string): string {
 }
 
 /**
- * Try to canonicalize a path via realpath (follows symlinks).
- * Falls back to the lexical path if the file doesn't exist yet.
+ * Canonicalize a path via realpath (follows symlinks).
+ *
+ * `write_file` can target a leaf that does not exist yet, so a naive
+ * `realpathSync` on the full path throws ENOENT and would leave the path
+ * lexical. That is a symlink-escape hole: for `<ws>/link/new.txt` where
+ * `<ws>/link` is a symlink to a directory OUTSIDE the workspace, the leaf
+ * realpath fails, the lexical path still starts with `<ws>/`, and the
+ * containment check wrongly reports "in workspace" — yet the actual write
+ * (which resolves the symlink) lands outside.
+ *
+ * To close that, we walk UP to the deepest existing ancestor, realpath THAT
+ * (resolving any symlinked parent), then re-append the not-yet-created
+ * lexical segments. This means an in-tree symlink whose target is outside is
+ * canonicalized to its real out-of-tree location before containment is judged.
+ *
+ * The walk is iterative (not recursive) so a pathologically deep path can never
+ * overflow the stack — this helper runs on model-supplied file_path values.
  */
 function tryRealpath(p: string): string {
   try {
     return realpathSync(p);
   } catch {
-    return p; // File may not exist yet (write_file creating new file)
+    // Deepest ancestor(s) may not exist yet (write_file creating a new file).
+    // Climb until we find an existing ancestor, realpath it, then re-append the
+    // collected not-yet-created lexical segments.
+    const missing: string[] = [];
+    let cur = p;
+    for (;;) {
+      const parent = dirname(cur);
+      if (parent === cur) return normalize(p); // no existing ancestor at all
+      missing.unshift(basename(cur));
+      try {
+        const realParent = realpathSync(parent);
+        return normalize(resolve(realParent, ...missing));
+      } catch {
+        cur = parent;
+      }
+    }
   }
 }
 
@@ -1073,6 +1104,64 @@ function isSafeToolCall(
   }
 
   return { safe: false, suggestions: suggestions.length > 0 ? suggestions : undefined };
+}
+
+/**
+ * Headless hard-block floor: returns a human-readable reason when a tool call
+ * must be denied outright in a headless lane (cron / heartbeat / sub-agent,
+ * where there is no permission resolver), else null. This floor is evaluated
+ * BEFORE the needsPermission / config-allow logic, so it BEATS an explicit
+ * `permissions.allow` rule — a hallucinating model shouldn't be able to run
+ * `rm -rf /`, overwrite `~/.ssh/authorized_keys`, or `nodes` a dangerous
+ * `system.run` just because a broad allow rule was configured.
+ */
+function headlessHardBlockReason(call: ToolUseRequest): string | null {
+  // (a) bash — dangerous command (preserves prior behavior/message).
+  if (call.name === "bash") {
+    const command = call.input?.command;
+    if (typeof command === "string" && isDangerousCommand(command.trim())) {
+      return `Dangerous command blocked in headless mode: ${command.trim().slice(0, 80)}`;
+    }
+  }
+  // (b) write_file / edit_file — dangerous path (dangerous dirs/files/home-dotfiles).
+  if (call.name === "write_file" || call.name === "edit_file") {
+    const filePath = call.input?.file_path;
+    if (typeof filePath === "string" && isDangerousPath(filePath)) {
+      return `Dangerous file path blocked in headless mode: ${filePath}`;
+    }
+  }
+  // (c) nodes — dangerous inner `system.run` command.
+  if (call.name === "nodes"
+    && call.input?.action === "invoke"
+    && call.input?.command === "system.run") {
+    const innerCmd = nodesSystemRunCommand(call.input);
+    if (isDangerousCommand(innerCmd)) {
+      return `Dangerous node command blocked in headless mode: ${innerCmd.slice(0, 80)}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The file targets a headless memory lane legitimately writes via file tools:
+ * the `memory/` subtree (daily-log distillation, cron) and `MEMORY.md`
+ * (consolidation) at the workspace root. Those sessions' working_directory is
+ * the gateway launch cwd, NOT the workspace, so cwd containment alone would
+ * deny them.
+ *
+ * Scoped INTENTIONALLY to just these paths, NOT the whole workspace root:
+ * widening to getWorkspaceDir() would also admit `skills/` (workspace skills
+ * override bundled/user ones) and the bootstrap files injected into the system
+ * prompt (AGENTS.md, HEARTBEAT.md, SOUL.md, …), letting a headless lane
+ * reprogram itself or a later, higher-trust session.
+ */
+function isHeadlessMemoryWrite(filePath: string, cwd: string): boolean {
+  const wsDir = getWorkspaceDir();
+  const abs = tryRealpath(resolvePath(filePath, cwd));
+  const memoryDir = tryRealpath(join(wsDir, "memory"));
+  if (abs === memoryDir || abs.startsWith(memoryDir + "/")) return true;
+  if (abs === tryRealpath(join(wsDir, "MEMORY.md"))) return true;
+  return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -1273,23 +1362,23 @@ export async function executeTools(
       ) as typeof approvalReason;
     }
 
-    // Headless dangerous-command floor — independent of config rules.
+    // Headless hard-block floor — independent of config rules.
     // Cron / heartbeat / sub-agent runs have no human in the loop;
     // even an explicit `permissions.allow: ["Bash(rm *)"]` shouldn't
-    // execute `rm -rf /` from a hallucinating model in those
-    // contexts. Interactive sessions still trust the user's allow
-    // rule. (Codex final round P1.)
-    if (
-      context.headless &&
-      !permissionResolver &&
-      call.name === "bash" &&
-      typeof call.input?.command === "string" &&
-      isDangerousCommand(call.input.command.trim())
-    ) {
-      const content = `Dangerous command blocked in headless mode: ${call.input.command.trim().slice(0, 80)}`;
-      emit({ type: "tool_result", tool_use_id: call.id, name: call.name, content, is_error: true });
-      deniedResults.push({ tool_use_id: call.id, name: call.name, result: { type: "error", content } });
-      continue;
+    // execute `rm -rf /` (bash), write to `~/.ssh/authorized_keys`
+    // (file writes), or `nodes` a dangerous `system.run` from a
+    // hallucinating model in those contexts. Interactive sessions
+    // still trust the user's allow rule. This floor runs BEFORE the
+    // needsPermission/config-allow logic below, so it BEATS config
+    // allow rules. (Codex final round P1; extended for file paths and
+    // nodes system.run.)
+    if (context.headless && !permissionResolver) {
+      const reason = headlessHardBlockReason(call);
+      if (reason) {
+        emit({ type: "tool_result", tool_use_id: call.id, name: call.name, content: reason, is_error: true });
+        deniedResults.push({ tool_use_id: call.id, name: call.name, result: { type: "error", content: reason } });
+        continue;
+      }
     }
 
     const needsPermission =
@@ -1335,19 +1424,12 @@ export async function executeTools(
     }
 
     // In headless mode (sub-agents, heartbeat, cron) with no resolver,
-    // auto-approve most tools BUT deny dangerous commands.
+    // auto-approve most tools BUT deny the cases below. Dangerous bash
+    // commands, dangerous file paths, and dangerous `nodes` system.run
+    // commands are already denied by the headless hard-block floor above
+    // (which beats config allow), so they never reach here.
     // ask_user is excluded from headless tool lists separately (in loop.ts).
     if (needsPermission && !permissionResolver && context.headless) {
-      // Block dangerous bash commands even in headless mode
-      if (call.name === "bash" && call.input?.command) {
-        const cmd = String(call.input.command).trim();
-        if (isDangerousCommand(cmd)) {
-          const content = `Dangerous command blocked in headless mode: ${cmd.slice(0, 80)}`;
-          emit({ type: "tool_result", tool_use_id: call.id, name: call.name, content, is_error: true });
-          deniedResults.push({ tool_use_id: call.id, name: call.name, result: { type: "error", content } });
-          continue;
-        }
-      }
       // A `permissions.ask` rule explicitly says "always prompt the user
       // for this." Headless lanes have no user to prompt; silently auto-
       // approving would defeat the rule's purpose. Deny instead — that's
@@ -1358,8 +1440,38 @@ export async function executeTools(
         deniedResults.push({ tool_use_id: call.id, name: call.name, result: { type: "error", content } });
         continue;
       }
+      // Workspace envelope for file writes. Dangerous paths are already denied
+      // by the floor above (which beats allow); config-allowed writes never
+      // reach here (configAllowHonored makes needsPermission false). So this
+      // denies ONLY un-permitted out-of-workspace writes, while preserving
+      // in-workspace writes AND the config-allow opt-in for out-of-workspace
+      // paths.
+      //
+      // Additionally allow the specific memory targets a headless lane writes
+      // (memory/ subtree + MEMORY.md), which live under getWorkspaceDir() — a
+      // fixed path that is NOT the session working_directory (that is the
+      // gateway launch cwd). See isHeadlessMemoryWrite: the allowance is scoped
+      // to those paths only, NOT the whole workspace, so it cannot be used to
+      // plant workspace skills or bootstrap files.
+      if ((call.name === "write_file" || call.name === "edit_file")
+        && typeof call.input?.file_path === "string"
+        && !isPathInWorkingDirs(
+          call.input.file_path,
+          context.working_directory,
+          permissionCache.additionalDirectories,
+        )
+        && !isHeadlessMemoryWrite(call.input.file_path, context.working_directory)) {
+        const content = `File write outside the workspace blocked in headless mode: ${call.input.file_path}. Add the directory to permissions.allow to permit it.`;
+        emit({ type: "tool_result", tool_use_id: call.id, name: call.name, content, is_error: true });
+        deniedResults.push({ tool_use_id: call.id, name: call.name, result: { type: "error", content } });
+        continue;
+      }
       // Non-dangerous permissioned tools are auto-approved in headless mode.
-      // The parent/system already decided to delegate.
+      // The parent/system already decided to delegate. Note: headless bash
+      // remains denylist-based by design — a non-safe, non-dangerous command
+      // (e.g. `echo hello`, `mkdir x`) still falls through to auto-approve so
+      // sub-agents can run builds/tests; tightening it is a separate policy
+      // decision.
     }
 
     approved.push({ call, approvalReason });
