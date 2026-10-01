@@ -1,6 +1,6 @@
 import { openAIEndpoint } from "../agent/openai-endpoint.js";
 import type { ConversationTurn } from "./contracts.js";
-import type { DelegationTask } from "../gateway/delegation-types.js";
+import type { DelegationTask } from "../contracts/delegation.js";
 export interface LiveAction { action: "submit" | "cancel" | "revise" | "status"; taskId: string; request: string; readOnly: boolean }
 export interface LiveRoute { actions: LiveAction[]; clarification: string }
 export interface RoutingSnapshot { conversation: ConversationTurn[]; tasks: DelegationTask[] }

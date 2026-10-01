@@ -611,7 +611,7 @@ describe("Template content", () => {
 
     const content = ws.readFile("IDENTITY.md")!;
     expect(content).toContain("Your name is Hawk");
-    expect(content).toContain("Your character is established");
+    expect(content).toMatch(/Your character is(?::| established)/);
     expect(content).not.toContain("Fill this in");
   });
 

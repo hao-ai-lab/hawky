@@ -41,7 +41,9 @@
     "ios:ui-test": "cd ios && bash ./scripts/xcode-test.sh ui",
     "ios:test:report": "cd ios && bash ./scripts/xcode-test-report.sh ui",
     "ios:sim-smoke": "cd ios && ./scripts/sim-smoke.sh",
-    "ios:mcp:doctor": "npx -y -p xcodebuildmcp@2.6.2 xcodebuildmcp-doctor"
+    "ios:mcp:doctor": "npx -y -p xcodebuildmcp@2.6.2 xcodebuildmcp-doctor",
+    "ci:check": "bun scripts/ci/run.ts",
+    "ci:local": "bun scripts/ci/local.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",

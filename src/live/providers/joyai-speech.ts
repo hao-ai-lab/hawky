@@ -1,3 +1,4 @@
+import { connectWebSocket } from "../../platform/websocket.js";
 /** Deliberately small PCM endpointing layer for a model that has no audio input. */
 export class CueAudio {
   private pre: Buffer[] = [];
@@ -34,7 +35,7 @@ export function pcmWav(pcm: Buffer) {
 
 /** Joy's optional TTS adapter: config/append/commit, binary PCM, response.done. */
 export function joySpeech(url: string, text: string, voice: string, signal: AbortSignal,
-  chunk: (pcm: Buffer) => void, socketFactory = (url: string, apiKey?: string) => apiKey ? new WebSocket(url, { headers: { Authorization: `Bearer ${apiKey}` } }) : new WebSocket(url), apiKey?: string): Promise<void> {
+  chunk: (pcm: Buffer) => void, socketFactory = (url: string, apiKey?: string) => connectWebSocket(url, apiKey ? { Authorization: `Bearer ${apiKey}` } : {}), apiKey?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const ws = socketFactory(url, apiKey); ws.binaryType = "arraybuffer";
     let settled = false;
